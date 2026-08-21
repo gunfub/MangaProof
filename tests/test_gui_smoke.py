@@ -70,10 +70,13 @@ def test_full_workflow() -> None:
         doc = window.current_doc
         ids = [info.id for info in doc.layers]
 
-        # 回归：统计面板必须按富文本渲染（否则 HTML 源码会直接显示）
-        assert window.stats_panel.total_label.textFormat() == Qt.TextFormat.RichText
-        assert window.stats_panel.psd_counts_label.textFormat() == Qt.TextFormat.RichText
-        assert "<br/>" in window.stats_panel.total_label.text()
+        # 回归：统计面板卡片必须按富文本渲染（否则 HTML 源码会直接显示）
+        for cell in window.stats_panel.total_cells.values():
+            assert cell.textFormat() == Qt.TextFormat.RichText
+            assert "<br/>" in cell.text()
+        assert "通过" in window.stats_panel.total_cells["passed"].text()
+        assert "3" in window.stats_panel.total_cells["files"].text()  # 3 个 PSD
+        assert "8" in window.stats_panel.total_cells["layers"].text()  # 8 个图层
 
         # 回归：按钮动态显示当前绑定（需求 §30），重绑定后文案跟随更新
         assert "Enter" in window.issue_panel.pass_btn.text()
