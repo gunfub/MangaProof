@@ -70,6 +70,7 @@ class StatisticsPanel(QWidget):
         psd_layout.addLayout(self.chip_layout)
 
         self.psd_counts_label = QLabel("")
+        self.psd_counts_label.setTextFormat(Qt.TextFormat.RichText)
         psd_layout.addWidget(self.psd_counts_label)
         layout.addWidget(self.psd_group)
 
@@ -85,6 +86,8 @@ class StatisticsPanel(QWidget):
 
         self.total_label = QLabel("")
         self.total_label.setWordWrap(True)
+        # 显式声明富文本格式，避免 Qt 启发式（首个换行前无标签）误判为纯文本
+        self.total_label.setTextFormat(Qt.TextFormat.RichText)
         total_layout.addWidget(self.total_label)
 
         self.progress_bar = QProgressBar()
@@ -144,8 +147,9 @@ class StatisticsPanel(QWidget):
 
     def set_total(self, counts: dict) -> None:
         total = counts["total"]
+        # 富文本下换行用 <br/>（\n 会破坏标签解析）
         self.total_label.setText(
-            f"PSD：{counts['files']}　总图层：{total}\n"
+            f"PSD：{counts['files']}　总图层：{total}<br/>"
             f"<span style='color:{COLOR_PASS}'>通过：{counts['passed']}</span>　"
             f"<span style='color:{COLOR_FAIL}'>未通过：{counts['failed']}</span>　"
             f"<span style='color:{COLOR_WARN}'>未监制：{counts['unreviewed']}</span>　"

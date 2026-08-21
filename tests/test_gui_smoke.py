@@ -20,6 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from mangaproof.config.settings import SettingsManager
@@ -68,6 +69,11 @@ def test_full_workflow() -> None:
 
         doc = window.current_doc
         ids = [info.id for info in doc.layers]
+
+        # 回归：统计面板必须按富文本渲染（否则 HTML 源码会直接显示）
+        assert window.stats_panel.total_label.textFormat() == Qt.TextFormat.RichText
+        assert window.stats_panel.psd_counts_label.textFormat() == Qt.TextFormat.RichText
+        assert "<br/>" in window.stats_panel.total_label.text()
 
         # Enter → 通过并跳到下一个未监制
         window.mark_pass()
