@@ -20,3 +20,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mangaproof"]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.22.2",
+]
