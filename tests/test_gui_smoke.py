@@ -75,6 +75,24 @@ def test_full_workflow() -> None:
         assert window.stats_panel.psd_counts_label.textFormat() == Qt.TextFormat.RichText
         assert "<br/>" in window.stats_panel.total_label.text()
 
+        # 回归：按钮动态显示当前绑定（需求 §30），重绑定后文案跟随更新
+        assert "Enter" in window.issue_panel.pass_btn.text()
+        assert "/" in window.issue_panel.fail_btn.text()
+        assert "Ctrl+Return" in window.issue_panel.custom_btn.text()
+        assert "R" in window.issue_panel.add_btn.text()
+        assert "居中错误" in window.issue_panel.add_btn.toolTip()
+        assert "Enter" in window.hint_label.text() and "↑/↓" in window.hint_label.text()
+        window.settings.keybindings["pass_layer"] = "Ctrl+P"
+        window.settings.keybindings["fail_layer"] = "F2"
+        window._rebuild_shortcuts()
+        assert "Ctrl+P" in window.issue_panel.pass_btn.text()
+        assert "F2" in window.issue_panel.fail_btn.text()
+        window.settings.keybindings["pass_layer"] = "Return"
+        window.settings.keybindings["fail_layer"] = "/"
+        window._rebuild_shortcuts()
+        assert "Enter" in window.issue_panel.pass_btn.text()
+        assert "/" in window.issue_panel.fail_btn.text()
+
         # Enter → 通过并跳到下一个未监制
         window.mark_pass()
         app.processEvents()

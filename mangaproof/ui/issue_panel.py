@@ -73,12 +73,12 @@ class IssuePanel(QWidget):
         layout.addWidget(self.issue_list)
 
         add_row = QHBoxLayout()
-        self.add_btn = QPushButton("＋ 拖框添加问题 (R)")
+        self.add_btn = QPushButton("＋ 拖框添加问题")
         self.add_btn.clicked.connect(self.add_issue_requested.emit)
         add_row.addWidget(self.add_btn)
         layout.addLayout(add_row)
 
-        self.custom_btn = QPushButton("✎ 自定义批注 (Ctrl+Enter)")
+        self.custom_btn = QPushButton("✎ 自定义批注")
         self.custom_btn.clicked.connect(self.custom_comment_requested.emit)
         layout.addWidget(self.custom_btn)
 
@@ -113,6 +113,21 @@ class IssuePanel(QWidget):
 
     def set_hint(self, text: str) -> None:
         self.hint_label.setText(text)
+
+    def set_shortcut_labels(self, bindings: dict, issue_type_tips: str = "") -> None:
+        """动态显示当前绑定的快捷键（需求 §30）。
+
+        bindings: {"pass", "fail", "redraw", "custom", "cancel"} 快捷键文案；
+        issue_type_tips: 问题类型快捷键清单（显示在拖框按钮 tooltip）。
+        """
+        self.pass_btn.setText(f"✓ 通过 ({bindings.get('pass', 'Enter')})")
+        self.pass_btn.setToolTip(f"标记当前图层通过　快捷键：{bindings.get('pass', 'Enter')}")
+        self.fail_btn.setText(f"✗ 未通过 ({bindings.get('fail', '/')})")
+        self.fail_btn.setToolTip(f"标记当前图层未通过　快捷键：{bindings.get('fail', '/')}")
+        self.add_btn.setText(f"＋ 拖框添加问题 ({bindings.get('redraw', 'R')})")
+        self.custom_btn.setText(f"✎ 自定义批注 ({bindings.get('custom', 'Ctrl+Enter')})")
+        if issue_type_tips:
+            self.add_btn.setToolTip(issue_type_tips)
 
     def set_buttons_enabled(self, enabled: bool) -> None:
         self.pass_btn.setEnabled(enabled)

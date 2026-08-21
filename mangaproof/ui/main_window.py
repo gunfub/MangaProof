@@ -281,21 +281,36 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "最近打开", f"路径不存在：\n{path_str}")
             self._rebuild_recent_menu()
 
+    # 常用键的友好显示名（与设置对话框的 Qt 键名对应）
+    _DISPLAY_KEY_MAP = {
+        "Up": "↑", "Down": "↓", "Left": "←", "Right": "→",
+        "Return": "Enter", "Enter": "Enter",
+    }
+
+    @staticmethod
+    def _display_key(key: str) -> str:
+        return MainWindow._DISPLAY_KEY_MAP.get(key, key)
+
     def _update_shortcut_hints(self) -> None:
         kb = self.settings.keybindings
+        d = self._display_key
         self.hint_label.setText(
-            f"{kb.get('prev_psd', '↑')}↓ PSD　{kb.get('prev_layer', '←')}→ 图层　"
-            f"Enter 通过　/ 未通过　{kb.get('toggle_compare', 'Space')} 对比　"
-            f"Esc 取消　{kb.get('save_task', 'Ctrl+S')} 保存"
+            f"{d(kb.get('prev_psd', 'Up'))}/{d(kb.get('next_psd', 'Down'))} PSD　"
+            f"{d(kb.get('prev_layer', 'Left'))}/{d(kb.get('next_layer', 'Right'))} 图层　"
+            f"{d(kb.get('pass_layer', 'Return'))} 通过　"
+            f"{d(kb.get('fail_layer', '/'))} 未通过　"
+            f"{d(kb.get('toggle_compare', 'Space'))} 对比　"
+            f"{d(kb.get('cancel_operation', 'Esc'))} 取消　"
+            f"{d(kb.get('save_task', 'Ctrl+S'))} 保存"
         )
         # 工具栏/菜单按钮同步显示当前绑定（需求 §30）
-        self.action_open_psd.setText(f"打开 PSD ({kb.get('open_psd', 'Ctrl+O')})")
-        self.action_open_folder.setText(f"打开文件夹 ({kb.get('open_folder', 'Ctrl+Shift+O')})")
-        self.action_save.setText(f"保存 ({kb.get('save_task', 'Ctrl+S')})")
-        self.action_report.setText(f"生成返修单 ({kb.get('generate_report', 'Ctrl+R')})")
-        self.action_redraw.setText(f"红框模式 ({kb.get('redraw_mode', 'R')})")
+        self.action_open_psd.setText(f"打开 PSD ({d(kb.get('open_psd', 'Ctrl+O'))})")
+        self.action_open_folder.setText(f"打开文件夹 ({d(kb.get('open_folder', 'Ctrl+Shift+O'))})")
+        self.action_save.setText(f"保存 ({d(kb.get('save_task', 'Ctrl+S'))})")
+        self.action_report.setText(f"生成返修单 ({d(kb.get('generate_report', 'Ctrl+R'))})")
+        self.action_redraw.setText(f"红框模式 ({d(kb.get('redraw_mode', 'R'))})")
         self.action_compare.setText(
-            f"{'停止自动对比' if self._compare.is_running else '自动对比'} ({kb.get('toggle_compare', 'Space')})"
+            f"{'停止自动对比' if self._compare.is_running else '自动对比'} ({d(kb.get('toggle_compare', 'Space'))})"
         )
 
     # ================================================================= 快捷键
@@ -344,6 +359,27 @@ class MainWindow(QMainWindow):
                 bind(key, lambda n=name: self._on_issue_key(n), guard=issue_guard)
 
         self._update_shortcut_hints()
+        self._update_issue_panel_shortcuts()
+
+    def _update_issue_panel_shortcuts(self) -> None:
+        """问题面板按钮动态显示当前绑定（需求 §30）。"""
+        kb = self.settings.keybindings
+        d = self._display_key
+        bindings = {
+            "pass": d(kb.get("pass_layer", "Return")),
+            "fail": d(kb.get("fail_layer", "/")),
+            "redraw": d(kb.get("redraw_mode", "R")),
+            "custom": d(self.settings.custom_comment_key or "Ctrl+Return"),
+            "cancel": d(kb.get("cancel_operation", "Esc")),
+        }
+        tips = ["问题类型快捷键（在设置中可重绑定）："]
+        for item in self.settings.issue_types:
+            key = item.get("key", "")
+            if key:
+                tips.append(f"{key}　{item['name']}")
+        tips.append(f"{bindings['custom']}　自定义批注")
+        tips.append(f"{bindings['cancel']}　取消拖框")
+        self.issue_panel.set_shortcut_labels(bindings, "\n".join(tips))
 
     @staticmethod
     def _parse_seq(key: str) -> Optional[QKeySequence]:
@@ -727,7 +763,8 @@ class MainWindow(QMainWindow):
         info = self.current_doc.layers[self._current_index]
         self.task.set_status(self._current_file, info.id, FAILED)
         self.issue_panel.set_hint(
-            "已标记 ✗ 未通过 — 可拖框添加问题或输入自定义批注；Enter 跳到下一个未监制图层。"
+            "已标记 ✗ 未通过 — 可拖框添加问题或输入自定义批注；"
+            f"{self._display_key(self.settings.binding('pass_layer') or 'Return')} 跳到下一个未监制图层。"
         )
         self._refresh_all_panels()
         self._mark_dirty()
@@ -823,7 +860,10 @@ class MainWindow(QMainWindow):
         if self._compare.is_running:
             self._compare.stop()   # 需求 §40：停止对比后创建
         self.viewer.set_pending_type(type_name)
-        self.issue_panel.set_hint(f"请在画布上拖拽红框：{type_name}（Esc 取消）")
+        self.issue_panel.set_hint(
+            f"请在画布上拖拽红框：{type_name}"
+            f"（{self._display_key(self.settings.binding('cancel_operation') or 'Esc')} 取消）"
+        )
         self.viewer.setFocus()
 
     def _on_issue_drawn(self, issue_type: str, x: float, y: float, w: float, h: float) -> None:
@@ -922,7 +962,10 @@ class MainWindow(QMainWindow):
         if self._compare.is_running:
             self._compare.stop()
         self.viewer.set_redraw_mode(True)
-        self.issue_panel.set_hint("拖框模式：在画布上拖拽红框（Esc 取消）")
+        self.issue_panel.set_hint(
+            f"拖框模式：在画布上拖拽红框"
+            f"（{self._display_key(self.settings.binding('cancel_operation') or 'Esc')} 取消）"
+        )
         self.viewer.setFocus()
 
     def _on_pending_changed(self) -> None:
