@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# uv 环境与缓存（uv 管理的虚拟环境不进入版本库；uv.lock 保留以保证可复现）
+.venv/
+.uv-cache/
+
+# 运行时产物
+settings.json
+logs/
+*.mangaproof.json
+*.mangaproof.json.tmp
+*.mangaproof.json.bak-*
+
+# 测试产物
+tests/data/out/
+
+# IDE
+.idea/
+.vscode/

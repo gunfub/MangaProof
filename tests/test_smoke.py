@@ -1,0 +1,221 @@
+"""核心逻辑冒烟测试（无 GUI）：加载、视觉边界、背景选择、相机、持久化验证、PDF。
+
+运行：uv run python -m pytest tests/test_smoke.py -v
+     （或直接 uv run python tests/test_smoke.py）
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from mangaproof.camera.camera import Camera
+from mangaproof.camera.centering import layer_visual_bounds, layer_visual_center
+from mangaproof.camera.zoom import fit_zoom
+from mangaproof.psd.document import PSDDocument
+from mangaproof.report.generator import generate_report, resolve_report_path
+from mangaproof.review import persistence
+from mangaproof.review.state import FAILED, PASSED, UNREVIEWED
+from mangaproof.utils.natural_sort import natural_sorted
+
+DATA_DIR = Path(__file__).parent / "data" / "chapter01"
+
+
+def test_natural_sort():
+    assert natural_sorted(["10.psd", "001.psd", "003.psd", "002.psd"]) == [
+        "001.psd", "002.psd", "003.psd", "10.psd",
+    ]
+    assert natural_sorted(["010.psd", "2.psd", "002.psd"]) == ["002.psd", "2.psd", "010.psd"]
+
+
+def test_document_load_001():
+    doc = PSDDocument(DATA_DIR / "001.psd")
+    names = [info.name for info in doc.layers]
+    # 隐藏图层不应进入可监制列表；顺序为文档顺序（自上而下）
+    assert names == ["bg", "dialogue_01", "dialogue_02", "dialogue_03"], names
+    # merged image 来自 PSD 自带数据
+    merged = doc.merged_np()
+    assert merged.shape == (600, 400, 4)
+    # 图层像素中心颜色
+    img = doc.layer_image(doc.layers[1].id)
+    assert img.shape == (60, 120, 4)
+    # bg 选择：精确 "bg"
+    assert doc.bg_layer_id() == doc.layers[0].id
+
+
+def test_visual_bounds_and_center():
+    doc = PSDDocument(DATA_DIR / "001.psd")
+    info = doc.layers[1]  # dialogue_01: (40,60,160,120)
+    vb = layer_visual_bounds(info)
+    assert vb == (40, 60, 160, 120), vb
+    cx, cy = layer_visual_center(info)
+    assert (cx, cy) == (100.0, 90.0)
+    # 全透明图层 → fallback 到 bounds
+    import numpy as np
+    from mangaproof.psd.layer_model import LayerInfo
+    empty = LayerInfo(
+        id="x", name="empty", bounds=(10, 10, 30, 30), visible=True,
+        layer_type="pixel",
+        image_loader=lambda: np.zeros((20, 20, 4), dtype=np.uint8),
+    )
+    assert layer_visual_bounds(empty) is None
+    assert layer_visual_center(empty) is None
+
+
+def test_bg_fallback_bottom_most():
+    doc = PSDDocument(DATA_DIR / "002.psd")
+    bg_id = doc.bg_layer_id()
+    info = doc.layer_by_id(bg_id)
+    assert info.name == "background_painting", info.name
+    bg = doc.bg_image()
+    assert bg is not None and bg[2].shape == (200, 400, 4)
+
+
+def test_camera():
+    cam = Camera(center_x=100, center_y=200, zoom=2.0)
+    wx, wy = cam.screen_to_world(*cam.world_to_screen(50, 60, 800, 600), 800, 600)
+    assert abs(wx - 50) < 1e-9 and abs(wy - 60) < 1e-9
+    # 锚点缩放后，锚点处世界坐标不变
+    sx, sy = 300.0, 200.0
+    before = cam.screen_to_world(sx, sy, 800, 600)
+    cam.zoom_around(sx, sy, 800, 600, 1.5)
+    after = cam.screen_to_world(sx, sy, 800, 600)
+    assert abs(before[0] - after[0]) < 1e-9 and abs(before[1] - after[1]) < 1e-9
+    assert abs(cam.zoom - 3.0) < 1e-9
+    cam.pan_by_screen(80, -40)
+    moved = cam.screen_to_world(sx, sy, 800, 600)
+    assert abs(moved[0] - (before[0] - 80 / 3.0)) < 1e-6
+    assert abs(moved[1] - (before[1] + 40 / 3.0)) < 1e-6
+
+
+def test_fit_zoom():
+    z = fit_zoom((0, 0, 800, 1200), (1000, 1000), 0.8)
+    assert abs(z - 1000 * 0.8 / 1200) < 1e-9
+    z2 = fit_zoom((0, 0, 1200, 800), (1000, 1000), 0.6)
+    assert abs(z2 - 1000 * 0.6 / 1200) < 1e-9
+    assert fit_zoom(None, (100, 100), 0.6) is None
+    assert fit_zoom((0, 0, 0, 0), (100, 100), 0.6) is None
+
+
+def _copy_fixtures(dst: Path) -> Path:
+    dst.mkdir(parents=True, exist_ok=True)
+    for p in sorted(DATA_DIR.glob("*.psd")):
+        shutil.copy2(p, dst / p.name)
+    return dst
+
+
+def test_persistence_roundtrip_and_verify():
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = _copy_fixtures(Path(tmp) / "chapter01")
+        files = sorted(folder.glob("*.psd"))
+        task, samples = persistence.create_task_folder(folder, files)
+        assert task.task_type == "folder"
+        assert len(task.files) == 3
+        # 3 个文件 → 2 个抽样 Hash
+        sampled = [f for f in task.files if f.sample_sha256]
+        assert len(sampled) == 2, [f.file_name for f in sampled]
+        assert sampled[0].relative_path == "001.psd"
+        assert sampled[-1].relative_path == "10.psd"
+
+        ok, reason = persistence.verify_folder(task, files, folder)
+        assert ok, reason
+
+        # 保存 + 重载
+        path = persistence.progress_path_for_folder(folder)
+        task.set_status("001.psd", "x", FAILED)  # 写入一些状态
+        persistence.save_task(task, path)
+        loaded = persistence.load_task(path)
+        assert loaded.schema_version == 1
+        assert loaded.status_of("001.psd", "x") == FAILED
+
+        # 篡改：改变文件大小 → 验证失败
+        with open(folder / "002.psd", "ab") as f:
+            f.write(b"tamper")
+        ok, reason = persistence.verify_folder(task, files, folder)
+        assert not ok and "002.psd" in reason
+        # 篡改抽样的 001 但大小不变 → Hash 不匹配
+        with open(folder / "001.psd", "r+b") as f:
+            f.seek(0)
+            data = bytearray(f.read(8))
+            data[0] ^= 0xFF
+            f.seek(0)
+            f.write(bytes(data))
+        ok, reason = persistence.verify_folder(task, files, folder)
+        assert not ok and "001.psd" in reason
+
+
+def test_single_psd_identity():
+    with tempfile.TemporaryDirectory() as tmp:
+        dst = Path(tmp)
+        src = DATA_DIR / "001.psd"
+        shutil.copy2(src, dst / "001.psd")
+        psd_path = dst / "001.psd"
+        task, _ = persistence.create_task_single(psd_path)
+        assert task.task_type == "single"
+        assert task.files[0].sample_sha256  # 单文件 = 完整 Hash
+        ok, reason = persistence.verify_single(task, psd_path)
+        assert ok, reason
+        with open(psd_path, "ab") as f:
+            f.write(b"x")
+        ok, reason = persistence.verify_single(task, psd_path)
+        assert not ok
+
+
+def test_report_generation():
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = _copy_fixtures(Path(tmp) / "chapter01")
+        files = sorted(folder.glob("*.psd"))
+        task, _ = persistence.create_task_folder(folder, files)
+
+        doc1 = PSDDocument(folder / "001.psd")
+        ids1 = [i.id for i in doc1.layers]
+        task.set_status("001.psd", ids1[1], FAILED)
+        task.add_issue("001.psd", ids1[1], "dialogue_01", "字体选择错误",
+                       "这里应使用 Bold，而不是 Regular。", (40, 60, 120, 60))
+        task.add_issue("001.psd", ids1[2], "dialogue_02", "漏字", "", (60, 240, 140, 60))
+        task.set_status("001.psd", ids1[2], FAILED)
+        task.set_status("001.psd", ids1[3], PASSED)
+        task.set_status("001.psd", ids1[0], PASSED)
+        for other in ("002.psd", "10.psd"):
+            doc = PSDDocument(folder / other)
+            for i in doc.layers:
+                task.set_status(other, i.id, PASSED)
+
+        layer_ids = {
+            "001.psd": [i.id for i in PSDDocument(folder / "001.psd").layers],
+            "002.psd": [i.id for i in PSDDocument(folder / "002.psd").layers],
+            "10.psd": [i.id for i in PSDDocument(folder / "10.psd").layers],
+        }
+        out = resolve_report_path(folder, "Chapter01_Final_Review.pdf", "chapter01")
+        assert out.name == "Chapter01_Final_Review.pdf"
+        out2 = resolve_report_path(folder, "", "chapter01")
+        assert out2.name == "chapter01.pdf"
+
+        generate_report(task, layer_ids, out, image_provider=lambda rel: PSDDocument(folder / rel))
+        assert out.exists() and out.stat().st_size > 1000
+        with open(out, "rb") as f:
+            assert f.read(5) == b"%PDF-"
+        # 任务未完成 → 封面应包含“未完成”字样（PDF 内码验证粗略跳过，仅确认生成成功）
+        print("PDF OK:", out, out.stat().st_size, "bytes")
+
+
+if __name__ == "__main__":
+    import traceback
+    tests = [
+        (k, v) for k, v in sorted(globals().items()) if k.startswith("test_")
+    ]
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+            print(f"PASS {name}")
+        except Exception:
+            failed += 1
+            print(f"FAIL {name}")
+            traceback.print_exc()
+    sys.exit(1 if failed else 0)
