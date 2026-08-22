@@ -119,10 +119,21 @@
 uv sync
 
 # 启动（程序目录 = 本文件所在目录，settings.json 落在这里）
-python main.py            # 或 uv run python main.py
+uv run main.py
 ```
 
 打开单个 PSD 或整个漫画文件夹即可开始；历史任务自动恢复。
+
+> **性能提示**：直接运行源码时，个别热点解码函数（ZIP 预测压缩的 PSD 通道
+> 解码等）会退化为 psd-tools 的纯 Python 实现，预加载/提取速度会明显下降。
+> 若想体验完整加速，按优先级推荐：
+>
+> 1. **直接使用构建产物**（GitHub Actions 工件或 Release 安装包，见「CI 自动打包」）；
+> 2. **从构建产物中提取编译好的 C 扩展**：把 `_internal/mangaproof/_psd_fast.so`
+>    （Windows 为 `_psd_fast.pyd`）复制到本项目 `mangaproof/` 目录下即可生效；
+> 3. **本地自行编译**：`uv run python scripts/build_accel.py`
+>    （需 gcc / clang / MSVC；macOS / Linux 可直接编译，Windows 需 Visual Studio
+>    C++ 工具链）。
 
 ## 界面截图（建议补充的实拍）
 
