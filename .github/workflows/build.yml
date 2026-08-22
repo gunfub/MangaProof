@@ -46,10 +46,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
 
@@ -60,12 +60,21 @@ jobs:
         id: version
         shell: bash
         run: |
-          VER=$(grep -oP '__version__ = "\K[^"]+' mangaproof/__init__.py)
+          # 用 sed -E（GNU/BSD 通用），macOS 的 BSD grep 不支持 -P
+          VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Build with PyInstaller
         shell: bash
         run: uv run pyinstaller --noconfirm --clean "${{ matrix.spec }}"
+
+      - name: Install Qt runtime libs (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 \
+            libegl1 libgl1 libfontconfig1 libdbus-1-3
 
       - name: Smoke test (Linux / macOS)
         if: runner.os != 'Windows'
@@ -76,24 +85,28 @@ jobs:
           else
             BIN="dist/MangaProof/MangaProof"
           fi
-          QT_QPA_PLATFORM=offscreen "$BIN" &
+          QT_QPA_PLATFORM=offscreen QT_DEBUG_PLUGINS=1 "$BIN" > smoke.log 2>&1 &
           PID=$!
           sleep 10
           if ! kill -0 "$PID" 2>/dev/null; then
-            echo "::error::打包产物启动后提前退出"
+            echo "::error::打包产物启动后提前退出，输出如下："
+            cat smoke.log || true
             exit 1
           fi
           kill "$PID" 2>/dev/null || true
+          tail -20 smoke.log || true
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = 'offscreen'
-          $p = Start-Process -FilePath "dist\MangaProof\MangaProof.exe" -PassThru
+          $p = Start-Process -FilePath "dist\MangaProof\MangaProof.exe" `
+            -RedirectStandardOutput "smoke.log" -RedirectStandardError "smoke.err" -PassThru
           Start-Sleep -Seconds 10
           if ($p.HasExited) {
             Write-Error "打包产物启动后提前退出（exit=$($p.ExitCode)）"
+            Get-Content "smoke.log","smoke.err" -ErrorAction SilentlyContinue
             exit 1
           }
           Stop-Process -Id $p.Id -Force
@@ -120,7 +133,7 @@ jobs:
             -DestinationPath "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
           path: |
@@ -137,7 +150,7 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
