@@ -55,6 +55,7 @@ def main(argv=None) -> int:
     app.setOrganizationName("MangaProof")
 
     from mangaproof.config.settings import SettingsManager
+    from mangaproof.console import apply_console_visibility
     from mangaproof.ui.dark_titlebar import install_dark_titlebar
     from mangaproof.ui.main_window import MainWindow
     from mangaproof.ui.theme import apply_dark_theme
@@ -63,6 +64,8 @@ def main(argv=None) -> int:
     install_dark_titlebar(app)
     apply_app_icon(app)
     settings_manager = SettingsManager()
+    # 控制台可见性：直接运行 py 始终保留；打包产物默认隐藏（设置可关）
+    apply_console_visibility(settings_manager.settings)
 
     window = MainWindow(settings_manager)
     window.show()

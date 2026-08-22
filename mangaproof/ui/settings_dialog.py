@@ -84,6 +84,13 @@ class SettingsDialog(QDialog):
         self.recursive_check = QCheckBox("递归扫描子文件夹")
         self.recursive_check.setChecked(settings.recursive_scan)
         task_form.addRow(self.recursive_check)
+        self.console_check = QCheckBox("打包产物隐藏控制台窗口")
+        self.console_check.setChecked(settings.hide_console)
+        self.console_check.setToolTip(
+            "仅对 PyInstaller 打包产物生效（默认隐藏）。\n"
+            "直接运行 python main.py 时控制台始终显示，不受此开关影响。"
+        )
+        task_form.addRow(self.console_check)
         layout.addWidget(task_group)
 
         # ---- 返修单 ----
@@ -160,6 +167,7 @@ class SettingsDialog(QDialog):
         idx = self.ratio_combo.findData(DEFAULT_DISPLAY_RATIO)
         self.ratio_combo.setCurrentIndex(max(0, idx))
         self.recursive_check.setChecked(False)
+        self.console_check.setChecked(True)
         self.pdf_check.setChecked(True)
         self.report_name_edit.clear()
         for action, edit in self._core_edits.items():
@@ -174,6 +182,7 @@ class SettingsDialog(QDialog):
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.generate_pdf_on_complete = self.pdf_check.isChecked()
         settings.report_name = self.report_name_edit.text().strip()
+        settings.hide_console = self.console_check.isChecked()
 
         for action, edit in self._core_edits.items():
             seq = edit.keySequence().toString()

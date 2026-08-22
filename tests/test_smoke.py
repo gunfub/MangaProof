@@ -294,6 +294,43 @@ def test_default_report_name_output_folder():
     assert default_report_name("single", Path("/output"), "001.psd") == "001"
 
 
+def test_console_visibility_rules():
+    """回归：直接运行 py 始终保留控制台；打包产物跟随 hide_console 设置。"""
+    from mangaproof.console import apply_console_visibility, decide_console_hidden
+    from mangaproof.config.settings import Settings
+
+    # 直接运行 python：开关不生效，始终保留控制台
+    assert decide_console_hidden(False, "win32", True) is False
+    assert decide_console_hidden(False, "win32", False) is False
+    # 打包产物（Windows）：默认隐藏，关闭开关后恢复显示
+    assert decide_console_hidden(True, "win32", True) is True
+    assert decide_console_hidden(True, "win32", False) is False
+    # 非 Windows：运行时不可切换
+    assert decide_console_hidden(True, "linux", True) is False
+    assert decide_console_hidden(True, "darwin", False) is False
+    # Linux 下 apply 为 no-op，不抛异常
+    s = Settings()
+    assert s.hide_console is True
+    apply_console_visibility(s)
+
+
+def test_settings_hide_console_persisted():
+    """hide_console 设置随 settings.json 持久化。"""
+    import json
+    import tempfile
+
+    from mangaproof.config.settings import SettingsManager
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "settings.json"
+        sm = SettingsManager(path)
+        assert sm.settings.hide_console is True  # 默认开启隐藏
+        sm.settings.hide_console = False
+        sm.save()
+        sm2 = SettingsManager(path)
+        assert sm2.settings.hide_console is False
+
+
 if __name__ == "__main__":
     import traceback
     tests = [

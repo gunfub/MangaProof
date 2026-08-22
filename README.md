@@ -32,6 +32,9 @@ uv run python main.py
 ```
 
 支持 PyInstaller onedir 打包（settings.json 会落在 .exe 所在目录）。
+打包建议使用 `--console` 构建（保留控制台子系统），运行时默认隐藏控制台窗口，
+可在「设置」中关闭「打包产物隐藏控制台窗口」恢复显示；
+直接运行 `python main.py` 时控制台始终保留，不受该开关影响。
 
 ## 核心工作流
 

@@ -1159,6 +1159,10 @@ class MainWindow(QMainWindow):
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))
             self.recenter_current_layer()
+            # 控制台开关即时生效（打包产物下隐藏/恢复控制台窗口）
+            from mangaproof.console import apply_console_visibility
+
+            apply_console_visibility(self.settings)
 
     def _on_ratio_changed(self, index: int) -> None:
         ratio = float(self.ratio_combo.itemData(index))
