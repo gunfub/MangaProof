@@ -368,6 +368,31 @@ def test_visual_bounds_computed_flag():
     assert filled.has_visual_bounds()
 
 
+def test_merged_fast_path_matches():
+    """回归：merged 提取优先走 Pillow C 解码，与 psd-tools 结果像素一致。"""
+    import numpy as np
+
+    from psd_tools import PSDImage
+
+    from mangaproof.psd.document import PSDDocument
+    from mangaproof.psd.loader import get_merged_pil_fast
+
+    path = DATA_DIR / "001.psd"
+    doc = PSDDocument(path)
+    arr = doc.merged_np()
+    ref = np.asarray(PSDImage.open(path).topil().convert("RGBA"))
+    assert arr.shape == ref.shape == (600, 400, 4)
+    assert np.array_equal(arr, ref), "C 路径与 psd-tools 结果不一致"
+
+    # 直接调用快速路径
+    img = get_merged_pil_fast(path, expect_size=(400, 600))
+    assert img is not None and img.size == (400, 600)
+    # 尺寸校验不符 → 回退信号
+    assert get_merged_pil_fast(path, expect_size=(999, 999)) is None
+    # 文件缺失 → 回退信号
+    assert get_merged_pil_fast(Path("/nonexistent/x.psd")) is None
+
+
 if __name__ == "__main__":
     import traceback
     tests = [

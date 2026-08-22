@@ -87,3 +87,24 @@ def get_merged_pil(psd):
             "本程序无法提供 Original 显示。"
         )
     return img
+
+
+def get_merged_pil_fast(path: Path, expect_size=None):
+    """C 路径：Pillow 原生解码 PSD 自带 composite（约 7× 快于 psd-tools）。
+
+    psd-tools 的 RLE 解压是纯 Python 实现（持 GIL），是 merged 提取的
+    主要耗时点；Pillow 的 PSD 解码器走 C 代码，且只读取文件存储的
+    合层数据、不重新合成（满足需求 §2.3）。
+
+    校验尺寸与异常兜底：文件缺失/损坏/尺寸不符/PSB 等场景返回 None，
+    由调用方回退 psd-tools 纯 Python 路径。
+    """
+    from PIL import Image
+
+    try:
+        with Image.open(path) as img:
+            if expect_size is not None and (img.width, img.height) != tuple(expect_size):
+                return None
+            return img.convert("RGBA")
+    except Exception:
+        return None

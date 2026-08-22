@@ -82,15 +82,20 @@ class PSDDocument:
     def merged_np(self) -> np.ndarray:
         """PSD 自带的 merged image（RGBA numpy），仅读取一次。
 
-        无 merged image 时抛 NoCompositeError；所有异常都会缓存，
-        避免每次访问都重新解析。
+        提取顺序：Pillow 原生 C 解码（快，约 7×）→ 失败/尺寸不符
+        回退 psd-tools 纯 Python 路径 → 仍失败抛 NoCompositeError。
+        所有异常都会缓存，避免每次访问都重新解析。
         """
         with self._io_lock:
             if self._merged_np is None and self._merged_error is None:
                 try:
-                    pil = loader.get_merged_pil(self._psd)
-                    rgba = pil.convert("RGBA")
-                    self._merged_np = np.asarray(rgba).copy()
+                    fast = loader.get_merged_pil_fast(self.path, expect_size=self.size)
+                    if fast is not None:
+                        self._merged_np = np.asarray(fast).copy()
+                    else:
+                        pil = loader.get_merged_pil(self._psd)
+                        rgba = pil.convert("RGBA")
+                        self._merged_np = np.asarray(rgba).copy()
                 except Exception as exc:
                     self._merged_error = exc
                     raise
