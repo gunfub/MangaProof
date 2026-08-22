@@ -24,4 +24,5 @@ packages = ["mangaproof"]
 [dependency-groups]
 dev = [
     "pyinstaller>=6.22.2",
+    "pytest>=9.1.1",
 ]
