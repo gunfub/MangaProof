@@ -58,6 +58,24 @@ uv run pyinstaller --clean --noconfirm packaging/main_linux.spec
 - **macOS / Linux 打包**：无独立控制台窗口，spec 使用 `console=False`（windowed，
   图形启动无终端输出），运行时无法也不应切换。
 
+## CI 自动打包
+
+`.github/workflows/build.yml`：推送 `v*` 标签或手动触发（Actions → build →
+Run workflow）时，构建 5 个主流平台组合：
+
+| 平台 | 架构 | 跑者 | 产物 |
+|---|---|---|---|
+| Windows | x64 | windows-latest | .zip |
+| Linux | x64 | ubuntu-24.04 | .tar.gz |
+| Linux | arm64 | ubuntu-24.04-arm | .tar.gz |
+| macOS | x64（Intel） | macos-15-intel | .zip（MangaProof.app） |
+| macOS | arm64（Apple Silicon） | macos-15 | .zip（MangaProof.app） |
+
+- 每个平台构建后先做**离屏启动冒烟测试**（启动 10 秒不退出）再上传工件；
+- 推送标签时自动创建 GitHub Release 并挂载全部产物；
+- Windows ARM64 由 PyInstaller 官方暂不支持原生构建，ARM64 设备可
+  通过 x64 模拟运行 x64 包。
+
 ## 核心工作流
 
 ```
