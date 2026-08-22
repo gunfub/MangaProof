@@ -25,6 +25,10 @@ PROGRESS_SUFFIX = ".mangaproof.json"
 FOLDER_PROGRESS_NAME = ".mangaproof.json"
 
 
+class LoadCancelled(Exception):
+    """用户取消加载（由 progress_cb 抛出，逐级向上传播）。"""
+
+
 def now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -59,12 +63,13 @@ def sample_indices(count: int) -> List[int]:
 
 
 def build_file_records(
-    files: List[Path], base_dir: Path
+    files: List[Path], base_dir: Path, progress_cb=None
 ) -> Tuple[List[FileRecord], List[Path]]:
     """为任务建立文件身份记录。
 
     files 需已按自然排序；返回 (records, 抽样文件绝对路径列表)。
     相对路径统一使用 posix 风格（/），保证跨平台一致。
+    progress_cb(done, total, message)：耗时步骤（Hash）时回调。
     """
     base = base_dir.resolve()
     records: List[FileRecord] = []
@@ -73,10 +78,14 @@ def build_file_records(
     for idx, path in enumerate(files):
         abs_path = path.resolve()
         rel = abs_path.relative_to(base).as_posix()
+        if progress_cb:
+            progress_cb(idx, len(files), f"记录文件身份：{abs_path.name}")
         size = loader.file_size(abs_path)
         mtime = abs_path.stat().st_mtime
         sha = None
         if idx in samples:
+            if progress_cb:
+                progress_cb(idx, len(files), f"计算 SHA-256：{abs_path.name}")
             sha = loader.file_sha256(abs_path)
             sample_paths.append(abs_path)
         records.append(
@@ -95,7 +104,7 @@ def build_file_records(
 # 匹配验证（需求 §7.2～§7.6）
 # ---------------------------------------------------------------------------
 
-def verify_single(task: TaskState, actual_file: Path) -> Tuple[bool, str]:
+def verify_single(task: TaskState, actual_file: Path, progress_cb=None) -> Tuple[bool, str]:
     """单 PSD 验证：文件大小 + 完整 SHA-256。"""
     if not task.files:
         return False, "任务中没有文件记录"
@@ -109,13 +118,20 @@ def verify_single(task: TaskState, actual_file: Path) -> Tuple[bool, str]:
             f"文件大小不匹配（任务记录 {record.size} 字节，"
             f"当前文件 {size} 字节）"
         )
+    if progress_cb:
+        progress_cb(0, 1, f"验证文件身份（SHA-256）：{actual_file.name}")
     sha = loader.file_sha256(actual_file)
     if record.sample_sha256 and sha != record.sample_sha256:
         return False, "SHA-256 不匹配：当前文件与任务记录不是同一个 PSD"
     return True, ""
 
 
-def verify_folder(task: TaskState, actual_files: List[Path], base_dir: Path) -> Tuple[bool, str]:
+def verify_folder(
+    task: TaskState,
+    actual_files: List[Path],
+    base_dir: Path,
+    progress_cb=None,
+) -> Tuple[bool, str]:
     """文件夹验证（需求 §7.4）：
     抽样文件 → 大小 + SHA-256；其他文件 → 只检查大小。
     任何一项不通过即整体不匹配（需求 §7.6）。
@@ -130,11 +146,8 @@ def verify_folder(task: TaskState, actual_files: List[Path], base_dir: Path) -> 
     }
 
     # 1) 抽样 Hash 文件：大小 + SHA-256
-    sample_count = 0
-    for record in task.files:
-        if not record.sample_sha256:
-            continue
-        sample_count += 1
+    samples = [r for r in task.files if r.sample_sha256]
+    for i, record in enumerate(samples):
         path = actual_map.get(record.relative_path)
         if path is None:
             return False, f"抽样文件缺失：{record.relative_path}"
@@ -146,6 +159,11 @@ def verify_folder(task: TaskState, actual_files: List[Path], base_dir: Path) -> 
             return False, (
                 f"抽样文件大小不匹配：{record.relative_path}"
                 f"（任务记录 {record.size}，实际 {size}）"
+            )
+        if progress_cb:
+            progress_cb(
+                i, len(samples),
+                f"验证抽样文件（SHA-256）：{record.relative_path}",
             )
         sha = loader.file_sha256(path)
         if sha != record.sample_sha256:
@@ -169,7 +187,7 @@ def verify_folder(task: TaskState, actual_files: List[Path], base_dir: Path) -> 
             )
 
     # 3) 多出的文件不属于任务（不阻止恢复，但不算匹配失败）
-    return True, f"验证通过（抽样 {sample_count} 个 Hash + 全部 Size）"
+    return True, f"验证通过（抽样 {len(samples)} 个 Hash + 全部 Size）"
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +239,10 @@ def backup_progress_file(path: Path) -> Optional[Path]:
         return None
 
 
-def create_task_single(psd_path: Path) -> Tuple[TaskState, List[Path]]:
+def create_task_single(psd_path: Path, progress_cb=None) -> Tuple[TaskState, List[Path]]:
     """为单个 PSD 创建新任务（完整 SHA-256 身份）。"""
     psd_path = psd_path.resolve()
-    records, samples = build_file_records([psd_path], psd_path.parent)
+    records, samples = build_file_records([psd_path], psd_path.parent, progress_cb)
     task = TaskState(
         task_name=psd_path.stem,
         task_type="single",
@@ -237,10 +255,10 @@ def create_task_single(psd_path: Path) -> Tuple[TaskState, List[Path]]:
     return task, samples
 
 
-def create_task_folder(folder: Path, files: List[Path]) -> Tuple[TaskState, List[Path]]:
+def create_task_folder(folder: Path, files: List[Path], progress_cb=None) -> Tuple[TaskState, List[Path]]:
     """为文件夹创建新任务（抽样 Hash 身份）。"""
     folder = folder.resolve()
-    records, samples = build_file_records(files, folder)
+    records, samples = build_file_records(files, folder, progress_cb)
     task = TaskState(
         task_name=folder.name,
         task_type="folder",

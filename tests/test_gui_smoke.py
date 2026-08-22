@@ -28,6 +28,7 @@ from mangaproof.review import persistence
 from mangaproof.review.state import FAILED, PASSED
 from mangaproof.ui.dialogs import IssueDialog
 from mangaproof.ui.main_window import MainWindow
+from mangaproof.ui.task_loader import TaskLoadWorker
 
 DATA_DIR = Path(__file__).parent / "data" / "chapter01"
 
@@ -39,6 +40,41 @@ def _copy_fixtures(dst: Path) -> Path:
     for p in sorted(DATA_DIR.glob("*.psd")):
         shutil.copy2(p, dst / p.name)
     return dst
+
+
+def _wait_for_task(window: MainWindow, timeout_s: float = 30.0) -> None:
+    """打开为后台异步流程：轮询事件循环直到任务绑定完成。"""
+    deadline = time.time() + timeout_s
+    while window.task is None and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    assert window.task is not None, "任务加载超时（后台 worker 未完成）"
+
+
+def test_task_loader_progress() -> None:
+    """后台加载 worker：进度消息覆盖扫描/解析阶段，任务正确产出。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = _copy_fixtures(Path(tmp) / "chapter01")
+        messages = []
+        results = []
+        worker = TaskLoadWorker("folder", folder)
+        worker.progress.connect(lambda d, t, m: messages.append((d, t, m)))
+        worker.succeeded.connect(lambda r: results.append(r))
+        worker.start()
+        deadline = time.time() + 30
+        while not results and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert results, "worker 未完成"
+        result = results[0]
+        assert result.kind == "ok"
+        assert result.task is not None
+        assert any("扫描 PSD" in m for _, _, m in messages)
+        parse_msgs = [m for _, _, m in messages if "解析 PSD" in m]
+        assert len(parse_msgs) == 3, parse_msgs
+        assert messages[-1][2] == "加载完成"
+
+    print("PASS test_task_loader_progress")
 
 
 def test_full_workflow() -> None:
@@ -56,6 +92,7 @@ def test_full_workflow() -> None:
             QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
         ):
             window.open_folder(folder)
+        _wait_for_task(window)
         app.processEvents()
 
         assert window.task is not None
@@ -196,6 +233,7 @@ def test_full_workflow() -> None:
             QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
         ):
             window2.open_folder(folder)
+        _wait_for_task(window2)
         app.processEvents()
 
         assert window2.task.task_id == loaded.task_id  # 恢复的是同一个任务

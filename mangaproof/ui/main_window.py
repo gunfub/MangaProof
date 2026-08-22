@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QToolBar,
     QWidget,
 )
@@ -36,19 +37,13 @@ from mangaproof.psd.image_cache import LayerImageCache
 from mangaproof.psd.loader import (
     NoCompositeError,
     PSDReadError,
-    scan_psd_files,
 )
 from mangaproof.report.generator import generate_report, resolve_report_path
 from mangaproof.review import navigator, persistence
 from mangaproof.review.persistence import (
     backup_progress_file,
-    create_task_folder,
-    create_task_single,
-    load_task,
     progress_path_for_folder,
     progress_path_for_single,
-    verify_folder,
-    verify_single,
 )
 from mangaproof.review.state import (
     FAILED,
@@ -62,6 +57,12 @@ from mangaproof.ui.issue_panel import IssuePanel
 from mangaproof.ui.layer_panel import LayerPanel
 from mangaproof.ui.settings_dialog import SettingsDialog
 from mangaproof.ui.statistics_panel import StatisticsPanel
+from mangaproof.ui.task_loader import (
+    KIND_CANCELLED,
+    KIND_MISMATCH,
+    KIND_NO_FILES,
+    TaskLoadWorker,
+)
 from mangaproof.ui.viewer_widget import SOURCE_BG, SOURCE_MERGED, ViewerWidget
 
 log = logging.getLogger("mangaproof.ui.main_window")
@@ -96,6 +97,12 @@ class MainWindow(QMainWindow):
         self._current_file = ""
         self._current_index = -1
         self._warned_no_composite: set = set()
+
+        # 后台加载状态
+        self._loader = None
+        self._load_dialog = None
+        self._load_mode = ""
+        self._load_path: Optional[Path] = None
 
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
@@ -426,88 +433,117 @@ class MainWindow(QMainWindow):
             self.open_folder(Path(folder))
 
     def open_single(self, path: Path) -> None:
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self._compare.stop()
-            progress = progress_path_for_single(path)
-            task: Optional[TaskState] = None
-
-            if progress.exists():
-                try:
-                    loaded = load_task(progress)
-                except (OSError, ValueError) as exc:
-                    log.warning("读取进度文件失败：%s", exc)
-                    loaded = None
-                if loaded is not None:
-                    ok, reason = verify_single(loaded, path)
-                    if not ok:
-                        QApplication.restoreOverrideCursor()
-                        if not self._ask_discard_or_reselect(
-                            "进度文件验证失败", reason, reselect_file=True
-                        ):
-                            return
-                        backup_progress_file(progress)
-                    else:
-                        if loaded.source and Path(loaded.source) != path.resolve():
-                            QApplication.restoreOverrideCursor()
-                            if not self._strong_rebind_warning():
-                                return
-                            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                        task = loaded
-
-            if task is None:
-                task, _ = create_task_single(path)
-
-            self._attach_task(task, path.parent)
-            self.settings_manager.add_recent(str(path))
-            self._rebuild_recent_menu()
-        finally:
-            QApplication.restoreOverrideCursor()
+        self._start_load("single", path, force_fresh=False)
 
     def open_folder(self, folder: Path) -> None:
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self._compare.stop()
-            files = scan_psd_files(folder, self.settings.recursive_scan)
-            if not files:
-                QApplication.restoreOverrideCursor()
-                QMessageBox.information(self, "打开文件夹", "该文件夹中没有找到 PSD 文件。")
-                return
+        self._start_load("folder", folder, force_fresh=False)
 
-            progress = progress_path_for_folder(folder)
-            task: Optional[TaskState] = None
+    # -- 后台加载（扫描/验证/解析均在工作线程，UI 显示进度，防止假死） ----
 
-            if progress.exists():
-                try:
-                    loaded = load_task(progress)
-                except (OSError, ValueError) as exc:
-                    log.warning("读取进度文件失败：%s", exc)
-                    loaded = None
-                if loaded is not None:
-                    ok, reason = verify_folder(loaded, files, folder)
-                    if not ok:
-                        QApplication.restoreOverrideCursor()
-                        if not self._ask_discard_or_reselect(
-                            "进度文件验证失败", reason, reselect_file=False
-                        ):
-                            return
-                        backup_progress_file(progress)
-                    else:
-                        if loaded.source and Path(loaded.source) != folder.resolve():
-                            QApplication.restoreOverrideCursor()
-                            if not self._strong_rebind_warning():
-                                return
-                            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                        task = loaded
+    def _start_load(self, mode: str, path: Path, force_fresh: bool = False) -> None:
+        if self._loader is not None and self._loader.isRunning():
+            return
+        self._compare.stop()
+        self._load_mode = mode
+        self._load_path = Path(path)
 
-            if task is None:
-                task, _ = create_task_folder(folder, files)
+        worker = TaskLoadWorker(
+            mode, path,
+            recursive=self.settings.recursive_scan,
+            force_fresh=force_fresh,
+        )
+        dialog = QProgressDialog("准备…", "取消", 0, 1, self)
+        dialog.setWindowTitle("打开任务")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setMinimumWidth(460)
+        dialog.setAutoClose(True)
+        # autoReset 会在值到达 100% 时触发 reset 并连带 canceled 信号，
+        # 由 _close_load_ui 统一关闭，无需自动重置。
+        dialog.setAutoReset(False)
 
-            self._attach_task(task, folder)
-            self.settings_manager.add_recent(str(folder))
-            self._rebuild_recent_menu()
-        finally:
-            QApplication.restoreOverrideCursor()
+        worker.progress.connect(self._on_load_progress)
+        worker.succeeded.connect(self._on_load_finished)
+        worker.failed.connect(self._on_load_failed)
+        dialog.canceled.connect(worker.request_cancel)
+
+        self._loader = worker
+        self._load_dialog = dialog
+        self.action_open_psd.setEnabled(False)
+        self.action_open_folder.setEnabled(False)
+        dialog.show()
+        worker.start()
+
+    def _on_load_progress(self, done: int, total: int, message: str) -> None:
+        dialog = self._load_dialog
+        if dialog is None:
+            return
+        dialog.setMaximum(max(total, 1))
+        dialog.setValue(min(done, total))
+        # 模态进度框的 setValue 内部会 pump 事件循环，可能重入导致对话框
+        # 已被关闭（self._load_dialog 置 None），需复查后再更新文案。
+        if self._load_dialog is dialog:
+            dialog.setLabelText(message)
+
+    def _close_load_ui(self) -> None:
+        self.action_open_psd.setEnabled(True)
+        self.action_open_folder.setEnabled(True)
+        if self._load_dialog is not None:
+            self._load_dialog.close()
+            self._load_dialog.deleteLater()
+            self._load_dialog = None
+        if self._loader is not None:
+            self._loader.deleteLater()
+            self._loader = None
+
+    def _on_load_failed(self, message: str) -> None:
+        self._close_load_ui()
+        QMessageBox.critical(self, "打开失败", f"加载任务时发生错误：\n{message}")
+
+    def _on_load_finished(self, result) -> None:
+        self._close_load_ui()
+        kind = result.kind
+
+        if kind == KIND_CANCELLED:
+            self.statusBar().showMessage("已取消打开", 3000)
+            return
+        if kind == KIND_NO_FILES:
+            QMessageBox.information(self, "打开文件夹", "该文件夹中没有找到 PSD 文件。")
+            return
+        if kind == KIND_MISMATCH:
+            reselect_file = self._load_mode == "single"
+            if self._ask_discard_or_reselect(
+                "进度文件验证失败", result.reason, reselect_file
+            ):
+                # 用户确认放弃旧进度 → 先备份再强制新建（需求 §7.6 防御）
+                progress = (
+                    progress_path_for_single(self._load_path)
+                    if reselect_file
+                    else progress_path_for_folder(self._load_path)
+                )
+                backup_progress_file(progress)
+                self._start_load(self._load_mode, self._load_path, force_fresh=True)
+            return
+
+        # KIND_OK：恢复或新建成功
+        if result.rebind and not self._strong_rebind_warning():
+            return
+
+        self._attach_task(
+            result.task,
+            result.base_dir,
+            layer_ids_by_file=result.layer_ids_by_file,
+            layer_names_by_file=result.layer_names_by_file,
+            docs=result.docs,
+        )
+        self.settings_manager.add_recent(str(self._load_path))
+        self._rebuild_recent_menu()
+        if result.file_errors:
+            QMessageBox.warning(
+                self,
+                "部分 PSD 无法读取",
+                "以下文件解析失败，已跳过：\n" + "\n".join(result.file_errors),
+            )
 
     def _ask_discard_or_reselect(self, title: str, reason: str, reselect_file: bool) -> bool:
         """验证失败：禁止恢复（需求 §7.6），询问用户重新选择或放弃进度。"""
@@ -541,28 +577,42 @@ class MainWindow(QMainWindow):
         box.button(QMessageBox.StandardButton.Cancel).setText("取消")
         return box.exec() == QMessageBox.StandardButton.Yes
 
-    def _attach_task(self, task: TaskState, base_dir: Path) -> None:
-        """绑定任务并打开（含扫描全部 PSD 图层树，用于统计与导航）。"""
+    def _attach_task(
+        self,
+        task: TaskState,
+        base_dir: Path,
+        layer_ids_by_file=None,
+        layer_names_by_file=None,
+        docs=None,
+    ) -> None:
+        """绑定任务并打开。
+
+        后台加载时传入预扫描的图层数据与文档；未提供时同步兜底扫描。
+        """
         self.task = task
         self._base_dir = base_dir.resolve()
-        self._docs = {}
-        self._layer_ids_by_file = {}
-        self._layer_names_by_file = {}
+        self._docs = dict(docs) if docs is not None else {}
+        self._layer_ids_by_file = (
+            dict(layer_ids_by_file) if layer_ids_by_file is not None else {}
+        )
+        self._layer_names_by_file = (
+            dict(layer_names_by_file) if layer_names_by_file is not None else {}
+        )
         self._current_file = ""
         self._current_index = -1
 
-        # 扫描所有 PSD 的图层树（每个 PSD 只解析一次，需求 §59）
+        # 兜底：补齐未扫描的 PSD 图层树（每个 PSD 只解析一次，需求 §59）
         for record in task.files:
             rel = record.relative_path
+            if rel in self._layer_ids_by_file:
+                continue
             try:
                 doc = self._ensure_doc(rel)
                 if doc is None:
                     log.warning("跳过无法解析的 PSD：%s", rel)
                     continue
-                ids = [info.id for info in doc.layers]
-                names = [info.name for info in doc.layers]
-                self._layer_ids_by_file[rel] = ids
-                self._layer_names_by_file[rel] = names
+                self._layer_ids_by_file[rel] = [info.id for info in doc.layers]
+                self._layer_names_by_file[rel] = [info.name for info in doc.layers]
             except (PSDReadError, OSError) as exc:
                 log.warning("解析失败 %s：%s", rel, exc)
 
@@ -1218,6 +1268,10 @@ class MainWindow(QMainWindow):
     # ================================================================= 生命周期
 
     def closeEvent(self, event) -> None:
+        # 后台加载仍在运行 → 请求取消并等待其退出，避免线程残留
+        if self._loader is not None and self._loader.isRunning():
+            self._loader.request_cancel()
+            self._loader.wait(5000)
         if self.task is not None:
             self._autosave_timer.stop()
             self.save_task()
