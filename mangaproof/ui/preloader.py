@@ -147,9 +147,13 @@ class PreloadWorker(QThread):
 
     @staticmethod
     def _warm_all_layers(doc) -> None:
-        """预热文档全部图层的视觉边界（层像素走 LRU，不常驻）。"""
+        """预热文档全部图层的视觉边界（层像素走 LRU，不常驻）。
+
+        无论个别图层是否提取失败，结束都标记完成，避免反复重试。
+        """
         for info in doc.layers:
             if info.has_visual_bounds():
                 continue
             if doc.layer_image(info.id) is not None:
                 info.visual_bounds()
+        doc.mark_all_layers_warmed()

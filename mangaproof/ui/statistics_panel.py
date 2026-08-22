@@ -59,6 +59,8 @@ class StatisticsPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._chips: List[QToolButton] = []
+        self._chip_file: Optional[str] = None
+        self._layer_names: List[str] = []
         self.psd_cells: Dict[str, QLabel] = {}
         self.total_cells: Dict[str, QLabel] = {}
 
@@ -135,31 +137,25 @@ class StatisticsPanel(QWidget):
     ) -> None:
         self.psd_name_label.setText(f"当前 PSD：{psd_name}")
 
-        for chip in self._chips:
-            self.chip_layout.removeWidget(chip)
-            chip.deleteLater()
-        self._chips = []
-
-        for idx, name in enumerate(layer_names):
-            status = statuses[idx] if idx < len(statuses) else UNREVIEWED
-            color, icon = CHIP_STYLES.get(status, CHIP_STYLES[UNREVIEWED])
-            chip = QToolButton()
-            chip.setText(icon)
-            chip.setToolTip(
-                f"{icon} {name}"
-                + (f"（{issue_counts[idx]} 个问题）" if issue_counts[idx] else "")
-            )
-            chip.setFixedSize(22, 22)
-            chip.setStyleSheet(
-                f"QToolButton {{ color: {color}; font-weight: bold;"
-                f" background: {COLOR_BG_WIDGET}; border: 1px solid transparent;"
-                f" border-radius: 3px; padding: 0; }}"
-                f"QToolButton:hover {{ border-color: {color}; }}"
-            )
-            chip.clicked.connect(lambda _=False, i=idx: self.layer_chip_clicked.emit(i))
-            self._chips.append(chip)
-            row, col = divmod(idx, 12)
-            self.chip_layout.addWidget(chip, row, col)
+        # 仅切换文件时重建芯片（图层数量/名称变化）；
+        # 状态刷新只更新样式——高频重建 deleteLater 的芯片会导致
+        # Qt 布局在延迟销毁期间崩溃，且拖慢每次监制操作。
+        if self._chip_file != psd_name or len(self._chips) != len(layer_names):
+            self._chip_file = psd_name
+            for chip in self._chips:
+                self.chip_layout.removeWidget(chip)
+                chip.setParent(None)
+                chip.deleteLater()
+            self._chips = []
+            for idx, name in enumerate(layer_names):
+                chip = QToolButton()
+                chip.setFixedSize(22, 22)
+                chip.clicked.connect(lambda _=False, i=idx: self.layer_chip_clicked.emit(i))
+                self._chips.append(chip)
+                row, col = divmod(idx, 12)
+                self.chip_layout.addWidget(chip, row, col)
+        self._layer_names = list(layer_names)
+        self._update_chips(statuses, issue_counts)
 
         passed = statuses.count(PASSED)
         failed = statuses.count(FAILED)
@@ -191,6 +187,26 @@ class StatisticsPanel(QWidget):
         self.progress_bar.setValue(int(ratio * 1000))
 
     # -- 内部 --------------------------------------------------------------
+
+    def _update_chips(self, statuses: List[str], issue_counts: List[int]) -> None:
+        """仅更新芯片样式（不重建），供高频状态刷新调用。"""
+        for idx, chip in enumerate(self._chips):
+            if idx >= len(statuses):
+                break
+            status = statuses[idx]
+            color, icon = CHIP_STYLES.get(status, CHIP_STYLES[UNREVIEWED])
+            name = self._layer_names[idx] if idx < len(self._layer_names) else ""
+            chip.setText(icon)
+            chip.setToolTip(
+                f"{icon} {name}"
+                + (f"（{issue_counts[idx]} 个问题）" if issue_counts[idx] else "")
+            )
+            chip.setStyleSheet(
+                f"QToolButton {{ color: {color}; font-weight: bold;"
+                f" background: {COLOR_BG_WIDGET}; border: 1px solid transparent;"
+                f" border-radius: 3px; padding: 0; }}"
+                f"QToolButton:hover {{ border-color: {color}; }}"
+            )
 
     @staticmethod
     def _render_cell(cell: QLabel, value: str, color: Optional[str] = None) -> None:

@@ -120,8 +120,7 @@ class MainWindow(QMainWindow):
         self._preload = PreloadWorker(lambda rel: self._docs.get(rel), self)
         self._preload.task_done.connect(self._on_preload_done)
         self._preload.start()
-        self._pending_open_rel = ""   # 异步打开中的文件（快速切换时替换）
-        self._pending_open_layer: Optional[Tuple[str, int]] = None  # 异步图层切换
+        self._pending_open = None  # (rel, "file") 或 (rel, "layer", index)
         self._open_restore = False
         self._open_dialog = None      # 切换文件的忙碌进度框
         self._preload_targets: set = set()   # 阶段 A 未完成（merged）
@@ -731,7 +730,7 @@ class MainWindow(QMainWindow):
             self._schedule_preloads(rel)
             return
         # 未预热：后台提取 + 非模态忙碌进度框（不阻塞继续切换）
-        self._pending_open_rel = rel
+        self._pending_open = (rel, "file")
         self._preload.submit_open(rel, layer_id)
         self._show_open_progress(rel)
 
@@ -829,22 +828,21 @@ class MainWindow(QMainWindow):
             self._extra_targets.discard(rel)
             self._update_preload_label()
             return
-        # 图层切换结果（异步预热完成后执行切换）
-        if self._pending_open_layer is not None and self._pending_open_layer[0] == rel:
-            _, index = self._pending_open_layer
-            self._pending_open_layer = None
-            self._close_open_progress()
+        # open 结果：统一按单一 pending 标记分派（文件 / 图层），过期结果丢弃
+        pending = self._pending_open
+        if pending is None or pending[0] != rel:
+            return
+        self._pending_open = None
+        self._close_open_progress()
+        if pending[1] == "layer":
+            _, _, index = pending
             if ok and self.current_doc is not None:
                 self._select_layer_internal(index)
                 self._refresh_layer_selection()
                 self._mark_dirty()
                 self.viewer.setFocus()
             return
-        # open 结果：快速切换后旧文件的结果直接忽略
-        if rel != self._pending_open_rel:
-            return
-        self._close_open_progress()
-        self._pending_open_rel = ""
+        # 文件打开
         if not ok:
             QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
             return
@@ -885,7 +883,7 @@ class MainWindow(QMainWindow):
 
     def _on_open_progress_cancelled(self) -> None:
         self._preload.cancel_open()
-        self._pending_open_rel = ""
+        self._pending_open = None
         self._close_open_progress()
         self.statusBar().showMessage("已取消打开", 3000)
 
@@ -918,23 +916,17 @@ class MainWindow(QMainWindow):
 
         merged_jobs: List[Tuple[str, str]] = []
         extra_jobs: List[Tuple[str, str]] = []
-        # 当前文件：后台预热背景图 + 全部图层的视觉边界（任意 ←→ 图层
-        # 切换免等待）；已完成的部分跳过，避免重复排队
-        cur_doc = self._docs.get(rel)
-        if cur_doc is not None:
-            if not cur_doc.has_bg() or not self._all_layers_warm(cur_doc):
-                extra_jobs.append((rel, WARM_ALL))
-
-        for c in candidates:
+        # 当前文件与邻域文件：后台预热背景图 + 全部图层的视觉边界
+        #（任意文件的任意 ←→ 图层切换免等待）；已完成的部分跳过，
+        # 避免重复排队
+        for c in [rel, *candidates]:
             doc = self._docs.get(c)
-            layer_id = target_layer_of(c)
-            if doc is None or not doc.has_merged():
-                merged_jobs.append((c, layer_id))
-            # 背景图/目标图层已完成的部分不再重复排队
-            if doc is not None and (
-                not doc.has_bg() or (layer_id and not self._target_layer_warm(doc, layer_id))
-            ):
-                extra_jobs.append((c, layer_id))
+            if doc is None:
+                continue
+            if not doc.has_merged():
+                merged_jobs.append((c, target_layer_of(c)))
+            if not doc.has_bg() or not self._all_layers_warm(doc):
+                extra_jobs.append((c, WARM_ALL))
 
         self._preload_targets = {r for r, _ in merged_jobs}
         self._extra_targets = {r for r, _ in extra_jobs}
@@ -955,8 +947,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _all_layers_warm(doc: PSDDocument) -> bool:
-        """文档全部图层的视觉边界是否已计算（图层切换免提取）。"""
-        return all(info.has_visual_bounds() for info in doc.layers)
+        """文档全部图层的视觉边界是否已计算（图层切换免提取）。
+
+        已标记「全量预热完成」的文档直接视为就绪（个别失败图层不重试）。
+        """
+        return doc.all_layers_warmed or all(
+            info.has_visual_bounds() for info in doc.layers
+        )
 
     def _update_preload_label(self) -> None:
         if self.task is None:
@@ -1024,8 +1021,7 @@ class MainWindow(QMainWindow):
             self.viewer.setFocus()
             return
         # 未预热：后台提取视觉边界（merged 已缓存，仅图层像素）
-        self._pending_open_layer = (self._current_file, index)
-        self._pending_open_rel = ""
+        self._pending_open = (self._current_file, "layer", index)
         self._preload.submit_open(self._current_file, info.id)
         self._show_open_progress(f"{self._current_file} / {info.name}")
 

@@ -59,6 +59,8 @@ class PSDDocument:
         self._layers: Optional[List[LayerInfo]] = None
         self._layer_by_id: Optional[Dict[str, LayerInfo]] = None
         self._bg_layer_id: Optional[str] = None
+        # 全图层视觉边界预热是否已完成（个别提取失败的图层不再反复重试）
+        self._all_layers_warmed = False
 
     # -- 基本信息 ----------------------------------------------------------
 
@@ -275,6 +277,14 @@ class PSDDocument:
     def has_bg(self) -> bool:
         """背景图是否已尝试提取（区分「未提取」与「已提取但无背景层」）。"""
         return self._bg_checked
+
+    def mark_all_layers_warmed(self) -> None:
+        """标记全图层视觉边界预热已完成（失败图层不再重试）。"""
+        self._all_layers_warmed = True
+
+    @property
+    def all_layers_warmed(self) -> bool:
+        return self._all_layers_warmed
 
     # -- 资源 --------------------------------------------------------------
 
