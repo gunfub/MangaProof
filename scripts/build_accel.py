@@ -19,6 +19,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 cp1252，打印中文会 UnicodeEncodeError → 强制 UTF-8
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "mangaproof" / "_psd_fast.c"
 OUT = ROOT / "mangaproof" / ("_psd_fast.pyd" if platform.system() == "Windows" else "_psd_fast.so")

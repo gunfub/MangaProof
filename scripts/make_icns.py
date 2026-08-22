@@ -15,6 +15,13 @@ import struct
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 cp1252，打印中文会 UnicodeEncodeError → 强制 UTF-8
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from PIL import Image
 
 # (类型码, 像素尺寸)：经典尺寸 + 现代尺寸 + Retina (@2x) 变体
