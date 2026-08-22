@@ -1,11 +1,13 @@
 """图层像素 LRU 缓存（需求 §59、§60）。
 
 - merged image 与 background image 属于文档长期缓存（由 PSDDocument 持有）；
-- 其余图层像素进入本 LRU 缓存，按字节预算淘汰，避免无限占用内存。
+- 其余图层像素进入本 LRU 缓存，按字节预算淘汰，避免无限占用内存；
+- 线程安全：缓存实例在后台预加载线程与 UI 线程间共享。
 """
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from typing import Optional, Tuple
 
@@ -17,29 +19,34 @@ class LayerImageCache:
         self._max_bytes = max_bytes
         self._store: OrderedDict[Tuple[str, str], np.ndarray] = OrderedDict()
         self._bytes = 0
+        self._lock = threading.Lock()
 
     def get(self, psd_path: str, layer_id: str) -> Optional[np.ndarray]:
         key = (psd_path, layer_id)
-        img = self._store.get(key)
-        if img is not None:
-            self._store.move_to_end(key)
-        return img
+        with self._lock:
+            img = self._store.get(key)
+            if img is not None:
+                self._store.move_to_end(key)
+            return img
 
     def put(self, psd_path: str, layer_id: str, image: np.ndarray) -> None:
         key = (psd_path, layer_id)
-        if key in self._store:
-            self._store.move_to_end(key)
-            return
-        size = int(image.nbytes)
-        self._store[key] = image
-        self._bytes += size
-        while self._bytes > self._max_bytes and len(self._store) > 1:
-            _, victim = self._store.popitem(last=False)
-            self._bytes -= int(victim.nbytes)
+        with self._lock:
+            if key in self._store:
+                self._store.move_to_end(key)
+                return
+            size = int(image.nbytes)
+            self._store[key] = image
+            self._bytes += size
+            while self._bytes > self._max_bytes and len(self._store) > 1:
+                _, victim = self._store.popitem(last=False)
+                self._bytes -= int(victim.nbytes)
 
     def clear(self) -> None:
-        self._store.clear()
-        self._bytes = 0
+        with self._lock:
+            self._store.clear()
+            self._bytes = 0
 
     def __len__(self) -> int:
-        return len(self._store)
+        with self._lock:
+            return len(self._store)

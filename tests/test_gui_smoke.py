@@ -43,12 +43,81 @@ def _copy_fixtures(dst: Path) -> Path:
 
 
 def _wait_for_task(window: MainWindow, timeout_s: float = 30.0) -> None:
-    """打开为后台异步流程：轮询事件循环直到任务绑定完成。"""
+    """打开为后台异步流程：轮询事件循环直到任务绑定且首文件打开完成。"""
     deadline = time.time() + timeout_s
-    while window.task is None and time.time() < deadline:
+    while (window.task is None or window._current_file == "") and time.time() < deadline:
         app.processEvents()
         time.sleep(0.02)
     assert window.task is not None, "任务加载超时（后台 worker 未完成）"
+    assert window._current_file != "", "首文件异步打开超时"
+
+
+def _wait_for_file(window: MainWindow, rel: str, timeout_s: float = 30.0) -> None:
+    """文件切换为异步流程（未命中预加载时经后台线程 + 进度框）。"""
+    deadline = time.time() + timeout_s
+    while window._current_file != rel and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.02)
+    assert window._current_file == rel, (
+        f"切换文件超时：期望 {rel}，实际 {window._current_file}"
+    )
+
+
+def test_preload_worker() -> None:
+    """预加载线程：open 请求缓存 merged/背景/目标图层；队列可整体替换。"""
+    from mangaproof.psd.document import PSDDocument
+    from mangaproof.ui.preloader import KIND_OPEN, PreloadWorker
+
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = _copy_fixtures(Path(tmp) / "chapter01")
+        docs = {
+            p.name: PSDDocument(p) for p in sorted(folder.glob("*.psd"))
+        }
+        for doc in docs.values():
+            doc.build_layers()   # 模拟 attach 已解析图层树
+
+        done = []
+        worker = PreloadWorker(lambda rel: docs.get(rel))
+        worker.task_done.connect(lambda rel, kind, ok: done.append((rel, kind, ok)))
+        worker.start()
+
+        # open 请求：merged + 背景 + 目标图层像素/视觉边界全部预热
+        layer_id = docs["001.psd"].layers[1].id
+        worker.submit_open("001.psd", layer_id)
+        deadline = time.time() + 30
+        while not any(d[0] == "001.psd" for d in done) and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert ("001.psd", KIND_OPEN, True) in done
+        doc = docs["001.psd"]
+        assert doc.has_merged()
+        assert doc.bg_image() is not None
+        assert doc.layer_image(layer_id) is not None
+        assert doc.layers[1].visual_bounds() is not None
+
+        # 预加载队列整体替换：两个文件依次预热完成
+        worker.set_preloads(["002.psd", "10.psd"])
+        deadline = time.time() + 30
+        while not all(d.has_merged() for d in (docs["002.psd"], docs["10.psd"])) \
+                and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert docs["002.psd"].has_merged() and docs["10.psd"].has_merged()
+
+        # 快速切换：cancel_open 丢弃未处理请求，新 open 请求立即生效
+        worker.cancel_open()
+        worker.submit_open("002.psd", docs["002.psd"].layers[0].id)
+        deadline = time.time() + 30
+        while not any(d[0] == "002.psd" and d[1] == KIND_OPEN for d in done) \
+                and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert any(d[0] == "002.psd" and d[1] == KIND_OPEN for d in done)
+
+        worker.stop()
+        worker.wait(5000)
+
+    print("PASS test_preload_worker")
 
 
 def test_task_loader_progress() -> None:
@@ -298,12 +367,11 @@ def test_full_workflow() -> None:
         window.cancel_operation()
         assert window.viewer.pending_type is None
 
-        # ↑↓ PSD 导航
+        # ↑↓ PSD 导航（异步切换：预加载命中走快路径，未命中经后台线程）
         window.next_psd()
-        app.processEvents()
-        assert window._current_file == "002.psd"
+        _wait_for_file(window, "002.psd")
         window.prev_psd()
-        assert window._current_file == "001.psd"
+        _wait_for_file(window, "001.psd")
 
         # Space 自动对比：merged ↔ bg 闪切
         window.toggle_compare()

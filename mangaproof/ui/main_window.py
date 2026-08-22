@@ -59,6 +59,8 @@ from mangaproof.ui.dialogs import IssueDialog, ReportDialog
 from mangaproof.ui.file_panel import FilePanel
 from mangaproof.ui.issue_panel import IssuePanel
 from mangaproof.ui.layer_panel import LayerPanel
+from mangaproof.ui.license_dialog import LicenseDialog
+from mangaproof.ui.preloader import KIND_OPEN, KIND_PRELOAD, PreloadWorker
 from mangaproof.ui.settings_dialog import SettingsDialog
 from mangaproof.ui.statistics_panel import StatisticsPanel
 from mangaproof.ui.task_loader import (
@@ -107,6 +109,14 @@ class MainWindow(QMainWindow):
         self._load_dialog = None
         self._load_mode = ""
         self._load_path: Optional[Path] = None
+
+        # PSD 预加载线程（切换大文件不卡顿）
+        self._preload = PreloadWorker(lambda rel: self._docs.get(rel), self)
+        self._preload.task_done.connect(self._on_preload_done)
+        self._preload.start()
+        self._pending_open_rel = ""   # 异步打开中的文件（快速切换时替换）
+        self._open_restore = False
+        self._open_dialog = None      # 切换文件的忙碌进度框
 
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
@@ -273,8 +283,6 @@ class MainWindow(QMainWindow):
         )
 
     def _show_licenses(self) -> None:
-        from mangaproof.ui.license_dialog import LicenseDialog
-
         dialog = LicenseDialog(self)
         dialog.exec()
 
@@ -638,7 +646,7 @@ class MainWindow(QMainWindow):
         if rel not in self._layer_ids_by_file:
             rel = next(iter(self._layer_ids_by_file), "")
         if rel:
-            self._open_file_internal(rel, restore=True)
+            self._request_open_file(rel, restore=True)
         self._refresh_all_panels()
         self._mark_dirty(save_immediately=False)
         # 布局完成后重新定位一次（窗口尺寸此时才确定）
@@ -677,18 +685,62 @@ class MainWindow(QMainWindow):
 
     def _switch_file(self, rel: str) -> None:
         self._compare.stop()
-        self._open_file_internal(rel, restore=False)
-        self._refresh_all_panels()
-        self._mark_dirty()
-        self.viewer.setFocus()
+        self._request_open_file(rel, restore=False)
+
+    def _request_open_file(self, rel: str, restore: bool) -> None:
+        """打开文件入口：已预加载走快路径；未命中交后台线程 + 进度框。
+
+        快速连续切换时，新请求会替换未处理的旧请求（见 PreloadWorker）。
+        """
+        doc = self._docs.get(rel)
+        if doc is None:
+            QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
+            return
+        self._open_restore = restore
+        if doc.has_merged():
+            self._open_file_internal(rel, restore)
+            self._refresh_all_panels()
+            self._mark_dirty()
+            self.viewer.setFocus()
+            self._schedule_preloads(rel)
+            return
+        # 未预加载：后台提取 + 非模态忙碌进度框（不阻塞继续切换）
+        self._pending_open_rel = rel
+        index = self._choose_layer_index(rel, restore)
+        layer_id = ""
+        if index is not None:
+            ids = self._layer_ids_by_file.get(rel, [])
+            if index < len(ids):
+                layer_id = ids[index]
+        self._preload.submit_open(rel, layer_id)
+        self._show_open_progress(rel)
+
+    def _choose_layer_index(self, rel: str, restore: bool) -> Optional[int]:
+        """目标图层选择（需求 §13）：restore 用上次位置；
+        否则优先第一个未监制，全部完成则回上次位置。"""
+        layer_ids = self._layer_ids_by_file.get(rel, [])
+        if not layer_ids:
+            return None
+        if restore:
+            index = None
+            if self.task and self.task.current_layer in layer_ids:
+                index = layer_ids.index(self.task.current_layer)
+            if index is None:
+                index = navigator.first_unreviewed_index(
+                    layer_ids, self.task.reviews, rel
+                )
+            return 0 if index is None else index
+        index = navigator.first_unreviewed_index(layer_ids, self.task.reviews, rel)
+        if index is None:
+            index = None
+            if self.task and self.task.current_layer in layer_ids:
+                index = layer_ids.index(self.task.current_layer)
+            return 0 if index is None else index
+        return index
 
     def _open_file_internal(self, rel: str, restore: bool) -> None:
-        """打开 PSD 并选择图层（需求 §12、§13）。
-
-        restore=True：恢复上次位置（任务恢复）；
-        restore=False：优先第一个未监制图层，全部完成则回上次位置。
-        """
-        doc = self._ensure_doc(rel)
+        """打开 PSD 并选择图层（快路径：图像已缓存，需求 §12、§13）。"""
+        doc = self._docs.get(rel)
         if doc is None:
             QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
             return
@@ -708,6 +760,9 @@ class MainWindow(QMainWindow):
                     "该 PSD 不包含可用的 merged/composite image，\n"
                     "本程序无法提供 Original 显示（不进行程序重新合成）。",
                 )
+            except Exception:
+                self._warned_no_composite.add(rel)
+                QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
 
         layer_ids = self._layer_ids_by_file.get(rel, [])
         self.layer_panel.set_layers(self._layer_names_by_file.get(rel, []))
@@ -718,26 +773,91 @@ class MainWindow(QMainWindow):
             self.viewer.set_layer_outline(None)
             return
 
-        if restore:
-            index = None
-            if self.task and self.task.current_layer in layer_ids:
-                index = layer_ids.index(self.task.current_layer)
-            if index is None:
-                index = navigator.first_unreviewed_index(
-                    layer_ids, self.task.reviews, rel
-                )
-            if index is None:
-                index = 0
-        else:
-            index = navigator.first_unreviewed_index(layer_ids, self.task.reviews, rel)
-            if index is None:
-                index = None
-                if self.task and self.task.current_layer in layer_ids:
-                    index = layer_ids.index(self.task.current_layer)
-                if index is None:
-                    index = 0
-
+        index = self._choose_layer_index(rel, restore)
         self._select_layer_internal(index)
+
+    # -- 预加载与异步打开（大 PSD 切换不卡顿） -----------------------------
+
+    def _on_preload_done(self, rel: str, kind: str, ok: bool) -> None:
+        if kind == KIND_PRELOAD:
+            return  # 后台预热完成，无需 UI 动作
+        # open 结果：快速切换后旧文件的结果直接忽略
+        if rel != self._pending_open_rel:
+            return
+        self._close_open_progress()
+        self._pending_open_rel = ""
+        if not ok:
+            QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
+            return
+        self._open_file_internal(rel, self._open_restore)
+        self._refresh_all_panels()
+        self._mark_dirty()
+        self.viewer.setFocus()
+        self._schedule_preloads(rel)
+
+    def _show_open_progress(self, rel: str) -> None:
+        if self._open_dialog is None:
+            dialog = QProgressDialog("正在加载…", "取消", 0, 0, self)
+            dialog.setWindowTitle("切换 PSD")
+            # 非模态：用户可继续用键盘快速连续切换
+            dialog.setWindowModality(Qt.WindowModality.NonModal)
+            dialog.setMinimumDuration(0)
+            dialog.setMinimumWidth(400)
+            dialog.setAutoClose(True)
+            dialog.canceled.connect(self._on_open_progress_cancelled)
+            self._open_dialog = dialog
+        self._open_dialog.setLabelText(
+            f"正在加载 {rel}…\n（提取 merged image、背景图层与目标图层像素）"
+        )
+        self._open_dialog.show()
+
+    def _close_open_progress(self) -> None:
+        dialog = self._open_dialog
+        if dialog is None:
+            return
+        self._open_dialog = None
+        # 先断开 canceled：close() 可能触发该信号导致重入
+        try:
+            dialog.canceled.disconnect(self._on_open_progress_cancelled)
+        except (RuntimeError, TypeError):
+            pass
+        dialog.close()
+        dialog.deleteLater()
+
+    def _on_open_progress_cancelled(self) -> None:
+        self._preload.cancel_open()
+        self._pending_open_rel = ""
+        self._close_open_progress()
+        self.statusBar().showMessage("已取消打开", 3000)
+
+    def _schedule_preloads(self, rel: str) -> None:
+        """预加载当前文件邻域（后 3 个 + 前 1 个），并回收窗口外大图内存。"""
+        if self.task is None:
+            return
+        order = [r.relative_path for r in self.task.files]
+        try:
+            i = order.index(rel)
+        except ValueError:
+            return
+        candidates: List[str] = []
+        for j in (i + 1, i + 2, i + 3, i - 1):
+            if 0 <= j < len(order):
+                candidates.append(order[j])
+        targets = [
+            c for c in candidates
+            if not (self._docs.get(c) is not None and self._docs[c].has_merged())
+        ]
+        self._preload.set_preloads(targets)
+
+        # 内存策略：释放窗口外文档的 merged/bg（图层树与 LRU 保留）。
+        # release_images 非阻塞：后台仍在提取的文档自动跳过，下轮再回收。
+        keep = {rel, *candidates}
+        for r in order:
+            if r in keep:
+                continue
+            doc = self._docs.get(r)
+            if doc is not None:
+                doc.release_images()
 
     def _select_layer_internal(self, index: int) -> None:
         """切换图层统一行为（需求 §12）：停对比 → Original → 切换 → 定位 → 缩放。"""
@@ -1294,6 +1414,8 @@ class MainWindow(QMainWindow):
         if self._loader is not None and self._loader.isRunning():
             self._loader.request_cancel()
             self._loader.wait(5000)
+        self._preload.stop()
+        self._preload.wait(8000)
         if self.task is not None:
             self._autosave_timer.stop()
             self.save_task()

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -44,6 +45,10 @@ class PSDDocument:
         self._psd = psd if psd is not None else loader.open_psd_tools(self.path)
         self._layer_cache = layer_cache if layer_cache is not None else LayerImageCache()
 
+        # 像素提取可能在后台预加载线程与 UI 线程间并发，
+        # 用可重入锁串行化对 psd-tools 惰性解析的访问。
+        self._io_lock = threading.RLock()
+
         # 长期缓存：merged image（需求 §60）
         self._merged_np: Optional[np.ndarray] = None
         self._merged_error: Optional[Exception] = None
@@ -70,22 +75,55 @@ class PSDDocument:
 
     # -- merged image ------------------------------------------------------
 
+    def has_merged(self) -> bool:
+        """merged image 是否已提取（或已确认不可用）。"""
+        return self._merged_np is not None or self._merged_error is not None
+
     def merged_np(self) -> np.ndarray:
         """PSD 自带的 merged image（RGBA numpy），仅读取一次。
 
-        无 merged image 时抛 NoCompositeError（缓存该错误，避免重复解析）。
+        无 merged image 时抛 NoCompositeError；所有异常都会缓存，
+        避免每次访问都重新解析。
         """
-        if self._merged_np is None and self._merged_error is None:
-            try:
-                pil = loader.get_merged_pil(self._psd)
-                rgba = pil.convert("RGBA")
-                self._merged_np = np.asarray(rgba).copy()
-            except loader.NoCompositeError as exc:
-                self._merged_error = exc
-                raise
-        if self._merged_error is not None:
-            raise loader.NoCompositeError(str(self._merged_error))
-        return self._merged_np  # type: ignore[return-value]
+        with self._io_lock:
+            if self._merged_np is None and self._merged_error is None:
+                try:
+                    pil = loader.get_merged_pil(self._psd)
+                    rgba = pil.convert("RGBA")
+                    self._merged_np = np.asarray(rgba).copy()
+                except Exception as exc:
+                    self._merged_error = exc
+                    raise
+            if self._merged_error is not None:
+                if isinstance(self._merged_error, loader.NoCompositeError):
+                    raise loader.NoCompositeError(str(self._merged_error))
+                raise self._merged_error
+            return self._merged_np  # type: ignore[return-value]
+
+    def prepare_images(self) -> None:
+        """后台预加载：提取 merged 与背景图像，失败仅缓存错误不抛出。"""
+        try:
+            self.merged_np()
+        except Exception:
+            pass
+        try:
+            self.bg_image()
+        except Exception:
+            pass
+
+    def release_images(self) -> None:
+        """释放 merged/bg 大图（保留图层树与 LRU 层像素缓存）。
+
+        非阻塞：若后台线程正在提取则跳过本轮，避免 UI 卡在锁上。
+        """
+        if not self._io_lock.acquire(blocking=False):
+            return
+        try:
+            self._merged_np = None
+            self._merged_error = None
+            self._bg = None
+        finally:
+            self._io_lock.release()
 
     # -- 图层 --------------------------------------------------------------
 
@@ -122,23 +160,27 @@ class PSDDocument:
         return infos
 
     def _make_image_loader(self, node):
-        """返回惰性加载器：layer composite（含蒙版/剪贴）→ 失败退化为 topil。"""
+        """返回惰性加载器：layer composite（含蒙版/剪贴）→ 失败退化为 topil。
+
+        提取过程持 io 锁，避免与后台预加载线程并发访问 psd-tools。
+        """
 
         def load():
-            try:
-                # composite() 得到图层自身内容（含蒙版、剪贴图层），
-                # 背景透明。这是图层“实际显示内容”的最佳近似。
-                img = node.composite(force=True)
-                if img is None:
-                    img = node.topil()
-            except Exception:
+            with self._io_lock:
                 try:
-                    img = node.topil()
+                    # composite() 得到图层自身内容（含蒙版、剪贴图层），
+                    # 背景透明。这是图层“实际显示内容”的最佳近似。
+                    img = node.composite(force=True)
+                    if img is None:
+                        img = node.topil()
                 except Exception:
+                    try:
+                        img = node.topil()
+                    except Exception:
+                        return None
+                if img is None:
                     return None
-            if img is None:
-                return None
-            return np.asarray(img.convert("RGBA")).copy()
+                return np.asarray(img.convert("RGBA")).copy()
 
         return load
 
