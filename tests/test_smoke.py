@@ -204,6 +204,79 @@ def test_report_generation():
         print("PDF OK:", out, out.stat().st_size, "bytes")
 
 
+def _decode_pdf_streams(pdf_bytes: bytes) -> list[bytes]:
+    """解出 PDF 内容流（ASCII85/FlateDecode），返回字节列表。"""
+    import base64
+    import re
+    import zlib
+
+    out = []
+    for m in re.finditer(rb"stream\r?\n(.*?)endstream", pdf_bytes, re.S):
+        body = m.group(1).strip()
+        data = None
+        try:
+            data = zlib.decompress(body)
+        except Exception:
+            try:
+                data = zlib.decompress(base64.a85decode(body, adobe=True))
+            except Exception:
+                try:
+                    data = base64.a85decode(body, adobe=True)
+                except Exception:
+                    data = body
+        if data:
+            out.append(data)
+    return out
+
+
+def test_pdf_badge_number_outside_rect():
+    """回归：PDF 徽标必须含纯数字（Helvetica-Bold）且位于红框外侧（需求 §52/§53）。"""
+    import re
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = _copy_fixtures(Path(tmp) / "chapter01")
+        task, _ = persistence.create_task_folder(folder, sorted(folder.glob("*.psd")))
+        doc1 = PSDDocument(folder / "001.psd")
+        ids = [i.id for i in doc1.layers]
+        task.set_status("001.psd", ids[1], FAILED)
+        task.add_issue("001.psd", ids[1], "dialogue_01", "字体选择错误",
+                       "这里应使用 Bold", (40, 60, 120, 60))
+        out = folder / "badge.pdf"
+        generate_report(
+            task,
+            {"001.psd": ids, "002.psd": [], "10.psd": []},
+            out,
+            image_provider=lambda rel: PSDDocument(folder / rel),
+        )
+        streams = _decode_pdf_streams(out.read_bytes())
+        raw = out.read_bytes()
+        # 徽标字体资源注册为 Helvetica-Bold（内容流中被子集引用为 /F<n>）
+        assert b"Helvetica-Bold" in raw, "徽标未使用 Helvetica-Bold"
+        annotated = next(
+            (s for s in streams if b" re S" in s and b"(1)" in s), None
+        )
+        assert annotated is not None, "未找到带红框与徽标的页面流"
+
+        text = annotated.decode("latin-1")
+        # 徽标数字：纯 ASCII "(1)"，7pt（Helvetica-Bold 子集字体）
+        assert re.search(r"/F\d+ 7 Tf", text)
+        # 红框矩形与徽标数字基线位置（PDF y 轴向上：数字基线应在红框顶边之上）
+        m_rect = re.search(
+            r"([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) re S", text
+        )
+        m_num = re.search(
+            r"([\d.]+) ([\d.]+) Tm \(1\) Tj", text
+        )
+        assert m_rect and m_num, "未解析到红框或徽标文本"
+        rx, ry, rw, rh = (float(v) for v in m_rect.groups())
+        num_y = float(m_num.group(2))
+        assert num_y > ry + rh, (
+            f"徽标应在红框外侧上方：徽标基线 y={num_y}，红框顶边 y={ry + rh}"
+        )
+        print("PDF badge OK：数字在框外", num_y, ">", ry + rh)
+
+
 if __name__ == "__main__":
     import traceback
     tests = [

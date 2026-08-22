@@ -354,16 +354,27 @@ class AnnotatedPageFlowable(Flowable):
                 continue
             px = off_x + x * scale
             py = off_y + (img_h - y - h) * scale
+            rect_top = off_y + (img_h - y) * scale
             c.setStrokeColor(colors.HexColor("#E53935"))
             c.setLineWidth(2.0)
             c.rect(px, py, w * scale, h * scale, stroke=1, fill=0)
 
-            # 问题编号：红底圆 + 白字（需求 §53）
+            # 问题编号徽标（需求 §53）：红底圆角矩形 + 白色数字，
+            # 与 UI Viewer 一致放在红框左上角外侧；空间不足时退到框内。
             n = idx + 1
-            cx, cy = px + 5 * mm, py + h * scale - 5 * mm
-            r = 4 * mm
+            badge_w, badge_h, badge_r = 8 * mm, 6 * mm, 1.2 * mm
+            gap = 1.2 * mm
+            bx = max(off_x + 0.5 * mm, min(px, off_x + self.width - badge_w - 0.5 * mm))
+            if rect_top + gap + badge_h <= off_y + self.height - 0.5 * mm:
+                by = rect_top + gap          # 框外上方（与 UI 一致）
+            else:
+                by = rect_top - badge_h - gap  # 空间不足 → 框内左上角
             c.setFillColor(colors.HexColor("#E53935"))
-            c.circle(cx, cy, r, stroke=0, fill=1)
+            c.roundRect(bx, by, badge_w, badge_h, badge_r, stroke=0, fill=1)
+            # 纯数字 + Helvetica-Bold：canvas 路径下 CID 字体对 ① 编码异常，
+            # 使用标准字体保证徽标数字可靠渲染（正文列表仍用 ① 对应）。
             c.setFillColor(colors.white)
-            c.setFont(ZH_FONT, 9)
-            c.drawCentredString(cx, cy - 3, circled_number(n))
+            c.setFont("Helvetica-Bold", 7)
+            c.drawCentredString(
+                bx + badge_w / 2.0, by + badge_h / 2.0 - 2.4, str(n)
+            )
