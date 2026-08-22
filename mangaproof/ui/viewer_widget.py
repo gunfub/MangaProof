@@ -42,6 +42,15 @@ MIN_RECT_WORLD_SIZE = 3.0     # 拖框最小尺寸（世界像素），过滤误
 CHECKER_SIZE = 16
 
 
+def smooth_scaling_for(zoom: float) -> bool:
+    """缩放插值策略（类 Photoshop）。
+
+    zoom < 1：True（双线性平滑下采样，缩小不丢细节）；
+    zoom >= 1：False（最近邻，放大显示清晰像素块）。
+    """
+    return zoom < 1.0
+
+
 class ViewerWidget(QWidget):
     # 方式 B：先拖出红框（世界坐标 x, y, w, h）
     rect_drawn = Signal(float, float, float, float)
@@ -206,7 +215,11 @@ class ViewerWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        # 缩放质量策略（类 Photoshop）：
+        # - zoom < 100%：双线性平滑，保证缩小时的下采样质量；
+        # - zoom >= 100%：最近邻采样，放大显示清晰的像素块，不糊。
+        smooth = smooth_scaling_for(self._camera.zoom)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, smooth)
         self._paint_checkerboard(painter)
 
         if self._doc is None:
@@ -222,6 +235,13 @@ class ViewerWidget(QWidget):
             w, h = qimg.width(), qimg.height()
             sx0, sy0 = self._camera.world_to_screen(ox, oy, vw, vh)
             sx1, sy1 = self._camera.world_to_screen(ox + w, oy + h, vw, vh)
+            if not smooth:
+                # 最近邻 + 设备像素取整：像素块边缘锐利、尺寸均匀
+                dpr = self.devicePixelRatioF()
+                sx0 = round(sx0 * dpr) / dpr
+                sy0 = round(sy0 * dpr) / dpr
+                sx1 = round(sx1 * dpr) / dpr
+                sy1 = round(sy1 * dpr) / dpr
             painter.drawImage(
                 QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0),
                 qimg,

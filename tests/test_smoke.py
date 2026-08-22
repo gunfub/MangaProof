@@ -331,6 +331,18 @@ def test_settings_hide_console_persisted():
         assert sm2.settings.hide_console is False
 
 
+def test_zoom_scaling_policy():
+    """回归：缩放 <100% 平滑下采样，>=100% 最近邻显示像素块（类 PS）。"""
+    from mangaproof.ui.viewer_widget import smooth_scaling_for
+
+    assert smooth_scaling_for(0.2) is True
+    assert smooth_scaling_for(0.6) is True
+    assert smooth_scaling_for(0.99) is True
+    assert smooth_scaling_for(1.0) is False
+    assert smooth_scaling_for(2.5) is False
+    assert smooth_scaling_for(8.0) is False
+
+
 if __name__ == "__main__":
     import traceback
     tests = [
