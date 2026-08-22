@@ -150,6 +150,40 @@ def test_font_loading() -> None:
     print("PASS test_font_loading")
 
 
+def test_license_page() -> None:
+    """第三方许可页：与「关于」分离，覆盖全部依赖/库/打包工具/字体。"""
+    from mangaproof.third_party import build_third_party_items
+    from mangaproof.ui.license_dialog import LicenseDialog
+
+    items = build_third_party_items()
+    names = [i.name for i in items]
+    # 覆盖：运行时、PSD 解析、图像分析、GUI、PDF、图像处理、打包工具及其依赖、字体
+    for keyword in ("Python", "psd-tools", "NumPy", "PySide6", "reportlab",
+                    "Pillow", "PyInstaller", "altgraph", "MiSans"):
+        assert any(keyword in n for n in names), f"缺少组件：{keyword}"
+    for item in items:
+        assert item.name and item.version and item.spdx and item.copyright
+        assert item.homepage.startswith("http")
+        assert len(item.license_text) > 100
+    # MiSans 条目包含完整协议与出处
+    misans = next(i for i in items if "MiSans" in i.name)
+    assert "小米" in misans.license_text and "hyperos.mi.com" in misans.homepage
+    # 版本解析：已安装包应返回真实版本
+    psd = next(i for i in items if "psd-tools" in i.name)
+    assert psd.version == "1.18.0"
+
+    # 对话框：组件列表与详情联动
+    dialog = LicenseDialog()
+    assert dialog.component_list.count() == len(items)
+    dialog.component_list.setCurrentRow(1)
+    app.processEvents()
+    detail = dialog.detail_view.toPlainText()
+    assert "许可证" in detail and "psd-tools" in detail
+    dialog.close()
+
+    print("PASS test_license_page")
+
+
 def test_full_workflow() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

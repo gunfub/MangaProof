@@ -107,6 +107,16 @@ uv run pyinstaller --clean --noconfirm packaging/main_linux.spec
   不对字体做任何改编或二次开发；字体文件仅随本软件整体分发，不单独提供；
 - 字体文件缺失时自动回退系统默认字体，不阻塞启动。
 
+## 第三方许可
+
+- 「关于」与「第三方许可」分离：帮助 → 关于 MangaProof（产品信息）、
+  帮助 → 第三方许可（全部第三方组件声明）；
+- 覆盖运行时（Python）、PSD 解析（psd-tools）、图像分析（NumPy）、
+  GUI（PySide6/Qt）、PDF（reportlab）、图像处理（Pillow）、
+  打包工具（PyInstaller、altgraph）与 MiSans 字体，
+  每个组件列出名称、版本、SPDX 许可证标识、版权、主页与许可证全文/官方链接；
+- 版本号运行时从已安装包元数据解析（`mangaproof/third_party.py`）。
+
 ## 任务匹配验证
 
 - 单 PSD：文件大小 + 完整 SHA-256；

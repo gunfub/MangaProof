@@ -256,6 +256,9 @@ class MainWindow(QMainWindow):
         about_action = QAction("关于 MangaProof", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+        license_action = QAction("第三方许可…", self)
+        license_action.triggered.connect(self._show_licenses)
+        help_menu.addAction(license_action)
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -265,11 +268,15 @@ class MainWindow(QMainWindow):
             "漫画翻译质量检查与返修标注工具。<br><br>"
             "独立于 Photoshop：不调用 Photoshop API、不修改 PSD、<br>"
             "Original 直接使用 PSD 自带 merged image。<br><br>"
-            "本软件使用小米 <b>MiSans</b> 字体"
-            "（<a href='https://hyperos.mi.com/font/download'>"
-            "https://hyperos.mi.com/font/download</a>），<br>"
-            "依据《MiSans 字体知识产权许可协议》使用。",
+            "本软件使用小米 MiSans 字体，第三方组件与许可证信息<br>"
+            "见「帮助 → 第三方许可」。",
         )
+
+    def _show_licenses(self) -> None:
+        from mangaproof.ui.license_dialog import LicenseDialog
+
+        dialog = LicenseDialog(self)
+        dialog.exec()
 
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()
