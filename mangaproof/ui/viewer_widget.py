@@ -51,6 +51,19 @@ def smooth_scaling_for(zoom: float) -> bool:
     return zoom < 1.0
 
 
+def numpy_to_qimage(arr) -> Optional[QImage]:
+    """RGBA numpy → QImage（深拷贝，独立于 numpy 内存）。
+
+    可在非 GUI 线程调用（QImage 允许跨线程创建，交由主线程使用）。
+    """
+    if arr is None or arr.size == 0:
+        return None
+    arr = np.ascontiguousarray(arr)
+    h, w = arr.shape[:2]
+    qimg = QImage(arr.data, w, h, arr.strides[0], QImage.Format.Format_RGBA8888)
+    return qimg.copy()
+
+
 class ViewerWidget(QWidget):
     # 方式 B：先拖出红框（世界坐标 x, y, w, h）
     rect_drawn = Signal(float, float, float, float)
@@ -196,14 +209,15 @@ class ViewerWidget(QWidget):
         except Exception:
             log.exception("提取显示图像失败（source=%s）", source)
             return None
-        if arr is None or arr.size == 0:
+        qimg = numpy_to_qimage(arr)
+        if qimg is None:
             return None
-        arr = np.ascontiguousarray(arr)
-        h, w = arr.shape[:2]
-        qimg = QImage(arr.data, w, h, arr.strides[0], QImage.Format.Format_RGBA8888)
-        qimg = qimg.copy()  # 深拷贝，独立于 numpy 内存
         self._qimages[key] = qimg
         return qimg
+
+    def inject_qimage(self, doc, source: str, qimage: QImage) -> None:
+        """注入后台线程预热好的显示图像（免去首帧转换开销）。"""
+        self._qimages[(id(doc), source)] = qimage
 
     def _source_offset(self) -> Tuple[float, float]:
         """bg 图层裁剪像素相对世界坐标的偏移（merged 为 0,0）。"""

@@ -33,7 +33,7 @@ class PreloadWorker(QThread):
     已创建的文档对象，不在后台创建新文档）。
     """
 
-    task_done = Signal(str, str, bool)   # rel, kind, ok
+    task_done = Signal(str, str, bool, object)   # rel, kind, ok, images{merged|bg: QImage|None}
 
     def __init__(self, doc_provider: Callable[[str], Optional[object]], parent=None):
         super().__init__(parent)
@@ -97,26 +97,37 @@ class PreloadWorker(QThread):
                 else:
                     rel, layer_id = self._extra_jobs.pop(0)
                     kind = KIND_EXTRA
-            ok = self._process(rel, kind, layer_id)
-            self.task_done.emit(rel, kind, ok)
+            ok, images = self._process(rel, kind, layer_id)
+            self.task_done.emit(rel, kind, ok, images)
 
-    def _process(self, rel: str, kind: str, layer_id: str) -> bool:
+    def _process(self, rel: str, kind: str, layer_id: str) -> tuple:
+        from mangaproof.ui.viewer_widget import numpy_to_qimage
+
         doc = self._doc_provider(rel)
         if doc is None:
             log.warning("预加载失败：文档不存在 %s", rel)
-            return False
+            return False, {}
+        images: dict = {"merged": None, "bg": None}
         try:
             if kind in (KIND_OPEN, KIND_PRELOAD):
                 doc.prepare_merged()
+                # 后台预热显示用 QImage，切换后首帧免转换
+                try:
+                    images["merged"] = numpy_to_qimage(doc.merged_np())
+                except Exception:
+                    pass
             if kind == KIND_OPEN:
                 self._warm_layer(doc, layer_id)
             elif kind == KIND_EXTRA:
                 doc.prepare_bg()
                 self._warm_layer(doc, layer_id)
-            return True
+                bg = doc.bg_image()
+                if bg is not None:
+                    images["bg"] = numpy_to_qimage(bg[2])
+            return True, images
         except Exception:
             log.exception("预加载失败：%s", rel)
-            return False
+            return False, images
 
     @staticmethod
     def _warm_layer(doc, layer_id: str) -> None:

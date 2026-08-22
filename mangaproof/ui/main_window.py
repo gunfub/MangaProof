@@ -119,6 +119,7 @@ class MainWindow(QMainWindow):
         self._open_dialog = None      # 切换文件的忙碌进度框
         self._preload_targets: set = set()   # 阶段 A 未完成（merged）
         self._extra_targets: set = set()     # 阶段 B 未完成（背景图/图层）
+        self._pending_qimages: Dict[str, Dict[str, object]] = {}  # 后台预热显示图
 
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
@@ -647,6 +648,8 @@ class MainWindow(QMainWindow):
         self.file_panel.set_task_info(task.task_name, task.task_type)
         self.file_panel.set_files([r.relative_path for r in task.files])
         self._preload_targets.clear()
+        self._extra_targets.clear()
+        self._pending_qimages.clear()
         self._update_preload_label()
 
         rel = task.current_file
@@ -765,6 +768,13 @@ class MainWindow(QMainWindow):
         self._current_file = rel
         self.viewer.set_document(doc)
         self.viewer.set_source(SOURCE_MERGED)
+        # 注入后台预热好的显示图像（首帧免 QImage 转换，消除切换卡顿）
+        warm_images = self._pending_qimages.pop(rel, None)
+        if warm_images:
+            if warm_images.get("merged") is not None:
+                self.viewer.inject_qimage(doc, SOURCE_MERGED, warm_images["merged"])
+            if warm_images.get("bg") is not None:
+                self.viewer.inject_qimage(doc, SOURCE_BG, warm_images["bg"])
 
         # Original 必须来自 PSD 自带 merged image（需求 §2.3、§61）
         if rel not in self._warned_no_composite:
@@ -796,7 +806,12 @@ class MainWindow(QMainWindow):
 
     # -- 预加载与异步打开（大 PSD 切换不卡顿） -----------------------------
 
-    def _on_preload_done(self, rel: str, kind: str, ok: bool) -> None:
+    def _on_preload_done(self, rel: str, kind: str, ok: bool, images=None) -> None:
+        if images:
+            slot = self._pending_qimages.setdefault(rel, {})
+            for source in ("merged", "bg"):
+                if images.get(source) is not None:
+                    slot[source] = images[source]
         if kind == KIND_PRELOAD:
             # 阶段 A（merged）完成：切换文件已可用
             self._preload_targets.discard(rel)
@@ -885,28 +900,36 @@ class MainWindow(QMainWindow):
 
         merged_jobs: List[Tuple[str, str]] = []
         extra_jobs: List[Tuple[str, str]] = []
-        # 当前文件补背景图与当前图层像素（自动对比免等待）
+        # 当前文件补背景图（自动对比免等待）；已提取过则跳过，避免
+        # 切换后精提取队列重复出现已完成的工作
         cur_lid = ""
         if self._current_file == rel and self._current_index >= 0:
             ids = self._layer_ids_by_file.get(rel, [])
             if self._current_index < len(ids):
                 cur_lid = ids[self._current_index]
-        extra_jobs.append((rel, cur_lid))
+        cur_doc = self._docs.get(rel)
+        if cur_doc is not None and not cur_doc.has_bg():
+            extra_jobs.append((rel, cur_lid))
 
         for c in candidates:
             doc = self._docs.get(c)
             layer_id = target_layer_of(c)
             if doc is None or not doc.has_merged():
                 merged_jobs.append((c, layer_id))
-            extra_jobs.append((c, layer_id))
+            # 背景图/目标图层已完成的部分不再重复排队
+            if doc is not None and (
+                not doc.has_bg() or (layer_id and not self._target_layer_warm(doc, layer_id))
+            ):
+                extra_jobs.append((c, layer_id))
 
         self._preload_targets = {r for r, _ in merged_jobs}
         self._extra_targets = {r for r, _ in extra_jobs}
         self._preload.set_preloads(merged_jobs, extra_jobs)
         self._update_preload_label()
 
-        # 内存策略：释放窗口外文档的 merged/bg（图层树与 LRU 保留）。
-        # release_images 非阻塞：后台仍在提取的文档自动跳过，下轮再回收。
+        # 内存策略：释放窗口外文档的 merged/bg 与预热显示图
+        #（图层树与 LRU 保留）。release_images 非阻塞：后台仍在
+        # 提取的文档自动跳过，下轮再回收。
         keep = {rel, *candidates}
         for r in order:
             if r in keep:
@@ -914,6 +937,7 @@ class MainWindow(QMainWindow):
             doc = self._docs.get(r)
             if doc is not None:
                 doc.release_images()
+            self._pending_qimages.pop(r, None)
 
     def _update_preload_label(self) -> None:
         if self.task is None:

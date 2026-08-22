@@ -77,8 +77,16 @@ def test_preload_worker() -> None:
             doc.build_layers()   # 模拟 attach 已解析图层树
 
         done = []
+        warm = {}
         worker = PreloadWorker(lambda rel: docs.get(rel))
-        worker.task_done.connect(lambda rel, kind, ok: done.append((rel, kind, ok)))
+        worker.task_done.connect(
+            lambda rel, kind, ok, images: (
+                done.append((rel, kind, ok)),
+                warm.setdefault(rel, {}).update(
+                    {k: v for k, v in (images or {}).items() if v is not None}
+                ),
+            )
+        )
         worker.start()
 
         # open 请求：merged + 背景 + 目标图层像素/视觉边界全部预热
@@ -94,6 +102,8 @@ def test_preload_worker() -> None:
         assert doc.has_merged()
         assert doc.layer_image(layer_id) is not None
         assert doc.layers[1].visual_bounds() is not None
+        # 显示用 QImage 已后台预热（切换后首帧免转换）
+        assert warm.get("001.psd", {}).get("merged") is not None
 
         # 两阶段队列：阶段 A 先铺 merged，阶段 B 补背景图与图层像素
         jobs = [
@@ -405,6 +415,8 @@ def test_full_workflow() -> None:
         # ↑↓ PSD 导航（异步切换：预加载命中走快路径，未命中经后台线程）
         window.next_psd()
         _wait_for_file(window, "002.psd")
+        # 切换后 Viewer 已有后台预热好的显示图（首帧免转换）
+        assert any(key[1] == "merged" for key in window.viewer._qimages)
         window.prev_psd()
         _wait_for_file(window, "001.psd")
 

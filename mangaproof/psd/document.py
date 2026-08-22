@@ -54,6 +54,7 @@ class PSDDocument:
         self._merged_error: Optional[Exception] = None
         # 长期缓存：background image（世界坐标偏移 + 像素）
         self._bg: Optional[Tuple[int, int, np.ndarray]] = None
+        self._bg_checked: bool = False
 
         self._layers: Optional[List[LayerInfo]] = None
         self._layer_by_id: Optional[Dict[str, LayerInfo]] = None
@@ -135,6 +136,7 @@ class PSDDocument:
             self._merged_np = None
             self._merged_error = None
             self._bg = None
+            self._bg_checked = False
         finally:
             self._io_lock.release()
 
@@ -258,7 +260,8 @@ class PSDDocument:
 
         像素坐标系为图层自身（已裁到 bbox），绘制时需偏移到世界坐标。
         """
-        if self._bg is None:
+        if self._bg is None and not self._bg_checked:
+            self._bg_checked = True
             bg_id = self.bg_layer_id()
             if bg_id is None:
                 return None
@@ -268,6 +271,10 @@ class PSDDocument:
                 return None
             self._bg = (info.bounds[0], info.bounds[1], img)
         return self._bg
+
+    def has_bg(self) -> bool:
+        """背景图是否已尝试提取（区分「未提取」与「已提取但无背景层」）。"""
+        return self._bg_checked
 
     # -- 资源 --------------------------------------------------------------
 
