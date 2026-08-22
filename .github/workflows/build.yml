@@ -110,7 +110,10 @@ jobs:
             Get-Content "smoke.log","smoke.err" -ErrorAction SilentlyContinue
             exit 1
           }
-          Stop-Process -Id $p.Id -Force
+          # onedir 模式为 bootloader 父进程 + 应用子进程，必须整树结束，
+          # 否则子进程残留会锁住 dist 目录文件
+          taskkill /PID $($p.Id) /T /F | Out-Null
+          Start-Sleep -Seconds 2
 
       - name: Package artifact (Linux)
         # 保留内层 tar.gz：GitHub 工件外层 zip 不保留可执行权限
@@ -135,8 +138,17 @@ jobs:
         run: |
           $dest = "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}"
           Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
-          Rename-Item "dist\MangaProof" $dest
-          if (-not (Test-Path $dest)) { Write-Error "暂存目录缺失：$dest"; exit 1 }
+          $ok = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            try {
+              Rename-Item "dist\MangaProof" $dest -ErrorAction Stop
+              $ok = $true
+              break
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+          if (-not $ok) { Write-Error "重命名失败（dist 文件可能仍被占用）"; exit 1 }
           Get-ChildItem $dest | Select-Object -First 3 -ExpandProperty Name
 
       - name: Upload artifact (Windows)
