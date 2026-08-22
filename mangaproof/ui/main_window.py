@@ -38,7 +38,11 @@ from mangaproof.psd.loader import (
     NoCompositeError,
     PSDReadError,
 )
-from mangaproof.report.generator import generate_report, resolve_report_path
+from mangaproof.report.generator import (
+    default_report_name,
+    generate_report,
+    resolve_report_path,
+)
 from mangaproof.review import navigator, persistence
 from mangaproof.review.persistence import (
     backup_progress_file,
@@ -1091,10 +1095,13 @@ class MainWindow(QMainWindow):
     def _generate_report(self, interactive: bool) -> None:
         if self.task is None or self._base_dir is None:
             return
-        if self.task.task_type == "single":
-            default_name = Path(self.task.files[0].file_name).stem
-        else:
-            default_name = self._base_dir.name
+        default_name = default_report_name(
+            self.task.task_type,
+            self._base_dir,
+            psd_file_name=(
+                self.task.files[0].file_name if self.task.files else ""
+            ),
+        )
 
         name = self.settings.report_name or default_name
         if interactive:

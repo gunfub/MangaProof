@@ -103,6 +103,27 @@ def resolve_report_path(base_dir: Path, custom_name: str, default_name: str) -> 
     return base_dir / filename
 
 
+def default_report_name(
+    task_type: str, base_dir: Path, psd_file_name: str = ""
+) -> str:
+    """默认返修单名称（需求 §49.1 + 固定路径格式优化）。
+
+    自动嵌字脚本的固定输出路径为 .../<章节名>/output/*.psd：
+    当 PSD 所在文件夹名为 output（不区分大小写）时，
+    默认名取上一级文件夹名（即章节名），而不是 "output"。
+    """
+    if task_type == "single":
+        folder = base_dir                       # PSD 所在目录
+        if folder.name.lower() == "output" and folder.parent.name:
+            return folder.parent.name
+        return Path(psd_file_name or "report").stem
+
+    folder = base_dir                           # 打开的文件夹
+    if folder.name.lower() == "output" and folder.parent.name:
+        return folder.parent.name
+    return folder.name
+
+
 def generate_report(
     task: TaskState,
     layer_ids_by_file: Dict[str, List[str]],

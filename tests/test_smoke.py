@@ -277,6 +277,23 @@ def test_pdf_badge_number_outside_rect():
         print("PDF badge OK：数字在框外", num_y, ">", ry + rh)
 
 
+def test_default_report_name_output_folder():
+    """回归：output 固定路径格式下默认名取上一级文件夹名。"""
+    from mangaproof.report.generator import default_report_name
+
+    # 文件夹任务
+    assert default_report_name("folder", Path("/manga/Chapter01")) == "Chapter01"
+    assert default_report_name("folder", Path("/manga/Chapter01/output")) == "Chapter01"
+    assert default_report_name("folder", Path("/manga/output")) == "manga"
+    assert default_report_name("folder", Path("/manga/Ch/OUTPUT")) == "Ch"  # 大小写不敏感
+    assert default_report_name("folder", Path("/output")) == "output"       # 根目录回退
+
+    # 单 PSD 任务
+    assert default_report_name("single", Path("/manga/Ch"), "001.psd") == "001"
+    assert default_report_name("single", Path("/manga/Ch/output"), "001.psd") == "Ch"
+    assert default_report_name("single", Path("/output"), "001.psd") == "001"
+
+
 if __name__ == "__main__":
     import traceback
     tests = [
