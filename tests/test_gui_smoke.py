@@ -21,7 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from mangaproof.config.settings import SettingsManager
 from mangaproof.review import persistence
@@ -75,6 +75,23 @@ def test_task_loader_progress() -> None:
         assert messages[-1][2] == "加载完成"
 
     print("PASS test_task_loader_progress")
+
+
+def test_dark_titlebar_installed() -> None:
+    """暗色标题栏：应用级过滤器安装成功；Linux 下应用调用为 no-op。"""
+    from mangaproof.ui.dark_titlebar import apply_dark_title_bar, install_dark_titlebar
+
+    install_dark_titlebar(app)
+    assert getattr(app, "_dark_titlebar_filter", None) is not None
+
+    probe = QWidget()
+    probe.resize(200, 100)
+    probe.show()
+    app.processEvents()
+    apply_dark_title_bar(probe)   # 非 Windows 平台必须静默 no-op
+    probe.close()
+
+    print("PASS test_dark_titlebar_installed")
 
 
 def test_full_workflow() -> None:

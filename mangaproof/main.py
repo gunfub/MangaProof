@@ -34,10 +34,12 @@ def main(argv=None) -> int:
     app.setOrganizationName("MangaProof")
 
     from mangaproof.config.settings import SettingsManager
+    from mangaproof.ui.dark_titlebar import install_dark_titlebar
     from mangaproof.ui.main_window import MainWindow
     from mangaproof.ui.theme import apply_dark_theme
 
     apply_dark_theme(app)
+    install_dark_titlebar(app)
     settings_manager = SettingsManager()
 
     window = MainWindow(settings_manager)
