@@ -11,20 +11,65 @@ on:
 permissions:
   contents: read
 
+# ---- 通用步骤（YAML 锚点复用） ----
+.x-setup: &setup
+  - name: Checkout
+    uses: actions/checkout@v7
+  - name: Install uv
+    uses: astral-sh/setup-uv@v10.0.1
+    with:
+      enable-cache: true
+  - name: Sync dependencies
+    run: uv sync --all-groups
+  - name: Resolve version
+    id: version
+    shell: bash
+    run: |
+      # 用 sed -E（GNU/BSD 通用），macOS 的 BSD grep 不支持 -P
+      VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
+      echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+.x-accel-build: &accel-build
+  - name: Build accel extension
+    shell: bash
+    run: uv run python scripts/build_accel.py
+
+.x-pyinstaller: &pyinstaller
+  - name: Build with PyInstaller
+    shell: bash
+    run: uv run pyinstaller --noconfirm --clean "${{ matrix.spec }}"
+
 jobs:
-  build:
+  # Windows 的 _psd_fast.pyd 在 Linux 上用 mingw-w64 交叉编译（纯 C，
+  # ctypes 可直接加载），避免依赖 Windows runner 上的 MSVC 环境。
+  accel-win:
+    name: windows accel (mingw cross)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install mingw
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+      - name: Cross-compile _psd_fast.pyd
+        run: |
+          x86_64-w64-mingw32-gcc -O3 -shared -o mangaproof/_psd_fast.pyd mangaproof/_psd_fast.c
+          ls -la mangaproof/_psd_fast.pyd
+      - name: Upload accel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: accel-windows
+          path: mangaproof/_psd_fast.pyd
+          if-no-files-found: error
+
+  build-linux:
     name: ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Windows：PyInstaller 不支持 Windows ARM64 原生构建，
-          # ARM64 设备可通过 x64 模拟运行 x64 包
-          - os: windows-latest
-            arch: x64
-            spec: packaging/main_win.spec
-            artifact: windows-x64
           - os: ubuntu-24.04
             arch: x64
             spec: packaging/main_linux.spec
@@ -33,76 +78,20 @@ jobs:
             arch: arm64
             spec: packaging/main_linux.spec
             artifact: linux-arm64
-          # macOS 13 跑者已退役：Intel 使用 macos-15-intel，
-          # Apple Silicon 使用 macos-15（arm64）
-          - os: macos-15-intel
-            arch: x64
-            spec: packaging/main_macos.spec
-            artifact: macos-x64
-          - os: macos-15
-            arch: arm64
-            spec: packaging/main_macos.spec
-            artifact: macos-arm64
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install uv
-        # 注意：该 action 暂无 v10 主标签，需精确固定版本
-        uses: astral-sh/setup-uv@v10.0.1
-        with:
-          enable-cache: true
-
-      - name: Sync dependencies
-        run: uv sync --all-groups
-
-      - name: Resolve version
-        id: version
-        shell: bash
-        run: |
-          # 用 sed -E（GNU/BSD 通用），macOS 的 BSD grep 不支持 -P
-          VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-
-      - name: Build accel extension (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-            -latest -products * -property installationPath
-          if (-not $vs) {
-            Write-Host "vswhere 未找到 Visual Studio，跳过加速扩展构建（运行时回退原实现）"
-            exit 0
-          }
-          cmd /c "call `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && uv run python scripts/build_accel.py"
-
-      - name: Build accel extension (Linux / macOS)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: uv run python scripts/build_accel.py
-
-      - name: Build with PyInstaller
-        shell: bash
-        run: uv run pyinstaller --noconfirm --clean "${{ matrix.spec }}"
-
-      - name: Install Qt runtime libs (Linux)
-        if: runner.os == 'Linux'
+      - *setup
+      - *accel-build
+      - *pyinstaller
+      - name: Install Qt runtime libs
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 \
             libegl1 libgl1 libfontconfig1 libdbus-1-3
-
-      - name: Smoke test (Linux / macOS)
-        if: runner.os != 'Windows'
+      - name: Smoke test
         shell: bash
         run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            BIN="dist/MangaProof.app/Contents/MacOS/MangaProof"
-          else
-            BIN="dist/MangaProof/MangaProof"
-          fi
+          BIN="dist/MangaProof/MangaProof"
           QT_QPA_PLATFORM=offscreen QT_DEBUG_PLUGINS=1 "$BIN" > smoke.log 2>&1 &
           PID=$!
           sleep 10
@@ -113,9 +102,85 @@ jobs:
           fi
           kill "$PID" 2>/dev/null || true
           tail -20 smoke.log || true
+      - name: Package artifact
+        shell: bash
+        run: |
+          tar -czf "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.tar.gz" -C dist MangaProof
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
+          path: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
 
-      - name: Smoke test (Windows)
-        if: runner.os == 'Windows'
+  build-macos:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x64
+            spec: packaging/main_macos.spec
+            artifact: macos-x64
+          - os: macos-15
+            arch: arm64
+            spec: packaging/main_macos.spec
+            artifact: macos-arm64
+    steps:
+      - *setup
+      - *accel-build
+      - *pyinstaller
+      - name: Smoke test
+        shell: bash
+        run: |
+          BIN="dist/MangaProof.app/Contents/MacOS/MangaProof"
+          QT_QPA_PLATFORM=offscreen QT_DEBUG_PLUGINS=1 "$BIN" > smoke.log 2>&1 &
+          PID=$!
+          sleep 10
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "::error::打包产物启动后提前退出，输出如下："
+            cat smoke.log || true
+            exit 1
+          fi
+          kill "$PID" 2>/dev/null || true
+          tail -20 smoke.log || true
+      - name: Package artifact
+        shell: bash
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/MangaProof.app" \
+            "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
+          path: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  build-windows:
+    name: windows-x64
+    runs-on: windows-latest
+    needs: accel-win
+    steps:
+      - *setup
+      - name: Download accel extension
+        uses: actions/download-artifact@v8
+        with:
+          name: accel-windows
+          path: mangaproof
+      - name: Verify accel present
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "mangaproof\_psd_fast.pyd")) {
+            Write-Error "未找到 _psd_fast.pyd"
+            exit 1
+          }
+      - name: Build with PyInstaller
+        shell: bash
+        run: uv run pyinstaller --noconfirm --clean packaging/main_win.spec
+      - name: Smoke test
         shell: pwsh
         run: |
           $env:QT_QPA_PLATFORM = 'offscreen'
@@ -131,29 +196,10 @@ jobs:
           # 否则子进程残留会锁住 dist 目录文件
           taskkill /PID $($p.Id) /T /F | Out-Null
           Start-Sleep -Seconds 2
-
-      - name: Package artifact (Linux)
-        # 保留内层 tar.gz：GitHub 工件外层 zip 不保留可执行权限
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          tar -czf "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.tar.gz" -C dist MangaProof
-
-      - name: Package artifact (macOS)
-        # 保留内层 ditto zip：外层 zip 会丢失 .app 的权限/符号链接
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            "dist/MangaProof.app" \
-            "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip"
-
-      - name: Stage artifact (Windows)
-        # Windows 直接上传目录：下载解压一次即得完整程序（单层，无双重压缩）
-        if: runner.os == 'Windows'
+      - name: Stage artifact
         shell: pwsh
         run: |
-          $dest = "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}"
+          $dest = "MangaProof-${{ steps.version.outputs.version }}-windows-x64"
           Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
           $ok = $false
           for ($i = 0; $i -lt 10; $i++) {
@@ -168,30 +214,18 @@ jobs:
           }
           if (-not $ok) { Write-Error "暂存目录失败（详见上方重试信息）"; exit 1 }
           Get-ChildItem $dest | Select-Object -First 3 -ExpandProperty Name
-
-      - name: Upload artifact (Windows)
-        if: runner.os == 'Windows'
+      - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
+          name: MangaProof-${{ steps.version.outputs.version }}-windows-x64
           # v7 上传目录需递归 glob
           path: MangaProof-${{ steps.version.outputs.version }}-windows-x64/**
-          if-no-files-found: error
-
-      - name: Upload artifact (Linux / macOS)
-        if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
-          path: |
-            MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.tar.gz
-            MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip
           if-no-files-found: error
 
   release:
     name: Create release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
