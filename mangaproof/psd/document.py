@@ -102,10 +102,18 @@ class PSDDocument:
 
     def prepare_images(self) -> None:
         """后台预加载：提取 merged 与背景图像，失败仅缓存错误不抛出。"""
+        self.prepare_merged()
+        self.prepare_bg()
+
+    def prepare_merged(self) -> None:
+        """阶段 A：仅提取 merged（文件切换的关键路径）。"""
         try:
             self.merged_np()
         except Exception:
             pass
+
+    def prepare_bg(self) -> None:
+        """阶段 B：提取背景图像（自动对比用）。"""
         try:
             self.bg_image()
         except Exception:

@@ -90,22 +90,29 @@ def test_preload_worker() -> None:
             time.sleep(0.02)
         assert ("001.psd", KIND_OPEN, True) in done
         doc = docs["001.psd"]
+        # open 请求 = merged + 目标图层（关键路径）；背景图在阶段 B 补提
         assert doc.has_merged()
-        assert doc.bg_image() is not None
         assert doc.layer_image(layer_id) is not None
         assert doc.layers[1].visual_bounds() is not None
 
-        # 预加载队列整体替换：两个文件依次预热完成（含目标图层像素）
-        worker.set_preloads([
+        # 两阶段队列：阶段 A 先铺 merged，阶段 B 补背景图与图层像素
+        jobs = [
             ("002.psd", docs["002.psd"].layers[0].id),
             ("10.psd", docs["10.psd"].layers[0].id),
-        ])
+        ]
+        worker.set_preloads(jobs, list(jobs))
         deadline = time.time() + 30
-        while not all(d.has_merged() for d in (docs["002.psd"], docs["10.psd"])) \
-                and time.time() < deadline:
+        while time.time() < deadline:
+            ready = all(
+                d.has_merged() and d.bg_image() is not None
+                for d in (docs["002.psd"], docs["10.psd"])
+            )
+            if ready:
+                break
             app.processEvents()
             time.sleep(0.02)
-        assert docs["002.psd"].has_merged() and docs["10.psd"].has_merged()
+        assert docs["002.psd"].has_merged() and docs["002.psd"].bg_image() is not None
+        assert docs["10.psd"].has_merged() and docs["10.psd"].bg_image() is not None
         # 目标图层像素与视觉边界已预热（快速路径定位免等待）
         assert docs["002.psd"].layer_image(docs["002.psd"].layers[0].id) is not None
         assert docs["002.psd"].layers[0].visual_bounds() is not None

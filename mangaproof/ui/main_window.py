@@ -60,7 +60,7 @@ from mangaproof.ui.file_panel import FilePanel
 from mangaproof.ui.issue_panel import IssuePanel
 from mangaproof.ui.layer_panel import LayerPanel
 from mangaproof.ui.license_dialog import LicenseDialog
-from mangaproof.ui.preloader import KIND_OPEN, KIND_PRELOAD, PreloadWorker
+from mangaproof.ui.preloader import KIND_EXTRA, KIND_OPEN, KIND_PRELOAD, PreloadWorker
 from mangaproof.ui.settings_dialog import SettingsDialog
 from mangaproof.ui.statistics_panel import StatisticsPanel
 from mangaproof.ui.task_loader import (
@@ -786,9 +786,12 @@ class MainWindow(QMainWindow):
 
     def _on_preload_done(self, rel: str, kind: str, ok: bool) -> None:
         if kind == KIND_PRELOAD:
+            # 阶段 A（merged）完成：切换文件已可用
             self._preload_targets.discard(rel)
             self._update_preload_label()
-            return  # 后台预热完成，无需其他 UI 动作
+            return
+        if kind == KIND_EXTRA:
+            return  # 阶段 B（背景图/图层像素）完成，无需 UI 动作
         # open 结果：快速切换后旧文件的结果直接忽略
         if rel != self._pending_open_rel:
             return
@@ -841,8 +844,10 @@ class MainWindow(QMainWindow):
     def _schedule_preloads(self, rel: str) -> None:
         """预加载当前文件邻域（后 3 个 + 前 1 个），并回收窗口外大图内存。
 
-        每个预加载任务附带该文件的目标图层（切换时的定位图层），
-        使切换文件的定位/缩放同样免等待。
+        两阶段队列（见 PreloadWorker）：
+        - 阶段 A：候选文件的 merged image（切换关键路径，优先铺开）；
+        - 阶段 B：背景图（自动对比用）+ 目标图层像素（定位缩放用），
+          当前文件优先。
         """
         if self.task is None:
             return
@@ -856,20 +861,32 @@ class MainWindow(QMainWindow):
             if 0 <= j < len(order):
                 candidates.append(order[j])
 
-        jobs: List[Tuple[str, str]] = []
+        def target_layer_of(target_rel: str) -> str:
+            index = self._choose_layer_index(target_rel, restore=False)
+            if index is None:
+                return ""
+            ids = self._layer_ids_by_file.get(target_rel, [])
+            return ids[index] if index < len(ids) else ""
+
+        merged_jobs: List[Tuple[str, str]] = []
+        extra_jobs: List[Tuple[str, str]] = []
+        # 当前文件补背景图与当前图层像素（自动对比免等待）
+        cur_lid = ""
+        if self._current_file == rel and self._current_index >= 0:
+            ids = self._layer_ids_by_file.get(rel, [])
+            if self._current_index < len(ids):
+                cur_lid = ids[self._current_index]
+        extra_jobs.append((rel, cur_lid))
+
         for c in candidates:
             doc = self._docs.get(c)
-            if doc is not None and doc.has_merged():
-                continue
-            index = self._choose_layer_index(c, restore=False)
-            layer_id = ""
-            if index is not None:
-                ids = self._layer_ids_by_file.get(c, [])
-                if index < len(ids):
-                    layer_id = ids[index]
-            jobs.append((c, layer_id))
-        self._preload_targets = {rel for rel, _ in jobs}
-        self._preload.set_preloads(jobs)
+            layer_id = target_layer_of(c)
+            if doc is None or not doc.has_merged():
+                merged_jobs.append((c, layer_id))
+            extra_jobs.append((c, layer_id))
+
+        self._preload_targets = {r for r, _ in merged_jobs}
+        self._preload.set_preloads(merged_jobs, extra_jobs)
         self._update_preload_label()
 
         # 内存策略：释放窗口外文档的 merged/bg（图层树与 LRU 保留）。
