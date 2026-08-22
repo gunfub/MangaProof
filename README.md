@@ -1,129 +1,160 @@
 # MangaProof v1.0
 
-漫画翻译质量检查与返修标注工具 —— 面向漫画翻译 / 嵌字 / 修图 / 监制的独立桌面 QA 工作台。
+**漫画翻译 · 嵌字 · 修图 的高速监制工作台** —— 面向漫画翻译后期 QA 的独立桌面工具，
+把「逐页逐层检查翻译嵌字质量」从反复的鼠标操作中解放出来。
 
-## 运行截图 (Ubuntu & Windows)
+## 为什么为嵌字监制而做
 
-![image-20260822123526467](./README.assets/screenshot-1.png)
+翻译/嵌字完成后的监制（QA）环节，传统做法是在 Photoshop 里逐层翻看：切图层、缩放、
+看原图、找问题、记位置、写批注——每一步都在重复点击。MangaProof 把整条链路变成
+**键盘驱动的流水线**：
 
-![image-20260822123637194](./README.assets/screenshot-2.png)
+```
+打开文件夹 → 自动恢复上次进度 → 图层自动对准视口中心
+→ Space 闪切原图/背景 → Enter 通过 / "/" 标记问题
+→ 拖框圈出问题位置 + 快捷键选问题类型 + 批注
+→ 自动跳到下一个未监制 → 全部完成 → 一键生成返修单 PDF 交给嵌字/修图
+```
 
-## 核心原则
+## 特色功能（围绕嵌字监制场景）
 
-- **独立于 Photoshop**：不调用任何 Photoshop API（UXP/JSX/CEP），所有视图控制由 MangaProof 完成；
-- **PSD 只读**：绝不修改原始 PSD（图层、可见性、批注、红框一律不写入）；
-- **不重新合成 PSD**：Original 直接使用 PSD 自带 merged/composite image，程序不实现 Photoshop Renderer；
-- **监制数据与 PSD 隔离**：通过/未通过状态、问题、红框、批注、进度全部保存在任务文件中。
+### 1. 键盘驱动的高速监制
 
-## 技术栈
+| 操作 | 按键 | 说明 |
+|---|---|---|
+| 上一个 / 下一个 PSD | `↑` / `↓` | 粗粒度翻页 |
+| 上一个 / 下一个图层 | `←` / `→` | 细粒度逐层检查 |
+| 当前图层通过 | `Enter` | 自动跳到**下一个未监制图层**（不按索引死走） |
+| 当前图层未通过 | `/` | 标记问题，可继续拖红框、加批注，完成后 Enter 继续 |
+| 自动对比 | `Space` | Original ↔ 背景 闪切 |
 
-| 模块 | 技术 |
-|---|---|
-| PSD Engine | psd-tools（PSD/PSB 读取、图层树、像素、merged image） |
-| Image Processing | NumPy（Alpha 分析、视觉边界） |
-| GUI / Viewer | PySide6（暗色 UI、Canvas、Overlay、Camera、Zoom、Pan） |
-| Task Engine | Python（监制状态、任务保存/恢复） |
-| Report Engine | reportlab（纯 Python PDF，矢量红框 + 内置中文字体） |
+所有按钮上都显示当前绑定的快捷键，可在设置中重绑定，改完立即同步到界面。
 
-## 运行
+### 2. Original ↔ 背景闪切（检查嵌字与背景分离）
+
+嵌字质量最常见的问题就是「字没抠干净」「背景透出来了」。按 `Space` 启动自动对比：
+
+- 每秒 2 个完整循环（Original → 背景 → Original，每状态 250ms），字和背景的分界
+  在闪切中一目了然；
+- 对比期间 Camera、缩放、当前图层、红框 Overlay 全部保持不动，只切显示源；
+- 背景图层自动选择：优先严格名为 `bg` 的图层，否则取最底部有像素内容的图层；
+- 对比中禁止创建问题（先 Space 停止再标注），红框始终可见。
+
+### 3. 自动对准：视觉中心 + 可调显示比例
+
+选择图层后自动做两件事（类 Photoshop 的智能定位）：
+
+- **视觉中心定位**：按 `alpha > 0` 的像素计算实际内容包围盒，把图层内容的视觉中心
+  对准视口中心——而不是盲取图层 Bounds 的几何中心；
+- **按比例缩放**：20%～90% 可选（默认 60%），最长边占视口对应尺寸的比例；
+- 手动 Pan/Zoom（滚轮缩放、拖拽平移）不会被自动恢复，只有切换图层/显式重定位才触发。
+
+### 4. 大 PSD 无感切换（两阶段预加载）
+
+50MB、几百图层的 PSD 翻页不再卡：
+
+- **后台预加载线程**：打开任务后自动预热当前文件邻域（后 3 个 + 前 1 个）；
+- **两阶段流水线**，状态栏独立显示：
+  - 「**图像预加载**」：先铺开各文件的 merged image（切换关键路径）；
+  - 「**图层预热**」：再补背景图与全部图层的视觉边界；
+- 已预热 → 切换秒开；未命中 → 异步加载 + 非模态进度框，可继续快速连按切换；
+- 窗口外文档的大图自动回收内存（图层树与层像素 LRU 保留），回退查看自动重载；
+- merged 解码走 Pillow 原生 C 路径（约 7×），ZIP 预测压缩走自研 C 加速
+  （约 200×），RLE 由 psd-tools 官方 Cython 扩展覆盖。
+
+### 5. 问题标注体系：红框 + 类型 + 批注 + 编号
+
+失败图层支持多问题标注：
+
+- **红框**（粗红镂空、中间透明、不遮原画面），坐标以 **PSD 世界坐标**保存——
+  缩放/平移/窗口变化后依然精确跟随原图；
+- **19 类预制问题**：居中错误、字体选择错误、字体字重错误、字号错误、文字位置错误、
+  文字间距错误、气泡处理错误、原文字擦除错误、背景擦除错误、网点对齐错误、
+  网点残留、修图瑕疵、漏翻、漏字、错字、翻译错误、排版错误、文字溢出、其他；
+- 每类问题有**快捷键**（默认 `1`~`9`、`0`、`Q`~`O`，可在设置中重绑定）；
+- 两种创建方式：先按快捷键选类型再拖框；或先拖框再选类型（`R` 红框模式）；
+- **自定义批注**（`Ctrl+Enter`）直接输入自由文本，如
+  「这里应使用 Bold，而不是 Regular」；
+- 问题编号与红框徽标一一对应，一份图层可有多个问题（居中错误 + 漏字 + …）。
+
+### 6. 断点恢复：身份验证 + 自动保存
+
+- 打开文件夹自动寻找 `.mangaproof.json`（单 PSD 为同目录同名文件），验证通过
+  即恢复上次位置、状态、红框与批注——无需手动加载；
+- **身份验证**（绝不做 PSD 深度解析）：单文件用完整 SHA-256；文件夹用 2～3 个
+  分散抽样 Hash + 其余文件大小校验，验证失败一律禁止恢复；
+- 操作后自动保存（防抖），`Ctrl+S` 立即保存，底栏显示「已保存 / 未保存」；
+- 重新绑定已移动的文件夹时会先做**醒目强提醒**，验证失败绝不自动恢复。
+
+### 7. MangaProof 返修单（PDF）
+
+监制完成的产物是**交给嵌字/修图人员执行修改的返修任务单**，不是统计报告：
+
+- 封面：任务名、生成时间、PSD 数、总图层、通过/未通过/未监制；未完成时明确标注
+  「任务状态：未完成」；
+- PSD 总览表：每页的进度与问题数；
+- 问题明细页：**页面图像 + PDF 矢量红框 + ①②③ 编号 + 批注**（红框由 PDF 矢量
+  矩形绘制，不截图 GUI）；
+- 自动命名兼容嵌字脚本固定路径：所在文件夹为 `output` 时默认取上一级文件夹名；
+- 未全部完成时也允许生成，返修单会如实标注未完成。
+
+### 8. 监制统计：一眼看清进度
+
+- 当前 PSD：图层状态芯片墙（○/✓/✗，**可点击直接跳转**）+ 2×2 统计卡片；
+- 总体：PSD 数、总图层、通过/未通过/未监制卡片 + 进度条；
+- 通过绿、未通过红、未监制灰、问题数警示橙，语义色贯穿全界面。
+
+## 核心原则（四条技术边界）
+
+- **独立于 Photoshop**：不调用任何 Photoshop API（UXP/JSX/CEP），视图控制全部自研；
+- **PSD 只读**：绝不修改原始 PSD（图层、可见性、红框、批注一律不写入）；
+- **不重新合成 PSD**：Original 直接使用 PSD 自带 merged/composite image，
+  程序不实现 Photoshop Renderer（无 merged image 时明确报错，不做 fallback）；
+- **监制数据与 PSD 隔离**：状态、问题、红框、批注、进度全部存在任务文件中。
+
+## 快速开始
 
 ```bash
-# 安装依赖（uv 管理的项目虚拟环境，不污染系统 Python）
+# uv 管理的项目虚拟环境，不污染系统 Python
 uv sync
 
-# 启动
-python main.py            # 程序目录 = 本文件所在目录
-# 或
-uv run python main.py
+# 启动（程序目录 = 本文件所在目录，settings.json 落在这里）
+python main.py            # 或 uv run python main.py
 ```
 
-## 打包（PyInstaller onedir / .app）
+打开单个 PSD 或整个漫画文件夹即可开始；历史任务自动恢复。
 
-三个平台的 spec 配置文件位于 `packaging/`，需在对应平台上执行构建：
+## 界面截图（建议补充的实拍）
 
-```bash
-# Windows（在 Windows 上执行）→ dist/MangaProof/（含 MangaProof.exe）
-uv run pyinstaller --clean --noconfirm packaging/main_win.spec
+> 截图放在 `README.assets/`，下表为推荐捕获的界面与时机；已放入的
+> `screenshot-1.png` / `screenshot-2.png` 可按下表说明替换/更新。
 
-# macOS（在 macOS 上执行）→ dist/MangaProof.app
-uv run pyinstaller --clean --noconfirm packaging/main_macos.spec
+![主界面总览](./README.assets/screenshot-1.png)
 
-# Linux（在 Linux 上执行）→ dist/MangaProof/
-uv run pyinstaller --clean --noconfirm packaging/main_linux.spec
-```
+![图层自动定位](./README.assets/screenshot-2.png)
 
-图标：Windows 用 `ico/ico.ico`（exe 图标）、macOS 用 `ico/ico.icns`（App Bundle
-图标）、Linux 无嵌入图标（窗口图标来自随包分发的 `ico/ico.png`，桌面图标见
-`packaging/linux/mangaproof.desktop`，将其中 `@APPDIR@` 替换为安装目录后放入
-`~/.local/share/applications/`）。
-
-控制台行为（按平台）：
-- **直接运行 `python main.py`**：控制台始终保留，设置开关不生效；
-- **Windows 打包**：spec 使用 `console=True`（保留控制台子系统），运行时默认
-  关闭控制台窗口——FreeConsole 直接销毁窗口（彻底消失，不是最小化）；
-  在「设置」中关闭「打包产物关闭控制台窗口」后 AllocConsole 重新打开并
-  恢复日志输出；
-- **macOS / Linux 打包**：无独立控制台窗口，spec 使用 `console=False`（windowed，
-  图形启动无终端输出），运行时无法也不应切换。
-
-## CI 自动打包
-
-`.github/workflows/build.yml`：推送 `master`（构建并上传工件）、推送 `v*` 标签
-（构建 + 自动创建 GitHub Release），或手动触发（Actions → build →
-Run workflow）时，构建 5 个主流平台组合：
-
-| 平台 | 架构 | 跑者 | 产物 |
-|---|---|---|---|
-| Windows | x64 | windows-latest | .zip |
-| Linux | x64 | ubuntu-24.04 | .tar.gz |
-| Linux | arm64 | ubuntu-24.04-arm | .tar.gz |
-| macOS | x64（Intel） | macos-15-intel | .zip（MangaProof.app） |
-| macOS | arm64（Apple Silicon） | macos-15 | .zip（MangaProof.app） |
-
-- 每个平台构建后先做**离屏启动冒烟测试**（启动 10 秒不退出）再上传工件；
-- 推送标签时自动创建 GitHub Release 并挂载全部产物；
-- 工件形式：Windows 为**单层**（下载解压一次即得完整程序目录）；
-  Linux（tar.gz）与 macOS（ditto zip）为保留内层压缩——GitHub 工件外层
-  zip 会丢失可执行权限与 .app 符号链接，无法去掉；打 `v*` 标签发布的
-  Release 资产为直接附件，所有平台均无外层包装；
-- Windows ARM64 由 PyInstaller 官方暂不支持原生构建，ARM64 设备可
-  通过 x64 模拟运行 x64 包。
-
-## 核心工作流
-
-```
-打开单个 PSD / 文件夹 → 扫描 PSD（自然排序）→ 自动恢复监制进度
-→ 选择图层 → 视觉中心定位 + 按比例缩放 → Space 自动对比（Original ↔ BG）
-→ Enter 通过 / "/" 未通过 → 失败图层拖红框 + 批注
-→ 自动进入下一个未监制图层 → 全部完成 → 可选生成 MangaProof 返修单 PDF
-```
-
-## 性能
-
-- 打开文件夹后，后台线程预加载当前 PSD 邻域（后 3 个 + 前 1 个）的
-  merged image 与背景图，顺序监制时切换文件不卡顿；
-- merged 提取优先走 **Pillow 原生 C 解码**（psd-tools 的 RLE 解压为
-  纯 Python 实现，是主要耗时点；实测约 7× 加速、像素一致），失败或
-  尺寸不符自动回退 psd-tools 路径；
-- ZIP 预测压缩的解码走**自研纯 C 加速**（`scripts/build_accel.py` 编译，
-  ctypes 运行时补丁进 psd-tools；实测 50MB 通道 1.03s → 0.005s 约 200×），
-  未构建时自动回退原实现；RLE 解压本身已由 psd-tools 官方 wheel 的
-  Cython 扩展覆盖，无需处理；
-- 未命中预加载的文件切换走异步加载并显示进度框（非模态），支持快速连续
-  切换：新请求自动替换未处理的旧请求，过期结果直接丢弃；
-- 窗口外文档的 merged/背景大图自动回收（图层树与层像素 LRU 保留），
-  控制内存占用；回退查看时重新异步加载。
+| 编号 | 场景 | 建议内容 |
+|---|---|---|
+| screenshot-1 | 主界面总览 | 打开一个漫画文件夹后的完整界面：左 PSD 列表、中画布、右图层/问题面板、底栏状态 |
+| screenshot-2 | 图层定位 | 当前对话框图层被自动对准视口中心 + 蓝色虚线框标出图层内容轮廓 |
+| screenshot-3 | 闪切对比 | 同一画面两张：Original（merged）与 BG-only（背景），说明 Space 闪切的对象 |
+| screenshot-4 | 问题标注 | 失败图层上的红色问题框 + 编号徽标，右侧问题面板显示类型与批注 |
+| screenshot-5 | 统计面板 | 当前 PSD 图层芯片墙（○✓✗）+ 总体统计卡片与进度条 |
+| screenshot-6 | 状态栏 | 「图像预加载完成 ｜ 图层预热完成 ｜ 缩放 ｜ 监制进度 ｜ 已保存」 |
+| screenshot-7 | 设置对话框 | 快捷键重绑定 / 显示比例 / 控制台开关 |
+| screenshot-8 | 返修单 PDF | 问题明细页：页面图像 + 矢量红框 + ①②③ 编号 + 批注 |
+| screenshot-9 | 任务恢复提醒 | 「⚠ 重要提醒」重新绑定对话框（或验证失败警告） |
 
 ## 快捷键（均可在设置中重绑定）
 
 | 功能 | 默认 |
 |---|---|
-| 上一个/下一个 PSD | `↑` / `↓` |
-| 上一个/下一个图层 | `←` / `→` |
+| 上一个 / 下一个 PSD | `↑` / `↓` |
+| 上一个 / 下一个图层 | `←` / `→` |
 | 当前图层通过 | `Enter` |
 | 当前图层未通过 | `/` |
 | 自动对比 | `Space` |
-| 取消/退出批注操作 | `Esc` |
+| 取消 / 退出批注操作 | `Esc` |
 | 保存任务 | `Ctrl+S` |
 | 红框模式 | `R` |
 | 自定义批注 | `Ctrl+Enter` |
@@ -140,48 +171,73 @@ Run workflow）时，构建 5 个主流平台组合：
 缓存        独立内存 LRU（非任务恢复必需）
 ```
 
-## 图标
+任务匹配验证：单 PSD = 完整 SHA-256；文件夹 = 2～3 个分散抽样 Hash + 其余
+文件大小校验；失败一律禁止恢复，不提供强制恢复。
 
-- 运行时窗口图标：`ico/ico.png`（PySide6 直接加载，程序目录下 `ico/` 文件夹）；
-- macOS 图标 `ico/ico.icns` 由 `uv run python scripts/make_icns.py` 生成（纯 Python，无需 iconutil）；`ico/ico.ico` 为 Windows 图标。
+## 性能
 
-## 字体
+- 两阶段后台预加载（图像预加载 + 图层预热），顺序监制文件/图层切换均无感；
+- merged 提取走 **Pillow 原生 C 解码**（约 7×，失败自动回退 psd-tools）；
+- ZIP 预测压缩解码走**自研纯 C 加速**（`scripts/build_accel.py` 编译，ctypes
+  运行时补丁进 psd-tools，实测约 200×）；RLE 由 psd-tools 官方 Cython 扩展覆盖；
+- 未命中预加载的切换走异步加载 + 非模态进度框；快速连续切换自动替换过期请求；
+- 窗口外文档大图自动回收，内存有界。
 
-- 运行时统一字体：`font/MiSans-Medium.ttf`（小米 MiSans，
-  https://hyperos.mi.com/font/download）。直接运行从 `程序目录/font/` 加载；
-  打包产物随包分发（PyInstaller 6 布局位于 `_internal/font/`），两种路径自动识别；
-- 依据《MiSans 字体知识产权许可协议》使用：软件「关于」对话框注明使用 MiSans；
-  不对字体做任何改编或二次开发；字体文件仅随本软件整体分发，不单独提供；
-- 字体文件缺失时自动回退系统默认字体，不阻塞启动。
+## 打包（PyInstaller onedir / .app）
+
+```bash
+# Windows → dist/MangaProof/     macOS → dist/MangaProof.app      Linux → dist/MangaProof/
+uv run pyinstaller --clean --noconfirm packaging/main_win.spec
+uv run pyinstaller --clean --noconfirm packaging/main_macos.spec
+uv run pyinstaller --clean --noconfirm packaging/main_linux.spec
+```
+
+- 图标：Windows `ico/ico.ico`、macOS `ico/ico.icns`、Linux 运行时窗口图标来自
+  `ico/ico.png`（桌面图标见 `packaging/linux/mangaproof.desktop`）；
+- 控制台行为：直接运行 `python main.py` 始终保留控制台；Windows 打包默认
+  FreeConsole 关闭窗口（设置可随时 AllocConsole 恢复）；macOS/Linux 无独立
+  控制台窗口，由 `console=False` 决定。
+
+## CI 自动打包
+
+`.github/workflows/build.yml`：推送 `master` 构建并上传工件、推送 `v*` 标签自动
+创建 GitHub Release、可手动触发。构建 5 个主流平台组合（Windows x64 / Linux
+x64+arm64 / macOS Intel+Apple Silicon），每平台先做离屏启动冒烟测试再上传；
+Windows 的加速扩展由 Linux 跑者 mingw 交叉编译，不依赖 MSVC 环境。
+
+## 图标 / 字体
+
+- 图标：`ico/ico.png`（运行时）、`ico/ico.icns`（macOS，`scripts/make_icns.py` 生成）、
+  `ico/ico.ico`（Windows）；
+- 字体：统一使用小米 **MiSans**（`font/MiSans-Medium.ttf`），直接运行与打包路径
+  自动识别；依据《MiSans 字体知识产权许可协议》使用（「关于」与 README 注明、
+  不改编、不单独分发），缺失时回退系统字体。
 
 ## 第三方许可
 
-- 「关于」与「第三方许可」分离：帮助 → 关于 MangaProof（产品信息）、
-  帮助 → 第三方许可（全部第三方组件声明）；
-- 覆盖运行时（Python）、PSD 解析（psd-tools）、图像分析（NumPy）、
-  GUI（PySide6/Qt）、PDF（reportlab）、图像处理（Pillow）、
-  打包工具（PyInstaller、altgraph）与 MiSans 字体，
-  每个组件列出名称、版本、SPDX 许可证标识、版权、主页与许可证全文/官方链接；
-- 版本号运行时从已安装包元数据解析（`mangaproof/third_party.py`）。
-
-## 任务匹配验证
-
-- 单 PSD：文件大小 + 完整 SHA-256；
-- 文件夹：2～3 个分散抽样 SHA-256 + 其余文件 Size 检查（1~2 个文件全部 Hash，3~9 个抽 2 个，≥10 个抽 3 个）；
-- 验证失败一律禁止恢复监制状态，不提供强制恢复。
+帮助 → 关于（产品信息）与帮助 → 第三方许可（组件声明）分离。第三方许可页覆盖
+Python、psd-tools、NumPy、PySide6/Qt、reportlab、Pillow、PyInstaller、altgraph、
+MiSans 字体，逐项列出名称、版本、SPDX 许可证标识、版权、主页与许可证全文/官方链接
+（版本号运行时从包元数据解析）。
 
 ## 项目结构
 
 ```
 mangaproof/
 ├── main.py            # 入口
-├── ui/                # 主窗口、Viewer、面板、设置对话框
+├── ui/                # 主窗口、Viewer、面板、设置/许可对话框、预加载线程
 ├── psd/               # PSD 加载、文档模型、LRU 图像缓存
 ├── camera/            # Camera、视觉中心、自动缩放
 ├── review/            # 监制状态、问题、导航、持久化 + 哈希验证
 ├── compare/           # 自动对比控制器（250ms 闪切）
 ├── report/            # MangaProof 返修单 PDF（纯 Python）
 ├── config/            # settings.json 与统一程序路径服务
-└── utils/             # 自然排序、日志
+├── utils/             # 自然排序、日志
+├── console.py         # 打包产物控制台可见性控制
+├── fonts.py           # 统一字体加载
+├── psd_accel.py       # psd-tools 解码加速运行时补丁
+└── _psd_fast.c        # 纯 C 解码加速（scripts/build_accel.py 编译）
+packaging/             # 三平台 PyInstaller spec 与 Linux 桌面模板
+scripts/               # 构建/加速扩展/图标生成脚本
 tests/                 # 测试夹具生成与冒烟测试
 ```
