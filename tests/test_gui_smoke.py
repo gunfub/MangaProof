@@ -110,6 +110,21 @@ def test_app_icon_loaded() -> None:
     print("PASS test_app_icon_loaded")
 
 
+def test_console_switch_platform_aware() -> None:
+    """控制台开关仅 Windows 可用；其他平台置灰且不影响直接运行 py。"""
+    import sys
+
+    from mangaproof.config.settings import Settings
+    from mangaproof.ui.settings_dialog import SettingsDialog
+
+    dialog = SettingsDialog(Settings())
+    # 仅 Windows 打包产物支持运行时切换 → 非 Windows 上复选框应禁用
+    assert dialog.console_check.isEnabled() == (sys.platform == "win32")
+    assert dialog.console_check.isChecked()  # 默认开启隐藏
+
+    print("PASS test_console_switch_platform_aware")
+
+
 def test_full_workflow() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

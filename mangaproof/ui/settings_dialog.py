@@ -84,12 +84,19 @@ class SettingsDialog(QDialog):
         self.recursive_check = QCheckBox("递归扫描子文件夹")
         self.recursive_check.setChecked(settings.recursive_scan)
         task_form.addRow(self.recursive_check)
-        self.console_check = QCheckBox("打包产物隐藏控制台窗口")
+        # 控制台开关仅 Windows 打包产物有意义（见 mangaproof/console.py）
+        import sys as _sys
+
+        self.console_check = QCheckBox("打包产物隐藏控制台窗口（仅 Windows）")
         self.console_check.setChecked(settings.hide_console)
         self.console_check.setToolTip(
-            "仅对 PyInstaller 打包产物生效（默认隐藏）。\n"
+            "仅对 Windows 打包产物生效（默认隐藏）。\n"
+            "macOS / Linux 没有独立的控制台窗口，由打包参数决定"
+            "（--windowed 图形启动无终端输出），运行时无法切换。\n"
             "直接运行 python main.py 时控制台始终显示，不受此开关影响。"
         )
+        if _sys.platform != "win32":
+            self.console_check.setEnabled(False)
         task_form.addRow(self.console_check)
         layout.addWidget(task_group)
 

@@ -1,11 +1,13 @@
-"""控制台可见性控制（打包产物运行时隐藏/恢复）。
+"""控制台可见性控制。
 
-规则：
+规则（按运行方式与平台）：
 - 直接运行 Python（python main.py）：始终保留控制台，设置开关不生效；
-- PyInstaller 打包产物（sys.frozen）：默认隐藏控制台（设置项
-  hide_console，默认 True），在设置中关闭后恢复控制台显示；
-- 仅 Windows 支持运行时切换（console 子系统）；其他平台由构建参数
-  （--console / --windowed）决定，运行时不做处理。
+- Windows 打包产物（sys.frozen）：默认隐藏控制台（设置项 hide_console，
+  默认 True），在设置中关闭后恢复控制台显示（Win32 ShowWindow 运行时切换，
+  因此打包需用 --console 构建保留控制台子系统）；
+- macOS / Linux：没有独立控制台窗口概念——图形启动（--windowed）本就无
+  终端输出，从终端启动时终端窗口属于终端程序，应用无权切换。
+  由打包参数决定，运行时不做处理。
 """
 
 from __future__ import annotations
@@ -52,11 +54,14 @@ def apply_console_visibility(settings) -> None:
     settings: Settings 对象（需含 hide_console 字段）。
     """
     frozen = bool(getattr(sys, "frozen", False))
-    hidden = decide_console_hidden(frozen, sys.platform, settings.hide_console)
-    log.info(
-        "控制台：%s（%s）",
-        "隐藏" if hidden else "显示",
-        "打包产物" if frozen else "直接运行 Python，始终保留",
-    )
-    if frozen and sys.platform == "win32":
-        set_console_visible(not hidden)
+    if not frozen:
+        log.info("控制台：显示（直接运行 Python，始终保留，设置开关不生效）")
+        return
+    if sys.platform != "win32":
+        # macOS / Linux 没有独立控制台窗口：图形启动（--windowed）本就没有
+        # 终端输出；从终端启动时终端窗口属于终端程序，应用无权切换。
+        log.info("控制台：由打包参数决定（%s 无独立控制台窗口，运行时不做处理）", sys.platform)
+        return
+    hidden = bool(settings.hide_console)
+    set_console_visible(not hidden)
+    log.info("控制台：%s（Windows 打包产物，可在设置中切换）", "隐藏" if hidden else "显示")
