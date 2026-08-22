@@ -12,6 +12,27 @@ from pathlib import Path
 from mangaproof import APP_NAME, __version__
 
 
+def apply_app_icon(app, icon_path: Path | None = None) -> Path | None:
+    """加载应用图标（ico/ico.png）。
+
+    - PySide6 直接加载 PNG，主窗口与所有对话框统一生效；
+    - 图标缺失时不阻塞启动（仅记录日志）；
+    - PyInstaller onedir 打包时 ico/ 需一并拷贝到 exe 目录。
+    """
+    from PySide6.QtGui import QIcon
+
+    from mangaproof.config import paths
+    from mangaproof.utils.logging_setup import get_logger
+
+    log = get_logger("main")
+    path = icon_path if icon_path is not None else paths.get_app_dir() / "ico" / "ico.png"
+    if path.exists():
+        app.setWindowIcon(QIcon(str(path)))
+        return path
+    log.warning("未找到应用图标（%s），继续启动", path)
+    return None
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv if argv is None else argv)
 
@@ -40,6 +61,7 @@ def main(argv=None) -> int:
 
     apply_dark_theme(app)
     install_dark_titlebar(app)
+    apply_app_icon(app)
     settings_manager = SettingsManager()
 
     window = MainWindow(settings_manager)

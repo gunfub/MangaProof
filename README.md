@@ -68,6 +68,11 @@ uv run python main.py
 缓存        独立内存 LRU（非任务恢复必需）
 ```
 
+## 图标
+
+- 运行时窗口图标：`ico/ico.png`（PySide6 直接加载，程序目录下 `ico/` 文件夹）；
+- macOS 图标 `ico/ico.icns` 由 `uv run python scripts/make_icns.py` 生成（纯 Python，无需 iconutil）；`ico/ico.ico` 为 Windows 图标。
+
 ## 任务匹配验证
 
 - 单 PSD：文件大小 + 完整 SHA-256；

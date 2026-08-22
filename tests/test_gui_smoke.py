@@ -94,6 +94,22 @@ def test_dark_titlebar_installed() -> None:
     print("PASS test_dark_titlebar_installed")
 
 
+def test_app_icon_loaded() -> None:
+    """应用图标：从 ico/ico.png 加载到 QApplication，窗口默认继承。"""
+    from mangaproof.main import apply_app_icon
+
+    icon_path = Path(__file__).parent.parent / "ico" / "ico.png"
+    assert icon_path.exists(), "缺少 ico/ico.png"
+    result = apply_app_icon(app, icon_path)
+    assert result == icon_path
+    assert not app.windowIcon().isNull()
+
+    # 图标缺失时不阻塞启动
+    assert apply_app_icon(app, icon_path.parent / "missing.png") is None
+
+    print("PASS test_app_icon_loaded")
+
+
 def test_full_workflow() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
