@@ -274,7 +274,7 @@ def build_third_party_items() -> list[ThirdPartyItem]:
             "MiSans-Medium（随软件分发，未做任何修改）",
             "MiSans 字体知识产权许可协议",
             "© 小米科技有限责任公司",
-            "https://hyperos.mi.com/font/download",
+            "https://hyperos.mi.com/font/",
             MISANS_LICENSE,
         ),
     ]

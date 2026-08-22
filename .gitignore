@@ -18,6 +18,9 @@ logs/
 # 测试产物
 tests/data/out/
 
+# 美术素材原文件（永不入库）
+美术素材原文件/
+
 # PyInstaller 构建产物
 build/
 dist/
