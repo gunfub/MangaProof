@@ -98,6 +98,15 @@ uv run pyinstaller --clean --noconfirm packaging/main_linux.spec
 - 运行时窗口图标：`ico/ico.png`（PySide6 直接加载，程序目录下 `ico/` 文件夹）；
 - macOS 图标 `ico/ico.icns` 由 `uv run python scripts/make_icns.py` 生成（纯 Python，无需 iconutil）；`ico/ico.ico` 为 Windows 图标。
 
+## 字体
+
+- 运行时统一字体：`font/MiSans-Medium.ttf`（小米 MiSans，
+  https://hyperos.mi.com/font/download）。直接运行从 `程序目录/font/` 加载；
+  打包产物随包分发（PyInstaller 6 布局位于 `_internal/font/`），两种路径自动识别；
+- 依据《MiSans 字体知识产权许可协议》使用：软件「关于」对话框注明使用 MiSans；
+  不对字体做任何改编或二次开发；字体文件仅随本软件整体分发，不单独提供；
+- 字体文件缺失时自动回退系统默认字体，不阻塞启动。
+
 ## 任务匹配验证
 
 - 单 PSD：文件大小 + 完整 SHA-256；

@@ -125,6 +125,31 @@ def test_console_switch_platform_aware() -> None:
     print("PASS test_console_switch_platform_aware")
 
 
+def test_font_loading() -> None:
+    """统一字体：MiSans 注册为应用字体与主题首选字体族；缺失回退。"""
+    from mangaproof.fonts import load_app_fonts
+    from mangaproof.ui.theme import apply_dark_theme
+
+    font_path = Path(__file__).parent.parent / "font" / "MiSans-Medium.ttf"
+    assert font_path.exists(), "缺少 font/MiSans-Medium.ttf"
+
+    family = load_app_fonts(app, [font_path])
+    assert family == "MiSans", family
+    assert app.font().family() == "MiSans"
+
+    # 缺失时回退，不阻塞启动
+    assert load_app_fonts(app, [font_path.parent / "missing.ttf"]) is None
+
+    # 主题样式表字体族首位为 MiSans
+    apply_dark_theme(app, primary_family=family)
+    css = app.styleSheet()
+    assert '"MiSans"' in css
+    first = css.split("font-family:", 1)[1].strip().split(";", 1)[0]
+    assert first.startswith('"MiSans"'), first
+
+    print("PASS test_font_loading")
+
+
 def test_full_workflow() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

@@ -22,6 +22,8 @@ a = Analysis(
     datas=[
         # 整个 ico/ 目录 → 程序目录/ico/（运行时窗口图标从 ico/ico.png 加载）
         (str(ROOT / "ico"), "ico"),
+        # MiSans 字体 → 程序目录/font/（运行时统一字体加载）
+        (str(ROOT / "font"), "font"),
     ],
     hiddenimports=collect_submodules("psd_tools"),  # psd-tools 大量惰性导入
     hookspath=[],

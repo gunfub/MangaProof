@@ -264,7 +264,11 @@ class MainWindow(QMainWindow):
             f"<b>{APP_NAME} v{__version__}</b><br><br>"
             "漫画翻译质量检查与返修标注工具。<br><br>"
             "独立于 Photoshop：不调用 Photoshop API、不修改 PSD、<br>"
-            "Original 直接使用 PSD 自带 merged image。",
+            "Original 直接使用 PSD 自带 merged image。<br><br>"
+            "本软件使用小米 <b>MiSans</b> 字体"
+            "（<a href='https://hyperos.mi.com/font/download'>"
+            "https://hyperos.mi.com/font/download</a>），<br>"
+            "依据《MiSans 字体知识产权许可协议》使用。",
         )
 
     def _rebuild_recent_menu(self) -> None:

@@ -26,9 +26,16 @@ COLOR_UNREVIEWED = "#8a8f98"    # 未监制：灰色
 COLOR_CHECKER_A = "#2b2b2b"
 COLOR_CHECKER_B = "#333333"
 
+# 默认字体族优先级（主题样式表用）；加载 MiSans 后会插到最前
+DEFAULT_FONT_FAMILIES = (
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "sans-serif",
+)
+
+_FONT_PLACEHOLDER = "__FONT_FAMILIES__"
+
 _STYLESHEET = f"""
 * {{
-    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    font-family: {_FONT_PLACEHOLDER};
     font-size: 13px;
 }}
 QMainWindow, QDialog {{ background-color: {COLOR_BG_MAIN}; color: {COLOR_TEXT}; }}
@@ -140,7 +147,19 @@ QToolTip {{ background-color: {COLOR_BG_PANEL}; color: {COLOR_TEXT}; border: 1px
 """
 
 
-def apply_dark_theme(app: QApplication) -> None:
+def apply_dark_theme(app: QApplication, primary_family: str | None = None) -> None:
+    """应用暗色主题。
+
+    primary_family：应用统一字体族名（如 MiSans），会置于样式表
+    字体族列表首位；None 则使用默认字体族列表。
+    """
+    families = DEFAULT_FONT_FAMILIES
+    if primary_family:
+        families = (primary_family,) + tuple(
+            f for f in DEFAULT_FONT_FAMILIES if f != primary_family
+        )
+    family_list = ", ".join(f'"{f}"' for f in families)
+
     app.setStyle("Fusion")
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(COLOR_BG_MAIN))
@@ -157,4 +176,4 @@ def apply_dark_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.Link, QColor(COLOR_ACCENT))
     palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(COLOR_TEXT_DIM))
     app.setPalette(palette)
-    app.setStyleSheet(_STYLESHEET)
+    app.setStyleSheet(_STYLESHEET.replace(_FONT_PLACEHOLDER, family_list))

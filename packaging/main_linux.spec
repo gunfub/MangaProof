@@ -20,6 +20,8 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(ROOT / "ico"), "ico"),
+        # MiSans 字体 → 程序目录/font/（运行时统一字体加载）
+        (str(ROOT / "font"), "font"),
     ],
     hiddenimports=collect_submodules("psd_tools"),
     hookspath=[],
