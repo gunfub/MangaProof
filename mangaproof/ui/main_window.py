@@ -60,7 +60,13 @@ from mangaproof.ui.file_panel import FilePanel
 from mangaproof.ui.issue_panel import IssuePanel
 from mangaproof.ui.layer_panel import LayerPanel
 from mangaproof.ui.license_dialog import LicenseDialog
-from mangaproof.ui.preloader import KIND_EXTRA, KIND_OPEN, KIND_PRELOAD, PreloadWorker
+from mangaproof.ui.preloader import (
+    KIND_EXTRA,
+    KIND_OPEN,
+    KIND_PRELOAD,
+    WARM_ALL,
+    PreloadWorker,
+)
 from mangaproof.ui.settings_dialog import SettingsDialog
 from mangaproof.ui.statistics_panel import StatisticsPanel
 from mangaproof.ui.task_loader import (
@@ -115,6 +121,7 @@ class MainWindow(QMainWindow):
         self._preload.task_done.connect(self._on_preload_done)
         self._preload.start()
         self._pending_open_rel = ""   # 异步打开中的文件（快速切换时替换）
+        self._pending_open_layer: Optional[Tuple[str, int]] = None  # 异步图层切换
         self._open_restore = False
         self._open_dialog = None      # 切换文件的忙碌进度框
         self._preload_targets: set = set()   # 阶段 A 未完成（merged）
@@ -822,6 +829,17 @@ class MainWindow(QMainWindow):
             self._extra_targets.discard(rel)
             self._update_preload_label()
             return
+        # 图层切换结果（异步预热完成后执行切换）
+        if self._pending_open_layer is not None and self._pending_open_layer[0] == rel:
+            _, index = self._pending_open_layer
+            self._pending_open_layer = None
+            self._close_open_progress()
+            if ok and self.current_doc is not None:
+                self._select_layer_internal(index)
+                self._refresh_layer_selection()
+                self._mark_dirty()
+                self.viewer.setFocus()
+            return
         # open 结果：快速切换后旧文件的结果直接忽略
         if rel != self._pending_open_rel:
             return
@@ -900,16 +918,12 @@ class MainWindow(QMainWindow):
 
         merged_jobs: List[Tuple[str, str]] = []
         extra_jobs: List[Tuple[str, str]] = []
-        # 当前文件补背景图（自动对比免等待）；已提取过则跳过，避免
-        # 切换后精提取队列重复出现已完成的工作
-        cur_lid = ""
-        if self._current_file == rel and self._current_index >= 0:
-            ids = self._layer_ids_by_file.get(rel, [])
-            if self._current_index < len(ids):
-                cur_lid = ids[self._current_index]
+        # 当前文件：后台预热背景图 + 全部图层的视觉边界（任意 ←→ 图层
+        # 切换免等待）；已完成的部分跳过，避免重复排队
         cur_doc = self._docs.get(rel)
-        if cur_doc is not None and not cur_doc.has_bg():
-            extra_jobs.append((rel, cur_lid))
+        if cur_doc is not None:
+            if not cur_doc.has_bg() or not self._all_layers_warm(cur_doc):
+                extra_jobs.append((rel, WARM_ALL))
 
         for c in candidates:
             doc = self._docs.get(c)
@@ -938,6 +952,11 @@ class MainWindow(QMainWindow):
             if doc is not None:
                 doc.release_images()
             self._pending_qimages.pop(r, None)
+
+    @staticmethod
+    def _all_layers_warm(doc: PSDDocument) -> bool:
+        """文档全部图层的视觉边界是否已计算（图层切换免提取）。"""
+        return all(info.has_visual_bounds() for info in doc.layers)
 
     def _update_preload_label(self) -> None:
         if self.task is None:
@@ -991,27 +1010,39 @@ class MainWindow(QMainWindow):
         if idx is not None:
             self._switch_file(self.task.files[idx].relative_path)
 
+    def _request_layer_switch(self, index: int) -> None:
+        """图层切换入口：视觉边界已预热走快路径；
+        否则交后台线程预热（进度框，UI 不冻结）。"""
+        doc = self.current_doc
+        if doc is None or not (0 <= index < len(doc.layers)):
+            return
+        info = doc.layers[index]
+        if info.has_visual_bounds():
+            self._select_layer_internal(index)
+            self._refresh_layer_selection()
+            self._mark_dirty()
+            self.viewer.setFocus()
+            return
+        # 未预热：后台提取视觉边界（merged 已缓存，仅图层像素）
+        self._pending_open_layer = (self._current_file, index)
+        self._pending_open_rel = ""
+        self._preload.submit_open(self._current_file, info.id)
+        self._show_open_progress(f"{self._current_file} / {info.name}")
+
     def _on_layer_activated(self, index: int) -> None:
         if self._updating_panels:
             return
-        self._select_layer_internal(index)
-        self._refresh_layer_selection()
-        self._mark_dirty()
-        self.viewer.setFocus()
+        self._request_layer_switch(index)
 
     def prev_layer(self) -> None:
         if self.current_doc is None or self._current_index <= 0:
             return
-        self._select_layer_internal(self._current_index - 1)
-        self._refresh_layer_selection()
-        self._mark_dirty()
+        self._request_layer_switch(self._current_index - 1)
 
     def next_layer(self) -> None:
         if self.current_doc is None or self._current_index >= len(self.current_doc.layers) - 1:
             return
-        self._select_layer_internal(self._current_index + 1)
-        self._refresh_layer_selection()
-        self._mark_dirty()
+        self._request_layer_switch(self._current_index + 1)
 
     def recenter_current_layer(self) -> None:
         """显式重新定位（需求 §27）。"""
@@ -1075,8 +1106,8 @@ class MainWindow(QMainWindow):
             layer_ids, self.task.reviews, self._current_file, self._current_index
         )
         if idx is not None:
-            self._select_layer_internal(idx)
-            self._refresh_all_panels()
+            # 统一走图层切换通道（快路径/异步预热）
+            self._request_layer_switch(idx)
             return
 
         # 当前 PSD 完成 → 寻找下一个仍有未监制图层的 PSD（需求 §66）
@@ -1499,9 +1530,7 @@ class MainWindow(QMainWindow):
 
     def _on_chip_clicked(self, index: int) -> None:
         if 0 <= index < len(self._layer_ids_by_file.get(self._current_file, [])):
-            self._select_layer_internal(index)
-            self._refresh_layer_selection()
-            self._mark_dirty()
+            self._request_layer_switch(index)
 
     # ================================================================= 生命周期
 

@@ -138,6 +138,20 @@ def test_preload_worker() -> None:
             time.sleep(0.02)
         assert any(d[0] == "002.psd" and d[1] == KIND_OPEN for d in done)
 
+        # WARM_ALL 哨兵：预热文档全部图层的视觉边界（图层切换免等待）
+        from mangaproof.ui.preloader import WARM_ALL
+
+        worker.set_preloads([], [("001.psd", WARM_ALL)])
+        deadline = time.time() + 30
+        while not all(
+            info.has_visual_bounds() for info in docs["001.psd"].layers
+        ) and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert all(
+            info.has_visual_bounds() for info in docs["001.psd"].layers
+        )
+
         worker.stop()
         worker.wait(5000)
 
@@ -353,6 +367,10 @@ def test_full_workflow() -> None:
             assert info is not None and info.has_visual_bounds(), (
                 f"预加载完成后 {rel} 目标图层未预热"
             )
+        # 当前文件全部图层视觉边界已预热（←→ 图层切换零等待）
+        assert all(
+            info.has_visual_bounds() for info in window.current_doc.layers
+        )
 
         # Enter → 通过并跳到下一个未监制
         window.mark_pass()

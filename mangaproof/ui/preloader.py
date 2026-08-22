@@ -24,6 +24,7 @@ log = logging.getLogger("mangaproof.ui.preloader")
 KIND_OPEN = "open"              # 前台打开请求：merged + 目标图层
 KIND_PRELOAD = "preload"        # 阶段 A 完成：merged 已就绪
 KIND_EXTRA = "extra"            # 阶段 B 完成：背景图 + 图层像素已就绪
+WARM_ALL = "*"                  # 阶段 B 的 layer_id 哨兵：预热全部图层
 
 
 class PreloadWorker(QThread):
@@ -120,7 +121,11 @@ class PreloadWorker(QThread):
                 self._warm_layer(doc, layer_id)
             elif kind == KIND_EXTRA:
                 doc.prepare_bg()
-                self._warm_layer(doc, layer_id)
+                if layer_id == WARM_ALL:
+                    # 当前文件：预热全部图层的视觉边界，任意 ←→ 图层切换免等待
+                    self._warm_all_layers(doc)
+                else:
+                    self._warm_layer(doc, layer_id)
                 bg = doc.bg_image()
                 if bg is not None:
                     images["bg"] = numpy_to_qimage(bg[2])
@@ -139,3 +144,12 @@ class PreloadWorker(QThread):
             return
         if doc.layer_image(layer_id) is not None:
             info.visual_bounds()
+
+    @staticmethod
+    def _warm_all_layers(doc) -> None:
+        """预热文档全部图层的视觉边界（层像素走 LRU，不常驻）。"""
+        for info in doc.layers:
+            if info.has_visual_bounds():
+                continue
+            if doc.layer_image(info.id) is not None:
+                info.visual_bounds()
