@@ -105,6 +105,10 @@ Run workflow）时，构建 5 个主流平台组合：
 - merged 提取优先走 **Pillow 原生 C 解码**（psd-tools 的 RLE 解压为
   纯 Python 实现，是主要耗时点；实测约 7× 加速、像素一致），失败或
   尺寸不符自动回退 psd-tools 路径；
+- ZIP 预测压缩的解码走**自研纯 C 加速**（`scripts/build_accel.py` 编译，
+  ctypes 运行时补丁进 psd-tools；实测 50MB 通道 1.03s → 0.005s 约 200×），
+  未构建时自动回退原实现；RLE 解压本身已由 psd-tools 官方 wheel 的
+  Cython 扩展覆盖，无需处理；
 - 未命中预加载的文件切换走异步加载并显示进度框（非模态），支持快速连续
   切换：新请求自动替换未处理的旧请求，过期结果直接丢弃；
 - 窗口外文档的 merged/背景大图自动回收（图层树与层像素 LRU 保留），

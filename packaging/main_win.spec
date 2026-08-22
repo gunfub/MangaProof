@@ -2,9 +2,9 @@
 """MangaProof - Windows PyInstaller 打包配置（onedir）。
 
 控制台策略（与 mangaproof/console.py 配合）：
-- console=True：保留控制台子系统，运行时通过 Win32 ShowWindow 隐藏/恢复；
-- 设置「打包产物隐藏控制台窗口」默认开启 → 启动即隐藏；
-- 关闭该设置后控制台恢复显示（直接运行 py 时始终显示，不受影响）。
+- console=True：保留控制台子系统，运行时通过 Win32 FreeConsole/AllocConsole
+  关闭/恢复；设置「打包产物关闭控制台窗口」默认开启 → 启动即消失；
+- 直接运行 py 时始终显示，不受开关影响。
 图标：ico/ico.ico（exe 图标）；ico/ico.png 随包分发（运行时窗口图标）。
 """
 
@@ -15,16 +15,23 @@ from PyInstaller.utils.hooks import collect_submodules
 SPEC_DIR = Path(SPECPATH)
 ROOT = SPEC_DIR.parent
 
+# 随包数据：ico/、font/、以及已构建的原生加速扩展（ctypes 按路径加载）
+_datas = [
+    (str(ROOT / "ico"), "ico"),
+    (str(ROOT / "font"), "font"),
+] + [
+    (str(p), "mangaproof")
+    for p in (ROOT / "mangaproof").glob("_psd_fast.so")
+] + [
+    (str(p), "mangaproof")
+    for p in (ROOT / "mangaproof").glob("_psd_fast.pyd")
+]
+
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[
-        # 整个 ico/ 目录 → 程序目录/ico/（运行时窗口图标从 ico/ico.png 加载）
-        (str(ROOT / "ico"), "ico"),
-        # MiSans 字体 → 程序目录/font/（运行时统一字体加载）
-        (str(ROOT / "font"), "font"),
-    ],
+    datas=_datas,
     hiddenimports=collect_submodules("psd_tools"),  # psd-tools 大量惰性导入
     hookspath=[],
     hooksconfig={},
@@ -45,7 +52,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,                        # 保留控制台子系统（运行时按设置隐藏/恢复）
+    console=True,                        # 保留控制台子系统（运行时按设置关闭/恢复）
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

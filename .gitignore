@@ -30,3 +30,6 @@ dist/
 # IDE
 .idea/
 .vscode/
+# 本地编译的原生加速扩展（由 scripts/build_accel.py 生成）
+mangaproof/_psd_fast.so
+mangaproof/_psd_fast.pyd

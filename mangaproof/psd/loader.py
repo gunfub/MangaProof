@@ -16,6 +16,15 @@ from mangaproof.utils.natural_sort import natural_sorted
 
 log = logging.getLogger("mangaproof.psd.loader")
 
+# 应用解码加速补丁（Cython 扩展可用时替换 psd-tools 的纯 Python 热点，
+# 不可用时自动回退；幂等）。必须在任何 psd-tools 解码发生前执行。
+try:
+    from mangaproof import psd_accel
+
+    psd_accel.patch_psd_tools()
+except Exception:  # pragma: no cover
+    log.warning("psd 解码加速补丁异常，继续使用原实现", exc_info=True)
+
 SUPPORTED_SUFFIXES = (".psd", ".psb")
 
 

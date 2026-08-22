@@ -65,6 +65,10 @@ jobs:
           VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
 
+      - name: Build accel extension
+        shell: bash
+        run: uv run python scripts/build_accel.py
+
       - name: Build with PyInstaller
         shell: bash
         run: uv run pyinstaller --noconfirm --clean "${{ matrix.spec }}"

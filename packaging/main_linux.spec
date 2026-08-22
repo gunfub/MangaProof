@@ -14,15 +14,23 @@ from PyInstaller.utils.hooks import collect_submodules
 SPEC_DIR = Path(SPECPATH)
 ROOT = SPEC_DIR.parent
 
+# 随包数据：ico/、font/、以及已构建的原生加速扩展（ctypes 按路径加载）
+_datas = [
+    (str(ROOT / "ico"), "ico"),
+    (str(ROOT / "font"), "font"),
+] + [
+    (str(p), "mangaproof")
+    for p in (ROOT / "mangaproof").glob("_psd_fast.so")
+] + [
+    (str(p), "mangaproof")
+    for p in (ROOT / "mangaproof").glob("_psd_fast.pyd")
+]
+
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[
-        (str(ROOT / "ico"), "ico"),
-        # MiSans 字体 → 程序目录/font/（运行时统一字体加载）
-        (str(ROOT / "font"), "font"),
-    ],
+    datas=_datas,
     hiddenimports=collect_submodules("psd_tools"),
     hookspath=[],
     hooksconfig={},

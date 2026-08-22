@@ -393,6 +393,29 @@ def test_merged_fast_path_matches():
     assert get_merged_pil_fast(Path("/nonexistent/x.psd")) is None
 
 
+def test_psd_accel_prediction_correctness():
+    """回归：C 加速的 ZIP 预测解码与 psd-tools 原实现逐字节一致。"""
+    import numpy as np
+
+    import psd_tools.compression as comp
+    from mangaproof import psd_accel
+
+    original = psd_accel._original_decode_prediction or comp.decode_prediction
+    rng = np.random.default_rng(7)
+
+    for (w, h, depth) in [
+        (300, 200, 8), (17, 5, 8), (256, 256, 16), (3, 3, 16), (100, 50, 8),
+    ]:
+        raw = rng.integers(0, 256, w * h * (depth // 8), dtype=np.uint8).tobytes()
+        enc = comp.encode_prediction(raw, w, h, depth)
+        expect = original(enc, w, h, depth)
+        if psd_accel.is_accel_available():
+            got = comp.decode_prediction(enc, w, h, depth)   # 已补丁的实现
+            assert got == expect, f"加速解码不一致: {w}x{h} d{depth}"
+        else:
+            assert comp.decode_prediction is original  # 未构建 → 原实现
+
+
 if __name__ == "__main__":
     import traceback
     tests = [
