@@ -503,6 +503,177 @@ def test_full_workflow() -> None:
     print("PASS test_full_workflow")
 
 
+def test_compare_controller_unit() -> None:
+    """CompareController：频率换算、间隔设置、手动切换、打断。"""
+    from mangaproof.compare.controller import (
+        BG_ONLY,
+        DEFAULT_SPEED_HZ,
+        ORIGINAL,
+        CompareController,
+        hz_to_interval_ms,
+    )
+
+    # 档位 → 每张停留时长（均为整数毫秒）
+    assert hz_to_interval_ms(1) == 1000
+    assert hz_to_interval_ms(2) == 500
+    assert hz_to_interval_ms(4) == 250
+    assert hz_to_interval_ms(5) == 200
+    assert hz_to_interval_ms(8) == 125
+
+    c = CompareController()
+    assert c.interval_ms == hz_to_interval_ms(DEFAULT_SPEED_HZ)
+    c.set_interval_ms(200)
+    assert c.interval_ms == 200
+    c.set_interval_ms(0)   # 下限钳制
+    assert c.interval_ms == 1
+
+    # 手动挡：swap_once 不启动定时器
+    assert c.display_state == ORIGINAL
+    c.swap_once()
+    assert c.display_state == BG_ONLY and not c.is_running
+    c.swap_once()
+    assert c.display_state == ORIGINAL
+
+    # interrupt：手动挡下强制回原图
+    c.swap_once()
+    c.interrupt()
+    assert c.display_state == ORIGINAL and not c.is_running
+
+    # interrupt：自动挡运行中 → 停止并回原图
+    c.set_interval_ms(250)
+    c.start()
+    assert c.is_running
+    c.interrupt()
+    assert not c.is_running and c.display_state == ORIGINAL
+
+    print("PASS test_compare_controller_unit")
+
+
+def test_settings_compare_options() -> None:
+    """设置对话框：对比模式/速度档位、手动挡灰显速度、应用与恢复默认。"""
+    from mangaproof.config.settings import Settings
+    from mangaproof.ui.settings_dialog import SettingsDialog
+
+    dialog = SettingsDialog(Settings())
+    # 默认：自动模式，速度=正常 4 次/秒
+    assert dialog.compare_mode_combo.currentData() == "auto"
+    assert dialog.compare_speed_combo.isEnabled()
+    assert dialog.compare_speed_combo.currentData() == 4
+    assert "4 次/秒（每张 250ms）" in dialog.compare_speed_combo.currentText()
+
+    # 切手动挡 → 速度灰显
+    dialog.compare_mode_combo.setCurrentIndex(
+        dialog.compare_mode_combo.findData("manual")
+    )
+    assert not dialog.compare_speed_combo.isEnabled()
+
+    s = Settings()
+    dialog.apply_to(s)
+    assert s.compare_mode == "manual"
+
+    # 自动挡选 8 次/秒 → 应用到设置
+    dialog.compare_mode_combo.setCurrentIndex(
+        dialog.compare_mode_combo.findData("auto")
+    )
+    assert dialog.compare_speed_combo.isEnabled()
+    dialog.compare_speed_combo.setCurrentIndex(
+        dialog.compare_speed_combo.findData(8)
+    )
+    s2 = Settings()
+    dialog.apply_to(s2)
+    assert s2.compare_mode == "auto" and s2.compare_speed_hz == 8
+
+    # 恢复默认 → 自动 + 4 次/秒
+    dialog._reset_defaults()
+    s3 = Settings()
+    dialog.apply_to(s3)
+    assert s3.compare_mode == "auto" and s3.compare_speed_hz == 4
+
+    # 自定义速度（档位外数值）也能回显选中
+    dialog.compare_speed_combo.setCurrentIndex(
+        dialog.compare_speed_combo.findData(8)
+    )
+    s_custom = Settings()
+    s_custom.compare_speed_hz = 3
+    dialog2 = SettingsDialog(s_custom)
+    assert dialog2.compare_speed_combo.currentData() == 3
+    s_custom_out = Settings()
+    dialog2.apply_to(s_custom_out)
+    assert s_custom_out.compare_speed_hz == 3
+
+    print("PASS test_settings_compare_options")
+
+
+def test_compare_manual_mode_workflow() -> None:
+    """手动挡：Space/按钮按一下切一次；Esc、通过等操作打断并强制回原图。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        folder = _copy_fixtures(root / "chapter01")
+
+        sm = SettingsManager(root / "settings.json")
+        sm.settings.compare_mode = "manual"
+        window = MainWindow(sm)
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+
+        # 工具栏按钮文案随模式变化
+        assert window.action_compare.text() == "对比切换 (Space)"
+
+        with patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window.open_folder(folder)
+        _wait_for_task(window)
+        app.processEvents()
+
+        # 等待背景图预热（对比依赖 bg 图）
+        deadline = time.time() + 30
+        while window.current_doc.bg_image() is None and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert window.current_doc.bg_image() is not None
+
+        # 快捷键：按一下切一次，无运行状态
+        assert window.viewer.source == "merged"
+        window.toggle_compare()
+        assert window.viewer.source == "bg"
+        assert not window._compare.is_running
+        window.toggle_compare()
+        assert window.viewer.source == "merged"
+
+        # 工具栏按钮点击：切换一次且不保持勾选
+        window.action_compare.setChecked(True)
+        app.processEvents()
+        assert window.viewer.source == "bg"
+        assert not window.action_compare.isChecked()
+
+        # 打断：Esc 回原图
+        window.cancel_operation()
+        assert window.viewer.source == "merged"
+
+        # 打断：通过当前图层（mark_pass）回原图
+        window.toggle_compare()
+        assert window.viewer.source == "bg"
+        window.mark_pass()
+        assert window.viewer.source == "merged"
+
+        # 切回自动挡：按钮文案与 Space 行为恢复自动闪切
+        window.settings.compare_mode = "auto"
+        window._apply_compare_settings()
+        assert window.action_compare.text() == "自动对比 (Space)"
+        window.toggle_compare()
+        assert window._compare.is_running
+        window.toggle_compare()
+        assert not window._compare.is_running
+        assert window.viewer.source == "merged"
+
+        window.close()
+        app.processEvents()
+
+    print("PASS test_compare_manual_mode_workflow")
+
+
 if __name__ == "__main__":
     import traceback
 

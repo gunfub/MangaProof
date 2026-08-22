@@ -1,6 +1,7 @@
 """设置对话框（需求 §20、§30、§35、§46、§49）。
 
 - 图层显示比例（20%～90%）；
+- 自动对比：模式（自动/手动切换）与预设切换速度档位；
 - 核心快捷键重绑定（QKeySequenceEdit 录制）；
 - 问题类型快捷键重绑定；
 - PDF 生成开关、返修单自定义名称、递归扫描。
@@ -29,7 +30,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mangaproof.compare.controller import hz_to_interval_ms
 from mangaproof.config.settings import (
+    COMPARE_SPEED_TIERS,
+    DEFAULT_COMPARE_MODE,
+    DEFAULT_COMPARE_SPEED_HZ,
     DEFAULT_DISPLAY_RATIO,
     DEFAULT_ISSUE_TYPES,
     DEFAULT_KEYBINDINGS,
@@ -77,6 +82,37 @@ class SettingsDialog(QDialog):
         self.ratio_combo.setCurrentIndex(max(0, idx))
         display_form.addRow("图层自动显示比例：", self.ratio_combo)
         layout.addWidget(display_group)
+
+        # ---- 自动对比 ----
+        compare_group = QGroupBox("自动对比")
+        compare_form = QFormLayout(compare_group)
+        self.compare_mode_combo = QComboBox()
+        self.compare_mode_combo.addItem("自动切换（定时来回闪切）", "auto")
+        self.compare_mode_combo.addItem("手动切换（按一下切一次）", "manual")
+        mode_idx = self.compare_mode_combo.findData(settings.compare_mode)
+        self.compare_mode_combo.setCurrentIndex(max(0, mode_idx))
+        compare_form.addRow("对比模式：", self.compare_mode_combo)
+
+        self.compare_speed_combo = QComboBox()
+        for hz, name in COMPARE_SPEED_TIERS:
+            self.compare_speed_combo.addItem(
+                f"{name} · {hz} 次/秒（每张 {hz_to_interval_ms(hz)}ms）", hz
+            )
+        current_hz = settings.compare_speed_hz
+        if current_hz not in [hz for hz, _ in COMPARE_SPEED_TIERS]:
+            self.compare_speed_combo.addItem(
+                f"自定义 · {current_hz} 次/秒（每张 {hz_to_interval_ms(current_hz)}ms）",
+                current_hz,
+            )
+        speed_idx = self.compare_speed_combo.findData(current_hz)
+        self.compare_speed_combo.setCurrentIndex(max(0, speed_idx))
+        self.compare_speed_combo.setToolTip("手动切换模式下无需设定速度")
+        compare_form.addRow("切换速度：", self.compare_speed_combo)
+        self.compare_mode_combo.currentIndexChanged.connect(
+            self._update_compare_speed_enabled
+        )
+        self._update_compare_speed_enabled()
+        layout.addWidget(compare_group)
 
         # ---- 任务 ----
         task_group = QGroupBox("任务")
@@ -170,10 +206,18 @@ class SettingsDialog(QDialog):
         button_row.addWidget(self.button_box)
         layout.addLayout(button_row)
 
+    def _update_compare_speed_enabled(self) -> None:
+        manual = self.compare_mode_combo.currentData() == "manual"
+        self.compare_speed_combo.setEnabled(not manual)
+
     def _reset_defaults(self) -> None:
         from PySide6.QtGui import QKeySequence
         idx = self.ratio_combo.findData(DEFAULT_DISPLAY_RATIO)
         self.ratio_combo.setCurrentIndex(max(0, idx))
+        idx = self.compare_mode_combo.findData(DEFAULT_COMPARE_MODE)
+        self.compare_mode_combo.setCurrentIndex(max(0, idx))
+        idx = self.compare_speed_combo.findData(DEFAULT_COMPARE_SPEED_HZ)
+        self.compare_speed_combo.setCurrentIndex(max(0, idx))
         self.recursive_check.setChecked(False)
         self.console_check.setChecked(True)
         self.pdf_check.setChecked(True)
@@ -187,6 +231,8 @@ class SettingsDialog(QDialog):
 
     def apply_to(self, settings: Settings) -> None:
         settings.layer_display_ratio = float(self.ratio_combo.currentData())
+        settings.compare_mode = str(self.compare_mode_combo.currentData())
+        settings.compare_speed_hz = int(self.compare_speed_combo.currentData())
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.generate_pdf_on_complete = self.pdf_check.isChecked()
         settings.report_name = self.report_name_edit.text().strip()

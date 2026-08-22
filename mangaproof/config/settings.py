@@ -66,12 +66,26 @@ DEFAULT_ISSUE_TYPES: list[dict[str, str]] = [
 DISPLAY_RATIOS: list[float] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 DEFAULT_DISPLAY_RATIO = 0.6
 
+# 自动对比预设速度档位：(次/秒, 档位名)。默认"正常"= 4 次/秒，
+# 即每张停留 250ms，与原硬编码行为一致（需求 §22）。
+COMPARE_SPEED_TIERS: list[tuple[int, str]] = [
+    (1, "慢"),
+    (2, "较慢"),
+    (4, "正常"),
+    (5, "较快"),
+    (8, "快"),
+]
+DEFAULT_COMPARE_SPEED_HZ = 4
+DEFAULT_COMPARE_MODE = "auto"   # "auto" 自动切换 / "manual" 手动切换
+
 
 @dataclass
 class Settings:
     """运行时设置对象。"""
 
     layer_display_ratio: float = DEFAULT_DISPLAY_RATIO
+    compare_mode: str = DEFAULT_COMPARE_MODE   # "auto" / "manual"
+    compare_speed_hz: int = DEFAULT_COMPARE_SPEED_HZ
     recursive_scan: bool = False
     generate_pdf_on_complete: bool = True
     report_name: str = ""
@@ -132,6 +146,17 @@ class SettingsManager:
             ratio = DEFAULT_DISPLAY_RATIO
         s.layer_display_ratio = ratio
 
+        mode = raw.get("compare_mode", DEFAULT_COMPARE_MODE)
+        s.compare_mode = mode if mode in ("auto", "manual") else DEFAULT_COMPARE_MODE
+
+        try:
+            hz = int(raw.get("compare_speed_hz", DEFAULT_COMPARE_SPEED_HZ))
+        except (TypeError, ValueError):
+            hz = DEFAULT_COMPARE_SPEED_HZ
+        if not (1 <= hz <= 10):
+            hz = DEFAULT_COMPARE_SPEED_HZ
+        s.compare_speed_hz = hz
+
         s.recursive_scan = bool(raw.get("recursive_scan", False))
         s.generate_pdf_on_complete = bool(
             raw.get("generate_pdf_on_complete", True)
@@ -177,6 +202,8 @@ class SettingsManager:
                 payload = {
                     "settings_version": SETTINGS_VERSION,
                     "layer_display_ratio": self.settings.layer_display_ratio,
+                    "compare_mode": self.settings.compare_mode,
+                    "compare_speed_hz": self.settings.compare_speed_hz,
                     "recursive_scan": self.settings.recursive_scan,
                     "generate_pdf_on_complete": self.settings.generate_pdf_on_complete,
                     "report_name": self.settings.report_name,

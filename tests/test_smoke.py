@@ -416,6 +416,46 @@ def test_psd_accel_prediction_correctness():
             assert comp.decode_prediction is original  # 未构建 → 原实现
 
 
+def test_compare_settings_roundtrip():
+    """自动对比设置：新字段读写、非法值回退、旧版配置缺省为默认。"""
+    from mangaproof.config.settings import (
+        DEFAULT_COMPARE_MODE,
+        DEFAULT_COMPARE_SPEED_HZ,
+        SettingsManager,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "settings.json"
+
+        # 默认值
+        sm = SettingsManager(p)
+        assert sm.settings.compare_mode == "auto"
+        assert sm.settings.compare_speed_hz == 4
+
+        # 写入并回读
+        sm.settings.compare_mode = "manual"
+        sm.settings.compare_speed_hz = 8
+        sm.save()
+        sm2 = SettingsManager(p)
+        assert sm2.settings.compare_mode == "manual"
+        assert sm2.settings.compare_speed_hz == 8
+
+        # 非法值回退默认
+        p.write_text(
+            json.dumps({"compare_mode": "bogus", "compare_speed_hz": 999}),
+            encoding="utf-8",
+        )
+        sm3 = SettingsManager(p)
+        assert sm3.settings.compare_mode == DEFAULT_COMPARE_MODE
+        assert sm3.settings.compare_speed_hz == DEFAULT_COMPARE_SPEED_HZ
+
+        # 旧版配置（无新字段）→ 默认值
+        p.write_text(json.dumps({"layer_display_ratio": 0.5}), encoding="utf-8")
+        sm4 = SettingsManager(p)
+        assert sm4.settings.compare_mode == "auto"
+        assert sm4.settings.compare_speed_hz == 4
+
+
 if __name__ == "__main__":
     import traceback
     tests = [

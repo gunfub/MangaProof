@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 
 from mangaproof import APP_NAME, __version__
 from mangaproof.camera.centering import layer_visual_bounds
-from mangaproof.compare.controller import BG_ONLY, ORIGINAL, CompareController
+from mangaproof.compare.controller import BG_ONLY, ORIGINAL, CompareController, hz_to_interval_ms
 from mangaproof.config.settings import (
     DISPLAY_RATIOS,
     Settings,
@@ -131,6 +131,8 @@ class MainWindow(QMainWindow):
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
         self._compare.running_changed.connect(self._on_compare_running_changed)
+        self._compare.set_interval_ms(hz_to_interval_ms(self.settings.compare_speed_hz))
+        self._applying_compare_ui = False   # 程序内部改按钮状态时抑制 toggled 处理
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
@@ -357,9 +359,7 @@ class MainWindow(QMainWindow):
         self.action_save.setText(f"保存 ({d(kb.get('save_task', 'Ctrl+S'))})")
         self.action_report.setText(f"生成返修单 ({d(kb.get('generate_report', 'Ctrl+R'))})")
         self.action_redraw.setText(f"红框模式 ({d(kb.get('redraw_mode', 'R'))})")
-        self.action_compare.setText(
-            f"{'停止自动对比' if self._compare.is_running else '自动对比'} ({d(kb.get('toggle_compare', 'Space'))})"
-        )
+        self._update_compare_action_text()
 
     # ================================================================= 快捷键
 
@@ -484,7 +484,7 @@ class MainWindow(QMainWindow):
     def _start_load(self, mode: str, path: Path, force_fresh: bool = False) -> None:
         if self._loader is not None and self._loader.isRunning():
             return
-        self._compare.stop()
+        self._compare.interrupt()
         self._load_mode = mode
         self._load_path = Path(path)
 
@@ -707,7 +707,7 @@ class MainWindow(QMainWindow):
                 self._switch_file(rel)
 
     def _switch_file(self, rel: str) -> None:
-        self._compare.stop()
+        self._compare.interrupt()
         self._request_open_file(rel, restore=False)
 
     def _request_open_file(self, rel: str, restore: bool) -> None:
@@ -984,7 +984,7 @@ class MainWindow(QMainWindow):
 
     def _select_layer_internal(self, index: int) -> None:
         """切换图层统一行为（需求 §12）：停对比 → Original → 切换 → 定位 → 缩放。"""
-        self._compare.stop()
+        self._compare.interrupt()
         doc = self.current_doc
         if doc is None or not (0 <= index < len(doc.layers)):
             self._current_index = -1
@@ -1065,7 +1065,7 @@ class MainWindow(QMainWindow):
     def mark_pass(self) -> None:
         if self.task is None or self.current_doc is None or self._current_index < 0:
             return
-        self._compare.stop()
+        self._compare.interrupt()
         info = self.current_doc.layers[self._current_index]
         status = self.task.status_of(self._current_file, info.id)
         if status == UNREVIEWED:
@@ -1078,7 +1078,7 @@ class MainWindow(QMainWindow):
     def mark_fail(self) -> None:
         if self.task is None or self.current_doc is None or self._current_index < 0:
             return
-        self._compare.stop()
+        self._compare.interrupt()
         info = self.current_doc.layers[self._current_index]
         self.task.set_status(self._current_file, info.id, FAILED)
         self.issue_panel.set_hint(
@@ -1148,25 +1148,63 @@ class MainWindow(QMainWindow):
     def toggle_compare(self) -> None:
         if self.current_doc is None:
             return
+        # 预取 bg 图像，避免闪切中途卡顿（需求 §59：不重新读取）
+        if self.current_doc.bg_image() is None:
+            self.statusBar().showMessage("未找到可用背景图层，无法对比", 3000)
+            return
+        if self.settings.compare_mode == "manual":
+            # 手动挡：按一下切一次，无运行/停止状态
+            self._compare.swap_once()
+            return
         if self._compare.is_running:
             self._compare.stop()
             return
-        # 预取 bg 图像，避免闪切中途卡顿（需求 §59：不重新读取）
-        if self.current_doc.bg_image() is None:
-            self.statusBar().showMessage("未找到可用背景图层，无法自动对比", 3000)
-            return
         self._compare.start()
+
+    def _update_compare_action_text(self) -> None:
+        key = self._display_key(self.settings.binding("toggle_compare") or "Space")
+        if self.settings.compare_mode == "manual":
+            self.action_compare.setText(f"对比切换 ({key})")
+        elif self._compare.is_running:
+            self.action_compare.setText(f"停止自动对比 ({key})")
+        else:
+            self.action_compare.setText(f"自动对比 ({key})")
+
+    def _apply_compare_settings(self) -> None:
+        """把设置中的对比模式/速度应用到控制器与工具栏按钮。"""
+        self._compare.set_interval_ms(
+            hz_to_interval_ms(self.settings.compare_speed_hz)
+        )
+        self._applying_compare_ui = True
+        try:
+            if self.settings.compare_mode == "manual":
+                self._compare.interrupt()   # 切到手动挡：停止自动切换并回原图
+            self.action_compare.setChecked(False)
+        finally:
+            self._applying_compare_ui = False
+        self._update_compare_action_text()
 
     def _on_compare_display_changed(self, state: str) -> None:
         self.viewer.set_source(SOURCE_BG if state == BG_ONLY else SOURCE_MERGED)
 
     def _on_compare_running_changed(self, running: bool) -> None:
         self.action_compare.setChecked(running)
-        self.action_compare.setText("停止自动对比 (Space)" if running else "自动对比 (Space)")
+        self._update_compare_action_text()
         if not running:
             self.viewer.set_source(SOURCE_MERGED)
 
     def _on_compare_action_toggled(self, checked: bool) -> None:
+        if self._applying_compare_ui:
+            return
+        if self.settings.compare_mode == "manual":
+            # 手动挡：按钮不保持勾选状态，每次点击切换一次
+            self._applying_compare_ui = True
+            try:
+                self.action_compare.setChecked(False)
+            finally:
+                self._applying_compare_ui = False
+            self.toggle_compare()
+            return
         if checked != self._compare.is_running:
             self.toggle_compare()
 
@@ -1176,8 +1214,7 @@ class MainWindow(QMainWindow):
         """方式 A：快捷键选类型 → 拖框（需求 §35、§37）。"""
         if self.task is None or self.current_doc is None or self._current_index < 0:
             return
-        if self._compare.is_running:
-            self._compare.stop()   # 需求 §40：停止对比后创建
+        self._compare.interrupt()   # 需求 §40：停止对比后创建
         self.viewer.set_pending_type(type_name)
         self.issue_panel.set_hint(
             f"请在画布上拖拽红框：{type_name}"
@@ -1201,8 +1238,7 @@ class MainWindow(QMainWindow):
 
     def _on_rect_drawn(self, x: float, y: float, w: float, h: float) -> None:
         """方式 B：先拖框 → 选择类型（需求 §37）。"""
-        if self._compare.is_running:
-            self._compare.stop()
+        self._compare.interrupt()
         dialog = IssueDialog(self.settings.issue_type_names(), self, rect=(x, y, w, h))
         if dialog.exec() == IssueDialog.DialogCode.Accepted:
             self._commit_new_issue(*dialog.result_values(), rect=(x, y, w, h))
@@ -1211,8 +1247,7 @@ class MainWindow(QMainWindow):
         """自定义批注（需求 §36），无红框。"""
         if self.task is None or self.current_doc is None or self._current_index < 0:
             return
-        if self._compare.is_running:
-            self._compare.stop()
+        self._compare.interrupt()
         dialog = IssueDialog(
             self.settings.issue_type_names(), self, default_type="其他",
             title="自定义批注",
@@ -1267,8 +1302,7 @@ class MainWindow(QMainWindow):
     def toggle_redraw_mode(self) -> None:
         if self.task is None or self.current_doc is None:
             return
-        if self._compare.is_running:
-            self._compare.stop()
+        self._compare.interrupt()
         self.viewer.set_redraw_mode(not self.viewer.redraw_mode)
 
     def _on_redraw_mode_toggled(self, checked: bool) -> None:
@@ -1278,8 +1312,7 @@ class MainWindow(QMainWindow):
     def _on_add_issue_requested(self) -> None:
         if self.task is None or self.current_doc is None or self._current_index < 0:
             return
-        if self._compare.is_running:
-            self._compare.stop()
+        self._compare.interrupt()
         self.viewer.set_redraw_mode(True)
         self.issue_panel.set_hint(
             f"拖框模式：在画布上拖拽红框"
@@ -1293,13 +1326,12 @@ class MainWindow(QMainWindow):
             self.issue_panel.set_hint("")
 
     def cancel_operation(self) -> None:
-        """Esc：取消/退出当前批注操作（需求 §30）。"""
+        """Esc：取消/退出当前批注操作（需求 §30）；对比中则停止并恢复原图。"""
         if self.viewer.any_issue_mode():
             self.viewer.cancel_pending()
             self.issue_panel.set_hint("")
             return
-        if self._compare.is_running:
-            self._compare.stop()
+        self._compare.interrupt()
 
     # ================================================================= 保存（需求 §8～§9）
 
@@ -1421,6 +1453,7 @@ class MainWindow(QMainWindow):
             dialog.apply_to(self.settings)
             self.settings_manager.save()
             self._rebuild_shortcuts()
+            self._apply_compare_settings()
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))
             self.recenter_current_layer()
