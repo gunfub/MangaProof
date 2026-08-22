@@ -4,7 +4,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# uv 环境与缓存（uv 管理的虚拟环境不进入版本库；uv.lock 保留以保证可复现）
+# uv 环境与缓存
 .venv/
 .uv-cache/
 
@@ -15,11 +15,13 @@ logs/
 *.mangaproof.json.tmp
 *.mangaproof.json.bak-*
 
+# 私有/开发资料
+AI-rules/
+MangaProof_产品开发需求_v1.0.md
+美术素材原文件/
+
 # 测试产物
 tests/data/out/
-
-# 美术素材原文件（永不入库）
-美术素材原文件/
 
 # PyInstaller 构建产物
 build/
