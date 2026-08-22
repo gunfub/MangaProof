@@ -87,12 +87,13 @@ class SettingsDialog(QDialog):
         # 控制台开关仅 Windows 打包产物有意义（见 mangaproof/console.py）
         import sys as _sys
 
-        self.console_check = QCheckBox("打包产物隐藏控制台窗口（仅 Windows）")
+        self.console_check = QCheckBox("打包产物关闭控制台窗口（仅 Windows）")
         self.console_check.setChecked(settings.hide_console)
         self.console_check.setToolTip(
-            "仅对 Windows 打包产物生效（默认隐藏）。\n"
-            "macOS / Linux 没有独立的控制台窗口，由打包参数决定"
-            "（--windowed 图形启动无终端输出），运行时无法切换。\n"
+            "仅对 Windows 打包产物生效（默认关闭）。\n"
+            "开启后控制台窗口直接消失（FreeConsole 销毁，不是最小化）；\n"
+            "关闭此开关后重新显示控制台窗口（AllocConsole）。\n"
+            "macOS / Linux 无独立控制台窗口，由打包参数决定。\n"
             "直接运行 python main.py 时控制台始终显示，不受此开关影响。"
         )
         if _sys.platform != "win32":

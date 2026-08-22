@@ -2,9 +2,10 @@
 
 规则（按运行方式与平台）：
 - 直接运行 Python（python main.py）：始终保留控制台，设置开关不生效；
-- Windows 打包产物（sys.frozen）：默认隐藏控制台（设置项 hide_console，
-  默认 True），在设置中关闭后恢复控制台显示（Win32 ShowWindow 运行时切换，
-  因此打包需用 --console 构建保留控制台子系统）；
+- Windows 打包产物（sys.frozen）：默认关闭控制台窗口（设置项 hide_console，
+  默认 True）——FreeConsole() 直接销毁进程的控制台窗口（彻底消失，
+  不是最小化隐藏）；在设置中关闭该开关后 AllocConsole() 新建控制台窗口
+  并重定向 stdout/stderr，日志重新可见；
 - macOS / Linux：没有独立控制台窗口概念——图形启动（--windowed）本就无
   终端输出，从终端启动时终端窗口属于终端程序，应用无权切换。
   由打包参数决定，运行时不做处理。
@@ -13,12 +14,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 log = logging.getLogger("mangaproof.console")
-
-_SW_HIDE = 0
-_SW_SHOW = 5
 
 
 def decide_console_hidden(
@@ -32,18 +31,47 @@ def decide_console_hidden(
     return bool(hide_console_setting)
 
 
+def _redirect_stdio_to_console() -> None:
+    """把 stdout/stderr 重定向到新建的控制台窗口。"""
+    try:
+        con = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+        sys.stdout = con
+        sys.stderr = con
+    except OSError:
+        log.debug("重定向标准输出到控制台失败", exc_info=True)
+
+
+def _redirect_stdio_to_devnull() -> None:
+    """控制台销毁后，标准输出改为写入空设备，避免写坏句柄报错。"""
+    try:
+        devnull = open(os.devnull, "w", encoding="utf-8")
+        sys.stdout = devnull
+        sys.stderr = devnull
+    except OSError:
+        pass
+
+
 def set_console_visible(visible: bool) -> None:
-    """Windows：显示/隐藏本进程的控制台窗口。非 Windows no-op。"""
+    """Windows：关闭/打开本进程的控制台窗口。非 Windows no-op。
+
+    - 关闭：FreeConsole() 彻底销毁进程的控制台窗口（直接消失，不是
+      最小化隐藏）；若从 cmd/PowerShell 启动，仅解除与父终端进程的
+      关联，终端窗口本身属于父进程、不会被销毁；
+    - 打开：AllocConsole() 新建控制台窗口，并重定向 stdout/stderr。
+    """
     if sys.platform != "win32":
         return
     try:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32
-        user32 = ctypes.windll.user32
-        hwnd = kernel32.GetConsoleWindow()
-        if hwnd:
-            user32.ShowWindow(hwnd, _SW_SHOW if visible else _SW_HIDE)
+        if visible:
+            if not kernel32.GetConsoleWindow():
+                kernel32.AllocConsole()
+            _redirect_stdio_to_console()
+        else:
+            kernel32.FreeConsole()
+            _redirect_stdio_to_devnull()
     except Exception:
         log.debug("控制台窗口切换失败", exc_info=True)
 
@@ -63,5 +91,9 @@ def apply_console_visibility(settings) -> None:
         log.info("控制台：由打包参数决定（%s 无独立控制台窗口，运行时不做处理）", sys.platform)
         return
     hidden = bool(settings.hide_console)
-    set_console_visible(not hidden)
-    log.info("控制台：%s（Windows 打包产物，可在设置中切换）", "隐藏" if hidden else "显示")
+    if hidden:
+        set_console_visible(False)
+        log.info("控制台：已关闭（FreeConsole 销毁窗口，可在设置中重新打开）")
+    else:
+        set_console_visible(True)
+        log.info("控制台：已打开（AllocConsole）")
