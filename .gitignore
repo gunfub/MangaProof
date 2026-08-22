@@ -18,6 +18,10 @@ logs/
 # 测试产物
 tests/data/out/
 
+# PyInstaller 构建产物
+build/
+dist/
+
 # IDE
 .idea/
 .vscode/

@@ -16,8 +16,10 @@ def apply_app_icon(app, icon_path: Path | None = None) -> Path | None:
     """加载应用图标（ico/ico.png）。
 
     - PySide6 直接加载 PNG，主窗口与所有对话框统一生效；
-    - 图标缺失时不阻塞启动（仅记录日志）；
-    - PyInstaller onedir 打包时 ico/ 需一并拷贝到 exe 目录。
+    - 图标查找顺序：显式路径 → 程序目录/ico/ico.png →
+      PyInstaller 冻结资源目录（sys._MEIPASS，PyInstaller 6.x 将
+      数据文件放在 onedir 的 _internal/ 下）；
+    - 图标缺失时不阻塞启动（仅记录日志）。
     """
     from PySide6.QtGui import QIcon
 
@@ -25,11 +27,21 @@ def apply_app_icon(app, icon_path: Path | None = None) -> Path | None:
     from mangaproof.utils.logging_setup import get_logger
 
     log = get_logger("main")
-    path = icon_path if icon_path is not None else paths.get_app_dir() / "ico" / "ico.png"
-    if path.exists():
-        app.setWindowIcon(QIcon(str(path)))
-        return path
-    log.warning("未找到应用图标（%s），继续启动", path)
+    candidates: list[Path] = []
+    if icon_path is not None:
+        candidates.append(Path(icon_path))
+    else:
+        candidates.append(paths.get_app_dir() / "ico" / "ico.png")
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "ico" / "ico.png")
+
+    for path in candidates:
+        if path.exists():
+            app.setWindowIcon(QIcon(str(path)))
+            log.info("已加载应用图标：%s", path)
+            return path
+    log.warning("未找到应用图标（查找：%s），继续启动", [str(p) for p in candidates])
     return None
 
 

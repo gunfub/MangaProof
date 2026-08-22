@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MangaProof
+Comment=漫画翻译质量检查与返修标注工具
+Exec=@APPDIR@/MangaProof
+Icon=@APPDIR@/ico/ico.png
+Terminal=false
+Categories=Graphics;Utility;
+StartupWMClass=MangaProof

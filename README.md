@@ -31,14 +31,32 @@ python main.py            # 程序目录 = 本文件所在目录
 uv run python main.py
 ```
 
-支持 PyInstaller onedir 打包（settings.json 会落在 .exe 所在目录）。
+## 打包（PyInstaller onedir / .app）
+
+三个平台的 spec 配置文件位于 `packaging/`，需在对应平台上执行构建：
+
+```bash
+# Windows（在 Windows 上执行）→ dist/MangaProof/（含 MangaProof.exe）
+uv run pyinstaller --clean --noconfirm packaging/main_win.spec
+
+# macOS（在 macOS 上执行）→ dist/MangaProof.app
+uv run pyinstaller --clean --noconfirm packaging/main_macos.spec
+
+# Linux（在 Linux 上执行）→ dist/MangaProof/
+uv run pyinstaller --clean --noconfirm packaging/main_linux.spec
+```
+
+图标：Windows 用 `ico/ico.ico`（exe 图标）、macOS 用 `ico/ico.icns`（App Bundle
+图标）、Linux 无嵌入图标（窗口图标来自随包分发的 `ico/ico.png`，桌面图标见
+`packaging/linux/mangaproof.desktop`，将其中 `@APPDIR@` 替换为安装目录后放入
+`~/.local/share/applications/`）。
 
 控制台行为（按平台）：
 - **直接运行 `python main.py`**：控制台始终保留，设置开关不生效；
-- **Windows 打包**：用 `--console` 构建（保留控制台子系统），运行时默认隐藏，
+- **Windows 打包**：spec 使用 `console=True`（保留控制台子系统），运行时默认隐藏，
   可在「设置」中关闭「打包产物隐藏控制台窗口」即时恢复显示；
-- **macOS / Linux 打包**：无独立控制台窗口，用 `--windowed` 构建即可
-  （图形启动无终端输出），运行时无法也不应切换。
+- **macOS / Linux 打包**：无独立控制台窗口，spec 使用 `console=False`（windowed，
+  图形启动无终端输出），运行时无法也不应切换。
 
 ## 核心工作流
 
