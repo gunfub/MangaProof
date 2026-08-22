@@ -4,13 +4,17 @@
     uv run python scripts/build_accel.py
 
 产物：mangaproof/_psd_fast.so（Linux/macOS）或 _psd_fast.pyd（Windows）。
-编译器缺失/失败时打印警告并成功退出（应用运行时会自动回退
+Windows 优先使用 PATH 上的 cl（如已 source vcvars64），否则自动经
+vswhere 定位 Visual Studio 并调用 vcvars64.bat。
+
+编译器缺失/失败时打印诊断并成功退出（应用运行时会自动回退
 psd-tools 原实现，仅失去加速）。
 """
 
 from __future__ import annotations
 
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,30 +29,33 @@ def _windows_vcvars() -> str | None:
     import glob
 
     candidates: list[Path] = []
-    vswhere = Path(
-        "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-    )
-    if vswhere.exists():
+    vswhere_paths = [
+        Path("C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"),
+        Path("C:/Program Files/Microsoft Visual Studio/Installer/vswhere.exe"),
+    ]
+    for vswhere in vswhere_paths:
+        if not vswhere.exists():
+            continue
         try:
             out = subprocess.run(
-                [str(vswhere), "-latest", "-property", "installationPath"],
+                [str(vswhere), "-latest", "-products", "*", "-property", "installationPath"],
                 capture_output=True,
                 text=True,
                 check=True,
             )
             root = out.stdout.strip()
             if root:
-                candidates.append(
-                    Path(root) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-                )
+                candidates.append(Path(root) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat")
         except (OSError, subprocess.CalledProcessError):
             pass
-    candidates += [
-        Path(p)
-        for p in glob.glob(
-            "C:/Program Files/Microsoft Visual Studio/2022/*/VC/Auxiliary/Build/vcvars64.bat"
-        )
-    ]
+
+    for pattern in (
+        "C:/Program Files/Microsoft Visual Studio/*/*/VC/Auxiliary/Build/vcvars64.bat",
+        "C:/Program Files (x86)/Microsoft Visual Studio/*/*/VC/Auxiliary/Build/vcvars64.bat",
+        "C:/Program Files (x86)/Microsoft Visual Studio/*/BuildTools/VC/Auxiliary/Build/vcvars64.bat",
+    ):
+        candidates += [Path(p) for p in glob.glob(pattern)]
+
     for candidate in candidates:
         if candidate.exists():
             return str(candidate)
@@ -57,9 +64,11 @@ def _windows_vcvars() -> str | None:
 
 def _build_command() -> list[str]:
     if platform.system() == "Windows":
+        if shutil.which("cl"):
+            return ["cl", "/nologo", "/O2", "/LD", str(SRC), f"/Fe:{OUT}"]
         vcvars = _windows_vcvars()
         if vcvars is None:
-            raise FileNotFoundError("未找到 vcvars64.bat（需要 Visual Studio C++ 工具链）")
+            raise FileNotFoundError("未找到 Visual Studio C++ 工具链（vswhere/vcvars64.bat）")
         return [
             "cmd", "/c",
             f'call "{vcvars}" >nul 2>&1 && cl /nologo /O2 /LD "{SRC}" /Fe:"{OUT}"',
@@ -71,7 +80,11 @@ def main() -> int:
     if not SRC.exists():
         print(f"缺少源文件：{SRC}", file=sys.stderr)
         return 1
-    cmd = _build_command()
+    try:
+        cmd = _build_command()
+    except FileNotFoundError as exc:
+        print(f"警告：{exc}；运行时将回退 psd-tools 原实现（仅失去加速）")
+        return 0
     print("编译:", " ".join(cmd))
     try:
         subprocess.run(cmd, check=True, cwd=str(ROOT))

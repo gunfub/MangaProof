@@ -65,7 +65,20 @@ jobs:
           VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Build accel extension
+      - name: Build accel extension (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -property installationPath
+          if (-not $vs) {
+            Write-Host "vswhere 未找到 Visual Studio，跳过加速扩展构建（运行时回退原实现）"
+            exit 0
+          }
+          cmd /c "call `"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>&1 && uv run python scripts/build_accel.py"
+
+      - name: Build accel extension (Linux / macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: uv run python scripts/build_accel.py
 
