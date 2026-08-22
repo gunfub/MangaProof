@@ -141,14 +141,15 @@ jobs:
           $ok = $false
           for ($i = 0; $i -lt 10; $i++) {
             try {
-              Rename-Item "dist\MangaProof" $dest -ErrorAction Stop
+              Copy-Item -Recurse -Force "dist\MangaProof" $dest -ErrorAction Stop
               $ok = $true
               break
             } catch {
+              Write-Host "stage 重试 $($i+1)/10 失败：$($_.Exception.Message)"
               Start-Sleep -Seconds 1
             }
           }
-          if (-not $ok) { Write-Error "重命名失败（dist 文件可能仍被占用）"; exit 1 }
+          if (-not $ok) { Write-Error "暂存目录失败（详见上方重试信息）"; exit 1 }
           Get-ChildItem $dest | Select-Object -First 3 -ExpandProperty Name
 
       - name: Upload artifact (Windows)
