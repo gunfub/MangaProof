@@ -34,6 +34,7 @@ class LayerInfo:
     _visual_bounds: Optional[Tuple[int, int, int, int]] = field(
         default=None, repr=False, init=False
     )
+    _visual_bounds_computed: bool = field(default=False, repr=False, init=False)
 
     # -- 几何 --------------------------------------------------------------
 
@@ -67,12 +68,19 @@ class LayerInfo:
         """视觉内容包围盒（alpha > threshold），无内容时返回 None。
 
         结果相对 PSD World Coordinates（与 bounds 同坐标系）。
+        结果缓存：computed 标记区分「未计算」与「已计算但无内容」，
+        避免透明图层每次访问都重新提取像素。
         """
-        if self._visual_bounds is None:
+        if not self._visual_bounds_computed:
             self._visual_bounds = compute_visual_bounds(
                 self.load_image(), alpha_threshold=alpha_threshold
             )
+            self._visual_bounds_computed = True
         return self._visual_bounds
+
+    def has_visual_bounds(self) -> bool:
+        """视觉边界是否已计算（供预加载快路径判断，避免 UI 线程提取像素）。"""
+        return self._visual_bounds_computed
 
 
 def compute_visual_bounds(

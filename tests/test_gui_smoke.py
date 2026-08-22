@@ -323,13 +323,26 @@ def test_full_workflow() -> None:
         assert "Enter" in window.issue_panel.pass_btn.text()
         assert "/" in window.issue_panel.fail_btn.text()
 
-        # 预加载状态标签：位于「已保存」左侧，随预加载进度更新
-        assert window.preload_label.text().startswith("预加载"), window.preload_label.text()
+        # 预加载状态标签：位于「已保存」左侧，覆盖两个阶段
+        # （预加载中=merged / 精提取中=背景图+图层 / 完成后切换零等待）
+        assert window.preload_label.text() != "", "预加载标签应有内容"
         deadline = time.time() + 30
         while window.preload_label.text() != "预加载完成" and time.time() < deadline:
             app.processEvents()
             time.sleep(0.02)
         assert window.preload_label.text() == "预加载完成"
+        # 完成后，邻域文件的目标图层像素必须已预热（否则切换会卡 UI 线程）
+        for rel, doc in window._docs.items():
+            if rel == window._current_file:
+                continue
+            index = window._choose_layer_index(rel, restore=False)
+            if index is None:
+                continue
+            lid = window._layer_ids_by_file[rel][index]
+            info = doc.layer_by_id(lid)
+            assert info is not None and info.has_visual_bounds(), (
+                f"预加载完成后 {rel} 目标图层未预热"
+            )
 
         # Enter → 通过并跳到下一个未监制
         window.mark_pass()

@@ -117,7 +117,8 @@ class MainWindow(QMainWindow):
         self._pending_open_rel = ""   # 异步打开中的文件（快速切换时替换）
         self._open_restore = False
         self._open_dialog = None      # 切换文件的忙碌进度框
-        self._preload_targets: set = set()   # 预加载队列中未完成的文件
+        self._preload_targets: set = set()   # 阶段 A 未完成（merged）
+        self._extra_targets: set = set()     # 阶段 B 未完成（背景图/图层）
 
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
@@ -694,7 +695,8 @@ class MainWindow(QMainWindow):
         self._request_open_file(rel, restore=False)
 
     def _request_open_file(self, rel: str, restore: bool) -> None:
-        """打开文件入口：已预加载走快路径；未命中交后台线程 + 进度框。
+        """打开文件入口：merged 与目标图层均已预热走快路径；
+        否则交后台线程 + 进度框（UI 不冻结）。
 
         快速连续切换时，新请求会替换未处理的旧请求（见 PreloadWorker）。
         """
@@ -703,23 +705,33 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
             return
         self._open_restore = restore
-        if doc.has_merged():
-            self._open_file_internal(rel, restore)
-            self._refresh_all_panels()
-            self._mark_dirty()
-            self.viewer.setFocus()
-            self._schedule_preloads(rel)
-            return
-        # 未预加载：后台提取 + 非模态忙碌进度框（不阻塞继续切换）
-        self._pending_open_rel = rel
         index = self._choose_layer_index(rel, restore)
         layer_id = ""
         if index is not None:
             ids = self._layer_ids_by_file.get(rel, [])
             if index < len(ids):
                 layer_id = ids[index]
+        # 快路径：merged 已缓存 且 目标图层像素已预热
+        #（否则 visual_bounds 会在 UI 线程提取像素造成半秒级卡顿）
+        if doc.has_merged() and self._target_layer_warm(doc, layer_id):
+            self._open_file_internal(rel, restore)
+            self._refresh_all_panels()
+            self._mark_dirty()
+            self.viewer.setFocus()
+            self._schedule_preloads(rel)
+            return
+        # 未预热：后台提取 + 非模态忙碌进度框（不阻塞继续切换）
+        self._pending_open_rel = rel
         self._preload.submit_open(rel, layer_id)
         self._show_open_progress(rel)
+
+    @staticmethod
+    def _target_layer_warm(doc: PSDDocument, layer_id: str) -> bool:
+        """目标图层的视觉边界是否已计算（无需 UI 线程提取像素）。"""
+        if not layer_id:
+            return True
+        info = doc.layer_by_id(layer_id)
+        return info is None or info.has_visual_bounds()
 
     def _choose_layer_index(self, rel: str, restore: bool) -> Optional[int]:
         """目标图层选择（需求 §13）：restore 用上次位置；
@@ -791,7 +803,10 @@ class MainWindow(QMainWindow):
             self._update_preload_label()
             return
         if kind == KIND_EXTRA:
-            return  # 阶段 B（背景图/图层像素）完成，无需 UI 动作
+            # 阶段 B（背景图/目标图层像素）完成
+            self._extra_targets.discard(rel)
+            self._update_preload_label()
+            return
         # open 结果：快速切换后旧文件的结果直接忽略
         if rel != self._pending_open_rel:
             return
@@ -886,6 +901,7 @@ class MainWindow(QMainWindow):
             extra_jobs.append((c, layer_id))
 
         self._preload_targets = {r for r, _ in merged_jobs}
+        self._extra_targets = {r for r, _ in extra_jobs}
         self._preload.set_preloads(merged_jobs, extra_jobs)
         self._update_preload_label()
 
@@ -903,9 +919,13 @@ class MainWindow(QMainWindow):
         if self.task is None:
             self.preload_label.setText("")
             return
-        n = len(self._preload_targets)
-        if n > 0:
+        if self._preload_targets:
+            n = len(self._preload_targets)
             self.preload_label.setText(f"预加载中…（{n} 个）")
+            self.preload_label.setStyleSheet("color: #f5a623;")
+        elif self._extra_targets:
+            n = len(self._extra_targets)
+            self.preload_label.setText(f"精提取中…（{n} 个）")
             self.preload_label.setStyleSheet("color: #f5a623;")
         else:
             self.preload_label.setText("预加载完成")

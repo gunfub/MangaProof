@@ -343,6 +343,31 @@ def test_zoom_scaling_policy():
     assert smooth_scaling_for(8.0) is False
 
 
+def test_visual_bounds_computed_flag():
+    """回归：视觉边界缓存区分「未计算」与「计算后无内容」（透明图层不反复提取）。"""
+    import numpy as np
+
+    from mangaproof.psd.layer_model import LayerInfo
+
+    info = LayerInfo(
+        id="x", name="t", bounds=(0, 0, 10, 10), visible=True,
+        layer_type="pixel",
+        image_loader=lambda: np.zeros((10, 10, 4), dtype=np.uint8),  # 全透明
+    )
+    assert not info.has_visual_bounds()
+    assert info.visual_bounds() is None
+    assert info.has_visual_bounds()          # 已计算（结果为空）
+    assert info.visual_bounds() is None      # 二次调用命中缓存，不再提取
+
+    filled = LayerInfo(
+        id="y", name="f", bounds=(0, 0, 10, 10), visible=True,
+        layer_type="pixel",
+        image_loader=lambda: np.full((10, 10, 4), 255, dtype=np.uint8),
+    )
+    assert filled.visual_bounds() == (0, 0, 10, 10)
+    assert filled.has_visual_bounds()
+
+
 if __name__ == "__main__":
     import traceback
     tests = [
