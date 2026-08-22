@@ -36,7 +36,7 @@ class PreloadWorker(QThread):
         self._doc_provider = doc_provider
         self._cond = threading.Condition()
         self._open_job: Optional[Tuple[str, str]] = None  # (rel, layer_id)
-        self._preload_jobs: List[str] = []
+        self._preload_jobs: List[Tuple[str, str]] = []
         self._stop = False
 
     # -- 主线程 API --------------------------------------------------------
@@ -51,10 +51,14 @@ class PreloadWorker(QThread):
         with self._cond:
             self._open_job = None
 
-    def set_preloads(self, rels: List[str]) -> None:
-        """整体替换预加载队列（快速切换时旧邻域作废）。"""
+    def set_preloads(self, jobs: List[Tuple[str, str]]) -> None:
+        """整体替换预加载队列（快速切换时旧邻域作废）。
+
+        jobs: [(rel, 目标图层 id)]——目标图层像素与视觉边界一并预热，
+        使切换文件的定位/缩放同样免等待。
+        """
         with self._cond:
-            self._preload_jobs = list(rels)
+            self._preload_jobs = list(jobs)
             self._cond.notify_all()
 
     def stop(self) -> None:
@@ -76,8 +80,7 @@ class PreloadWorker(QThread):
                     self._open_job = None
                     kind = KIND_OPEN
                 else:
-                    rel = self._preload_jobs.pop(0)
-                    layer_id = ""
+                    rel, layer_id = self._preload_jobs.pop(0)
                     kind = KIND_PRELOAD
             ok = self._process(rel, kind, layer_id)
             self.task_done.emit(rel, kind, ok)
@@ -89,11 +92,12 @@ class PreloadWorker(QThread):
             return False
         try:
             doc.prepare_images()
-            if kind == KIND_OPEN and layer_id:
+            # 目标图层像素与视觉边界预热（快速路径定位/缩放免等待）
+            if layer_id:
                 info = doc.layer_by_id(layer_id)
                 if info is not None:
                     if doc.layer_image(layer_id) is not None:
-                        info.visual_bounds()   # 预热视觉边界，定位免等待
+                        info.visual_bounds()
             return True
         except Exception:
             log.exception("预加载失败：%s", rel)

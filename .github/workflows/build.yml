@@ -113,12 +113,14 @@ jobs:
           Stop-Process -Id $p.Id -Force
 
       - name: Package artifact (Linux)
+        # 保留内层 tar.gz：GitHub 工件外层 zip 不保留可执行权限
         if: runner.os == 'Linux'
         shell: bash
         run: |
           tar -czf "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.tar.gz" -C dist MangaProof
 
       - name: Package artifact (macOS)
+        # 保留内层 ditto zip：外层 zip 会丢失 .app 的权限/符号链接
         if: runner.os == 'macOS'
         shell: bash
         run: |
@@ -126,21 +128,19 @@ jobs:
             "dist/MangaProof.app" \
             "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip"
 
-      - name: Package artifact (Windows)
+      - name: Stage artifact (Windows)
+        # Windows 直接上传目录：下载解压一次即得完整程序（单层，无双重压缩）
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist\MangaProof" `
-            -DestinationPath "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip"
+          Rename-Item "dist\MangaProof" "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
-          path: |
-            MangaProof-*.tar.gz
-            MangaProof-*.zip
-          if-no-files-found: error
+          path: ${{ runner.os == 'Windows' && 'MangaProof-*-windows-x64' || 'MangaProof-*.*' }}
+          if-no-files-found: ignore
 
   release:
     name: Create release

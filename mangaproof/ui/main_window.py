@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self._pending_open_rel = ""   # 异步打开中的文件（快速切换时替换）
         self._open_restore = False
         self._open_dialog = None      # 切换文件的忙碌进度框
+        self._preload_targets: set = set()   # 预加载队列中未完成的文件
 
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
@@ -222,11 +223,14 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.ratio_combo)
 
         # ---- 状态栏 ----
+        # 预加载状态放在「已保存」左边（addPermanentWidget 右对齐、逆序）
+        self.preload_label = QLabel("")
         self.save_label = QLabel("")
         self.zoom_label = QLabel("缩放：100%")
         self.progress_label = QLabel("")
         self.hint_label = QLabel("")
         self.statusBar().addPermanentWidget(self.save_label)
+        self.statusBar().addPermanentWidget(self.preload_label)
         self.statusBar().addPermanentWidget(self.zoom_label)
         self.statusBar().addPermanentWidget(self.progress_label)
         self.statusBar().addWidget(self.hint_label)
@@ -641,6 +645,8 @@ class MainWindow(QMainWindow):
 
         self.file_panel.set_task_info(task.task_name, task.task_type)
         self.file_panel.set_files([r.relative_path for r in task.files])
+        self._preload_targets.clear()
+        self._update_preload_label()
 
         rel = task.current_file
         if rel not in self._layer_ids_by_file:
@@ -780,7 +786,9 @@ class MainWindow(QMainWindow):
 
     def _on_preload_done(self, rel: str, kind: str, ok: bool) -> None:
         if kind == KIND_PRELOAD:
-            return  # 后台预热完成，无需 UI 动作
+            self._preload_targets.discard(rel)
+            self._update_preload_label()
+            return  # 后台预热完成，无需其他 UI 动作
         # open 结果：快速切换后旧文件的结果直接忽略
         if rel != self._pending_open_rel:
             return
@@ -831,7 +839,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("已取消打开", 3000)
 
     def _schedule_preloads(self, rel: str) -> None:
-        """预加载当前文件邻域（后 3 个 + 前 1 个），并回收窗口外大图内存。"""
+        """预加载当前文件邻域（后 3 个 + 前 1 个），并回收窗口外大图内存。
+
+        每个预加载任务附带该文件的目标图层（切换时的定位图层），
+        使切换文件的定位/缩放同样免等待。
+        """
         if self.task is None:
             return
         order = [r.relative_path for r in self.task.files]
@@ -843,11 +855,22 @@ class MainWindow(QMainWindow):
         for j in (i + 1, i + 2, i + 3, i - 1):
             if 0 <= j < len(order):
                 candidates.append(order[j])
-        targets = [
-            c for c in candidates
-            if not (self._docs.get(c) is not None and self._docs[c].has_merged())
-        ]
-        self._preload.set_preloads(targets)
+
+        jobs: List[Tuple[str, str]] = []
+        for c in candidates:
+            doc = self._docs.get(c)
+            if doc is not None and doc.has_merged():
+                continue
+            index = self._choose_layer_index(c, restore=False)
+            layer_id = ""
+            if index is not None:
+                ids = self._layer_ids_by_file.get(c, [])
+                if index < len(ids):
+                    layer_id = ids[index]
+            jobs.append((c, layer_id))
+        self._preload_targets = {rel for rel, _ in jobs}
+        self._preload.set_preloads(jobs)
+        self._update_preload_label()
 
         # 内存策略：释放窗口外文档的 merged/bg（图层树与 LRU 保留）。
         # release_images 非阻塞：后台仍在提取的文档自动跳过，下轮再回收。
@@ -858,6 +881,18 @@ class MainWindow(QMainWindow):
             doc = self._docs.get(r)
             if doc is not None:
                 doc.release_images()
+
+    def _update_preload_label(self) -> None:
+        if self.task is None:
+            self.preload_label.setText("")
+            return
+        n = len(self._preload_targets)
+        if n > 0:
+            self.preload_label.setText(f"预加载中…（{n} 个）")
+            self.preload_label.setStyleSheet("color: #f5a623;")
+        else:
+            self.preload_label.setText("预加载完成")
+            self.preload_label.setStyleSheet("color: #4caf50;")
 
     def _select_layer_internal(self, index: int) -> None:
         """切换图层统一行为（需求 §12）：停对比 → Original → 切换 → 定位 → 缩放。"""

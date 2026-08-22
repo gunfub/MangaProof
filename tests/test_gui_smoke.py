@@ -95,14 +95,21 @@ def test_preload_worker() -> None:
         assert doc.layer_image(layer_id) is not None
         assert doc.layers[1].visual_bounds() is not None
 
-        # 预加载队列整体替换：两个文件依次预热完成
-        worker.set_preloads(["002.psd", "10.psd"])
+        # 预加载队列整体替换：两个文件依次预热完成（含目标图层像素）
+        worker.set_preloads([
+            ("002.psd", docs["002.psd"].layers[0].id),
+            ("10.psd", docs["10.psd"].layers[0].id),
+        ])
         deadline = time.time() + 30
         while not all(d.has_merged() for d in (docs["002.psd"], docs["10.psd"])) \
                 and time.time() < deadline:
             app.processEvents()
             time.sleep(0.02)
         assert docs["002.psd"].has_merged() and docs["10.psd"].has_merged()
+        # 目标图层像素与视觉边界已预热（快速路径定位免等待）
+        assert docs["002.psd"].layer_image(docs["002.psd"].layers[0].id) is not None
+        assert docs["002.psd"].layers[0].visual_bounds() is not None
+        assert docs["10.psd"].layer_image(docs["10.psd"].layers[0].id) is not None
 
         # 快速切换：cancel_open 丢弃未处理请求，新 open 请求立即生效
         worker.cancel_open()
@@ -308,6 +315,14 @@ def test_full_workflow() -> None:
         window._rebuild_shortcuts()
         assert "Enter" in window.issue_panel.pass_btn.text()
         assert "/" in window.issue_panel.fail_btn.text()
+
+        # 预加载状态标签：位于「已保存」左侧，随预加载进度更新
+        assert window.preload_label.text().startswith("预加载"), window.preload_label.text()
+        deadline = time.time() + 30
+        while window.preload_label.text() != "预加载完成" and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert window.preload_label.text() == "预加载完成"
 
         # Enter → 通过并跳到下一个未监制
         window.mark_pass()

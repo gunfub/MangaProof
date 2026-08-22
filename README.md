@@ -82,6 +82,10 @@ Run workflow）时，构建 5 个主流平台组合：
 
 - 每个平台构建后先做**离屏启动冒烟测试**（启动 10 秒不退出）再上传工件；
 - 推送标签时自动创建 GitHub Release 并挂载全部产物；
+- 工件形式：Windows 为**单层**（下载解压一次即得完整程序目录）；
+  Linux（tar.gz）与 macOS（ditto zip）为保留内层压缩——GitHub 工件外层
+  zip 会丢失可执行权限与 .app 符号链接，无法去掉；打 `v*` 标签发布的
+  Release 资产为直接附件，所有平台均无外层包装；
 - Windows ARM64 由 PyInstaller 官方暂不支持原生构建，ARM64 设备可
   通过 x64 模拟运行 x64 包。
 
