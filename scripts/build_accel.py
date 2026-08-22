@@ -20,9 +20,50 @@ SRC = ROOT / "mangaproof" / "_psd_fast.c"
 OUT = ROOT / "mangaproof" / ("_psd_fast.pyd" if platform.system() == "Windows" else "_psd_fast.so")
 
 
+def _windows_vcvars() -> str | None:
+    """定位 Visual Studio 的 vcvars64.bat（cl 需要其环境变量）。"""
+    import glob
+
+    candidates: list[Path] = []
+    vswhere = Path(
+        "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+    )
+    if vswhere.exists():
+        try:
+            out = subprocess.run(
+                [str(vswhere), "-latest", "-property", "installationPath"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            root = out.stdout.strip()
+            if root:
+                candidates.append(
+                    Path(root) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+                )
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    candidates += [
+        Path(p)
+        for p in glob.glob(
+            "C:/Program Files/Microsoft Visual Studio/2022/*/VC/Auxiliary/Build/vcvars64.bat"
+        )
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def _build_command() -> list[str]:
     if platform.system() == "Windows":
-        return ["cl", "/nologo", "/O2", "/LD", str(SRC), f"/Fe:{OUT}"]
+        vcvars = _windows_vcvars()
+        if vcvars is None:
+            raise FileNotFoundError("未找到 vcvars64.bat（需要 Visual Studio C++ 工具链）")
+        return [
+            "cmd", "/c",
+            f'call "{vcvars}" >nul 2>&1 && cl /nologo /O2 /LD "{SRC}" /Fe:"{OUT}"',
+        ]
     return ["cc", "-O3", "-shared", "-fPIC", "-o", str(OUT), str(SRC)]
 
 
