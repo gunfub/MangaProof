@@ -11,34 +11,6 @@ on:
 permissions:
   contents: read
 
-# ---- 通用步骤（YAML 锚点复用） ----
-.x-setup: &setup
-  - name: Checkout
-    uses: actions/checkout@v7
-  - name: Install uv
-    uses: astral-sh/setup-uv@v10.0.1
-    with:
-      enable-cache: true
-  - name: Sync dependencies
-    run: uv sync --all-groups
-  - name: Resolve version
-    id: version
-    shell: bash
-    run: |
-      # 用 sed -E（GNU/BSD 通用），macOS 的 BSD grep 不支持 -P
-      VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
-      echo "version=${VER}" >> "$GITHUB_OUTPUT"
-
-.x-accel-build: &accel-build
-  - name: Build accel extension
-    shell: bash
-    run: uv run python scripts/build_accel.py
-
-.x-pyinstaller: &pyinstaller
-  - name: Build with PyInstaller
-    shell: bash
-    run: uv run pyinstaller --noconfirm --clean "${{ matrix.spec }}"
-
 jobs:
   # Windows 的 _psd_fast.pyd 在 Linux 上用 mingw-w64 交叉编译（纯 C，
   # ctypes 可直接加载），避免依赖 Windows runner 上的 MSVC 环境。
@@ -79,9 +51,26 @@ jobs:
             spec: packaging/main_linux.spec
             artifact: linux-arm64
     steps:
-      - *setup
-      - *accel-build
-      - *pyinstaller
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-groups
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+      - name: Build accel extension
+        shell: bash
+        run: uv run python scripts/build_accel.py
+      - name: Build with PyInstaller
+        shell: bash
+        run: uv run pyinstaller --noconfirm --clean "${{ matrix.spec }}"
       - name: Install Qt runtime libs
         run: |
           sudo apt-get update -qq
@@ -129,9 +118,26 @@ jobs:
             spec: packaging/main_macos.spec
             artifact: macos-arm64
     steps:
-      - *setup
-      - *accel-build
-      - *pyinstaller
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-groups
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+      - name: Build accel extension
+        shell: bash
+        run: uv run python scripts/build_accel.py
+      - name: Build with PyInstaller
+        shell: bash
+        run: uv run pyinstaller --noconfirm --clean "${{ matrix.spec }}"
       - name: Smoke test
         shell: bash
         run: |
@@ -164,7 +170,20 @@ jobs:
     runs-on: windows-latest
     needs: accel-win
     steps:
-      - *setup
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --all-groups
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          VER=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' mangaproof/__init__.py)
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
       - name: Download accel extension
         uses: actions/download-artifact@v8
         with:
@@ -192,8 +211,6 @@ jobs:
             Get-Content "smoke.log","smoke.err" -ErrorAction SilentlyContinue
             exit 1
           }
-          # onedir 模式为 bootloader 父进程 + 应用子进程，必须整树结束，
-          # 否则子进程残留会锁住 dist 目录文件
           taskkill /PID $($p.Id) /T /F | Out-Null
           Start-Sleep -Seconds 2
       - name: Stage artifact
@@ -218,7 +235,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: MangaProof-${{ steps.version.outputs.version }}-windows-x64
-          # v7 上传目录需递归 glob
           path: MangaProof-${{ steps.version.outputs.version }}-windows-x64/**
           if-no-files-found: error
 
