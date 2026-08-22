@@ -136,13 +136,16 @@ jobs:
           $dest = "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}"
           Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
           Rename-Item "dist\MangaProof" $dest
+          if (-not (Test-Path $dest)) { Write-Error "暂存目录缺失：$dest"; exit 1 }
+          Get-ChildItem $dest | Select-Object -First 3 -ExpandProperty Name
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
           name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
-          path: MangaProof-${{ steps.version.outputs.version }}-windows-x64
+          # v7 上传目录需递归 glob
+          path: MangaProof-${{ steps.version.outputs.version }}-windows-x64/**
           if-no-files-found: error
 
       - name: Upload artifact (Linux / macOS)
