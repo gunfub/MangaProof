@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
         self._preload_targets: set = set()   # 阶段 A 未完成（merged）
         self._extra_targets: set = set()     # 阶段 B 未完成（背景图/图层）
         self._pending_qimages: Dict[str, Dict[str, object]] = {}  # 后台预热显示图
+        self._preload_scheduled = False      # 是否已开始调度（未调度时状态栏留空）
 
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
@@ -231,14 +232,19 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.ratio_combo)
 
         # ---- 状态栏 ----
-        # 预加载状态放在「已保存」左边（addPermanentWidget 右对齐、逆序）
-        self.preload_label = QLabel("")
+        # 两阶段预加载独立显示（阶段 A 图像在左、阶段 B 图层预热在右），
+        # 位于「已保存」左边（addPermanentWidget 右对齐、先加者在最右）
+        self.preload_label = QLabel("")    # 阶段 A：图像预加载
+        self.warmup_label = QLabel("")     # 阶段 B：图层预热
         self.save_label = QLabel("")
         self.zoom_label = QLabel("缩放：100%")
         self.progress_label = QLabel("")
         self.hint_label = QLabel("")
         self.statusBar().addPermanentWidget(self.save_label)
+        # 实测 addPermanentWidget 后加者紧邻先前者左侧：
+        # 先加 A（阶段A），再加 B（阶段B）→ 视觉顺序 A | B | 已保存
         self.statusBar().addPermanentWidget(self.preload_label)
+        self.statusBar().addPermanentWidget(self.warmup_label)
         self.statusBar().addPermanentWidget(self.zoom_label)
         self.statusBar().addPermanentWidget(self.progress_label)
         self.statusBar().addWidget(self.hint_label)
@@ -656,6 +662,7 @@ class MainWindow(QMainWindow):
         self._preload_targets.clear()
         self._extra_targets.clear()
         self._pending_qimages.clear()
+        self._preload_scheduled = False
         self._update_preload_label()
 
         rel = task.current_file
@@ -931,6 +938,7 @@ class MainWindow(QMainWindow):
         self._preload_targets = {r for r, _ in merged_jobs}
         self._extra_targets = {r for r, _ in extra_jobs}
         self._preload.set_preloads(merged_jobs, extra_jobs)
+        self._preload_scheduled = True
         self._update_preload_label()
 
         # 内存策略：释放窗口外文档的 merged/bg 与预热显示图
@@ -956,20 +964,23 @@ class MainWindow(QMainWindow):
         )
 
     def _update_preload_label(self) -> None:
-        if self.task is None:
+        """两阶段独立显示：图像预加载（A）在左、图层预热（B）在右。"""
+        if self.task is None or not self._preload_scheduled:
             self.preload_label.setText("")
+            self.warmup_label.setText("")
             return
         if self._preload_targets:
-            n = len(self._preload_targets)
-            self.preload_label.setText(f"预加载中…（{n} 个）")
-            self.preload_label.setStyleSheet("color: #f5a623;")
-        elif self._extra_targets:
-            n = len(self._extra_targets)
-            self.preload_label.setText(f"精提取中…（{n} 个）")
+            self.preload_label.setText(f"图像预加载中…（{len(self._preload_targets)}）")
             self.preload_label.setStyleSheet("color: #f5a623;")
         else:
-            self.preload_label.setText("预加载完成")
+            self.preload_label.setText("图像预加载完成")
             self.preload_label.setStyleSheet("color: #4caf50;")
+        if self._extra_targets:
+            self.warmup_label.setText(f"图层预热中…（{len(self._extra_targets)}）")
+            self.warmup_label.setStyleSheet("color: #f5a623;")
+        else:
+            self.warmup_label.setText("图层预热完成")
+            self.warmup_label.setStyleSheet("color: #4caf50;")
 
     def _select_layer_internal(self, index: int) -> None:
         """切换图层统一行为（需求 §12）：停对比 → Original → 切换 → 定位 → 缩放。"""
@@ -1413,10 +1424,17 @@ class MainWindow(QMainWindow):
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))
             self.recenter_current_layer()
-            # 控制台开关即时生效（打包产物下隐藏/恢复控制台窗口）
+            # 控制台开关即时生效（打包产物下隐藏/恢复控制台窗口）。
+            # AllocConsole 可能阻塞数百毫秒，放后台线程避免 UI 卡顿。
+            import threading
+
             from mangaproof.console import apply_console_visibility
 
-            apply_console_visibility(self.settings)
+            threading.Thread(
+                target=apply_console_visibility,
+                args=(self.settings,),
+                daemon=True,
+            ).start()
 
     def _on_ratio_changed(self, index: int) -> None:
         ratio = float(self.ratio_combo.itemData(index))

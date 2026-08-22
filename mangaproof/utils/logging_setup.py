@@ -10,6 +10,28 @@ from pathlib import Path
 _logger_configured = False
 
 
+class _CurrentStderrProxy:
+    """动态代理当前 sys.stderr。
+
+    打包产物在 Windows 上会 FreeConsole/AllocConsole 切换控制台，
+    sys.stderr 会被重定向（devnull ↔ CONOUT$）。若 StreamHandler
+    抓住切换前的旧句柄，写日志会报 OSError WinError 6。
+    本代理每次写入都转发到「当前」的 sys.stderr。
+    """
+
+    def write(self, s: str):
+        return sys.stderr.write(s)
+
+    def flush(self):
+        return sys.stderr.flush()
+
+    def fileno(self):
+        try:
+            return sys.stderr.fileno()
+        except Exception:
+            return -1
+
+
 def setup_logging(app_dir: Path) -> logging.Logger:
     """配置根 logger：控制台 + 滚动文件（logs/mangaproof.log）。
 
@@ -45,7 +67,8 @@ def setup_logging(app_dir: Path) -> logging.Logger:
         except OSError:
             pass
 
-    ch = logging.StreamHandler(sys.stderr)
+    # 控制台流走代理：始终写入“当前”的 sys.stderr
+    ch = logging.StreamHandler(_CurrentStderrProxy())
     ch.setFormatter(fmt)
     logger.addHandler(ch)
     _logger_configured = True

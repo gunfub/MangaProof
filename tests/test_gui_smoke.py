@@ -347,14 +347,18 @@ def test_full_workflow() -> None:
         assert "Enter" in window.issue_panel.pass_btn.text()
         assert "/" in window.issue_panel.fail_btn.text()
 
-        # 预加载状态标签：位于「已保存」左侧，覆盖两个阶段
-        # （预加载中=merged / 精提取中=背景图+图层 / 完成后切换零等待）
+        # 预加载状态标签：两阶段独立显示
+        # （图像预加载=阶段A / 图层预热=阶段B / 双完成后切换零等待）
         assert window.preload_label.text() != "", "预加载标签应有内容"
         deadline = time.time() + 30
-        while window.preload_label.text() != "预加载完成" and time.time() < deadline:
+        while (
+            window.preload_label.text() != "图像预加载完成"
+            or window.warmup_label.text() != "图层预热完成"
+        ) and time.time() < deadline:
             app.processEvents()
             time.sleep(0.02)
-        assert window.preload_label.text() == "预加载完成"
+        assert window.preload_label.text() == "图像预加载完成"
+        assert window.warmup_label.text() == "图层预热完成"
         # 完成后，邻域文件的目标图层像素必须已预热（否则切换会卡 UI 线程）
         for rel, doc in window._docs.items():
             if rel == window._current_file:
