@@ -2,8 +2,9 @@
 
 - 图层显示比例（20%～90%）；
 - 自动对比：模式（自动/手动切换）与预设切换速度档位；
-- 核心快捷键重绑定（QKeySequenceEdit 录制）；
-- 问题类型快捷键重绑定；
+- 快捷键设置独立子对话框（KeybindingsDialog）：核心快捷键、
+  问题类型快捷键、自定义批注键——主对话框只保留入口按钮，
+  避免设置页过长挤压；
 - PDF 生成开关、返修单自定义名称、递归扫描。
 """
 
@@ -11,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,7 +22,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QKeySequenceEdit,
-    QLabel,
     QLineEdit,
     QPushButton,
     QTableWidget,
@@ -60,12 +60,108 @@ CORE_ACTION_LABELS: Dict[str, str] = {
 }
 
 
+class KeybindingsDialog(QDialog):
+    """快捷键设置子对话框：核心快捷键 + 问题类型快捷键 + 自定义批注键。
+
+    与主设置对话框配合：主对话框保存本实例，仅在主对话框 OK 时
+    才把修改写回 Settings（保持「取消即放弃」语义）。
+    """
+
+    def __init__(self, settings: Settings, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("设置快捷键")
+        self.resize(560, 560)
+
+        layout = QVBoxLayout(self)
+
+        # ---- 核心快捷键 ----
+        core_group = QGroupBox("核心快捷键（点击后按键重新绑定）")
+        core_layout = QVBoxLayout(core_group)
+        self.core_table = QTableWidget(len(CORE_ACTION_LABELS), 2)
+        self.core_table.setHorizontalHeaderLabels(["功能", "快捷键"])
+        self.core_table.verticalHeader().setVisible(False)
+        self.core_table.horizontalHeader().setStretchLastSection(True)
+        self.core_table.setColumnWidth(0, 300)
+        self._core_edits: Dict[str, QKeySequenceEdit] = {}
+        for row, (action, label) in enumerate(CORE_ACTION_LABELS.items()):
+            self.core_table.setItem(row, 0, QTableWidgetItem(label))
+            edit = QKeySequenceEdit()
+            edit.setKeySequence(QKeySequence(settings.binding(action)))
+            self.core_table.setCellWidget(row, 1, edit)
+            self._core_edits[action] = edit
+        core_layout.addWidget(self.core_table)
+        layout.addWidget(core_group)
+
+        # ---- 问题类型快捷键 ----
+        issue_group = QGroupBox("问题类型快捷键（点击后按键重新绑定）")
+        issue_layout = QVBoxLayout(issue_group)
+        self.issue_table = QTableWidget(len(settings.issue_types) + 1, 2)
+        self.issue_table.setHorizontalHeaderLabels(["问题类型", "快捷键"])
+        self.issue_table.verticalHeader().setVisible(False)
+        self.issue_table.horizontalHeader().setStretchLastSection(True)
+        self.issue_table.setColumnWidth(0, 300)
+        self._issue_edits: Dict[int, QKeySequenceEdit] = {}
+        for row, item in enumerate(settings.issue_types):
+            self.issue_table.setItem(row, 0, QTableWidgetItem(item["name"]))
+            edit = QKeySequenceEdit()
+            edit.setKeySequence(QKeySequence(item.get("key", "")))
+            self.issue_table.setCellWidget(row, 1, edit)
+            self._issue_edits[row] = edit
+        # 自定义批注快捷键行
+        last_row = len(settings.issue_types)
+        self.issue_table.setItem(last_row, 0, QTableWidgetItem("自定义批注"))
+        self.custom_key_edit = QKeySequenceEdit()
+        self.custom_key_edit.setKeySequence(QKeySequence(settings.custom_comment_key))
+        self.issue_table.setCellWidget(last_row, 1, self.custom_key_edit)
+        issue_layout.addWidget(self.issue_table)
+        layout.addWidget(issue_group)
+
+        # ---- 按钮 ----
+        button_row = QHBoxLayout()
+        self.reset_btn = QPushButton("恢复默认快捷键")
+        self.reset_btn.clicked.connect(self._reset_defaults)
+        button_row.addWidget(self.reset_btn)
+        button_row.addStretch(1)
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        button_row.addWidget(self.button_box)
+        layout.addLayout(button_row)
+
+    def _reset_defaults(self) -> None:
+        for action, edit in self._core_edits.items():
+            edit.setKeySequence(QKeySequence(DEFAULT_KEYBINDINGS.get(action, "")))
+        for row, edit in self._issue_edits.items():
+            if row < len(DEFAULT_ISSUE_TYPES):
+                edit.setKeySequence(QKeySequence(DEFAULT_ISSUE_TYPES[row].get("key", "")))
+        self.custom_key_edit.setKeySequence(QKeySequence(DEFAULT_KEYBINDINGS["custom_comment"]))
+
+    def apply_to(self, settings: Settings) -> None:
+        for action, edit in self._core_edits.items():
+            seq = edit.keySequence().toString()
+            settings.keybindings[action] = seq if seq else DEFAULT_KEYBINDINGS.get(action, "")
+
+        for row, edit in self._issue_edits.items():
+            if row < len(settings.issue_types):
+                seq = edit.keySequence().toString()
+                settings.issue_types[row]["key"] = seq
+
+        settings.custom_comment_key = (
+            self.custom_key_edit.keySequence().toString()
+            or DEFAULT_KEYBINDINGS["custom_comment"]
+        )
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("MangaProof 设置")
-        self.resize(560, 640)
+        self.resize(560, 480)
         self._settings = settings
+        self._kb_dialog: Optional[KeybindingsDialog] = None
+        self._kb_reset_defaults = False
 
         layout = QVBoxLayout(self)
 
@@ -148,49 +244,14 @@ class SettingsDialog(QDialog):
         report_form.addRow("返修单名称：", self.report_name_edit)
         layout.addWidget(report_group)
 
-        # ---- 快捷键 ----
-        shortcut_group = QGroupBox("核心快捷键（点击后按键重新绑定）")
-        shortcut_layout = QVBoxLayout(shortcut_group)
-        self.core_table = QTableWidget(len(CORE_ACTION_LABELS), 2)
-        self.core_table.setHorizontalHeaderLabels(["功能", "快捷键"])
-        self.core_table.verticalHeader().setVisible(False)
-        self.core_table.horizontalHeader().setStretchLastSection(True)
-        self.core_table.setColumnWidth(0, 300)
-        self._core_edits: Dict[str, QKeySequenceEdit] = {}
-        for row, (action, label) in enumerate(CORE_ACTION_LABELS.items()):
-            self.core_table.setItem(row, 0, QTableWidgetItem(label))
-            edit = QKeySequenceEdit()
-            from PySide6.QtGui import QKeySequence
-            edit.setKeySequence(QKeySequence(settings.binding(action)))
-            self.core_table.setCellWidget(row, 1, edit)
-            self._core_edits[action] = edit
-        shortcut_layout.addWidget(self.core_table)
+        # ---- 快捷键（入口按钮 → 独立子对话框）----
+        shortcut_group = QGroupBox("快捷键")
+        shortcut_form = QFormLayout(shortcut_group)
+        self.kb_button = QPushButton("设置快捷键…")
+        self.kb_button.setToolTip("在独立窗口中设置核心快捷键与问题类型快捷键")
+        self.kb_button.clicked.connect(self._open_keybindings_dialog)
+        shortcut_form.addRow("核心 / 问题类型快捷键：", self.kb_button)
         layout.addWidget(shortcut_group)
-
-        # ---- 问题类型快捷键 ----
-        issue_group = QGroupBox("问题类型快捷键（点击后按键重新绑定）")
-        issue_layout = QVBoxLayout(issue_group)
-        self.issue_table = QTableWidget(len(settings.issue_types) + 1, 2)
-        self.issue_table.setHorizontalHeaderLabels(["问题类型", "快捷键"])
-        self.issue_table.verticalHeader().setVisible(False)
-        self.issue_table.horizontalHeader().setStretchLastSection(True)
-        self.issue_table.setColumnWidth(0, 300)
-        self._issue_edits: Dict[int, QKeySequenceEdit] = {}
-        from PySide6.QtGui import QKeySequence
-        for row, item in enumerate(settings.issue_types):
-            self.issue_table.setItem(row, 0, QTableWidgetItem(item["name"]))
-            edit = QKeySequenceEdit()
-            edit.setKeySequence(QKeySequence(item.get("key", "")))
-            self.issue_table.setCellWidget(row, 1, edit)
-            self._issue_edits[row] = edit
-        # 自定义批注快捷键行
-        last_row = len(settings.issue_types)
-        self.issue_table.setItem(last_row, 0, QTableWidgetItem("自定义批注"))
-        self.custom_key_edit = QKeySequenceEdit()
-        self.custom_key_edit.setKeySequence(QKeySequence(settings.custom_comment_key))
-        self.issue_table.setCellWidget(last_row, 1, self.custom_key_edit)
-        issue_layout.addWidget(self.issue_table)
-        layout.addWidget(issue_group)
 
         # ---- 按钮 ----
         button_row = QHBoxLayout()
@@ -206,12 +267,25 @@ class SettingsDialog(QDialog):
         button_row.addWidget(self.button_box)
         layout.addLayout(button_row)
 
+    # -- 快捷键子对话框 ----------------------------------------------------
+
+    def _open_keybindings_dialog(self) -> None:
+        # 主对话框已点过"恢复默认设置"时，子对话框以默认值为初值
+        src = Settings() if self._kb_reset_defaults else self._settings
+        dialog = KeybindingsDialog(src, self)
+        if dialog.exec() == KeybindingsDialog.DialogCode.Accepted:
+            self._kb_dialog = dialog
+            self._kb_reset_defaults = False
+
+    # -- 自动对比联动 ------------------------------------------------------
+
     def _update_compare_speed_enabled(self) -> None:
         manual = self.compare_mode_combo.currentData() == "manual"
         self.compare_speed_combo.setEnabled(not manual)
 
+    # -- 复位 / 应用 --------------------------------------------------------
+
     def _reset_defaults(self) -> None:
-        from PySide6.QtGui import QKeySequence
         idx = self.ratio_combo.findData(DEFAULT_DISPLAY_RATIO)
         self.ratio_combo.setCurrentIndex(max(0, idx))
         idx = self.compare_mode_combo.findData(DEFAULT_COMPARE_MODE)
@@ -222,12 +296,9 @@ class SettingsDialog(QDialog):
         self.console_check.setChecked(True)
         self.pdf_check.setChecked(True)
         self.report_name_edit.clear()
-        for action, edit in self._core_edits.items():
-            edit.setKeySequence(QKeySequence(DEFAULT_KEYBINDINGS.get(action, "")))
-        for row, edit in self._issue_edits.items():
-            if row < len(DEFAULT_ISSUE_TYPES):
-                edit.setKeySequence(QKeySequence(DEFAULT_ISSUE_TYPES[row].get("key", "")))
-        self.custom_key_edit.setKeySequence(QKeySequence(DEFAULT_KEYBINDINGS["custom_comment"]))
+        # 快捷键同样复位：记录"应用默认"意图，OK 时写回默认值
+        self._kb_dialog = None
+        self._kb_reset_defaults = True
 
     def apply_to(self, settings: Settings) -> None:
         settings.layer_display_ratio = float(self.ratio_combo.currentData())
@@ -238,16 +309,11 @@ class SettingsDialog(QDialog):
         settings.report_name = self.report_name_edit.text().strip()
         settings.hide_console = self.console_check.isChecked()
 
-        for action, edit in self._core_edits.items():
-            seq = edit.keySequence().toString()
-            settings.keybindings[action] = seq if seq else DEFAULT_KEYBINDINGS.get(action, "")
-
-        for row, edit in self._issue_edits.items():
-            if row < len(settings.issue_types):
-                seq = edit.keySequence().toString()
-                settings.issue_types[row]["key"] = seq
-
-        settings.custom_comment_key = (
-            self.custom_key_edit.keySequence().toString()
-            or DEFAULT_KEYBINDINGS["custom_comment"]
-        )
+        if self._kb_reset_defaults:
+            settings.keybindings = dict(DEFAULT_KEYBINDINGS)
+            for i, item in enumerate(settings.issue_types):
+                if i < len(DEFAULT_ISSUE_TYPES):
+                    item["key"] = DEFAULT_ISSUE_TYPES[i]["key"]
+            settings.custom_comment_key = DEFAULT_KEYBINDINGS["custom_comment"]
+        elif self._kb_dialog is not None:
+            self._kb_dialog.apply_to(settings)

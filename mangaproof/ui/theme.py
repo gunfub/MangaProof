@@ -80,6 +80,11 @@ QComboBox {{
     border-radius: 4px;
     padding: 4px 8px;
 }}
+QComboBox:disabled {{
+    background-color: {COLOR_BG_MAIN};
+    border-color: {COLOR_BORDER};
+    color: {COLOR_TEXT_DIM};
+}}
 QComboBox::drop-down {{ border: none; width: 20px; }}
 QComboBox QAbstractItemView {{
     background-color: {COLOR_BG_PANEL};
@@ -92,6 +97,10 @@ QLineEdit, QTextEdit, QPlainTextEdit {{
     border-radius: 4px;
     padding: 4px 6px;
     selection-background-color: {COLOR_BG_SELECTED};
+}}
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {{
+    background-color: {COLOR_BG_MAIN};
+    color: {COLOR_TEXT_DIM};
 }}
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {{ border-color: {COLOR_ACCENT}; }}
 QGroupBox {{
@@ -127,12 +136,14 @@ QHeaderView::section {{
     padding: 4px;
 }}
 QCheckBox {{ spacing: 6px; }}
+QCheckBox:disabled {{ color: {COLOR_TEXT_DIM}; }}
 QCheckBox::indicator {{
     width: 16px; height: 16px;
     border: 1px solid {COLOR_BORDER};
     border-radius: 3px;
     background: {COLOR_BG_WIDGET};
 }}
+QCheckBox::indicator:disabled {{ background: {COLOR_BG_MAIN}; }}
 QCheckBox::indicator:checked {{ background-color: {COLOR_ACCENT}; }}
 QScrollBar:vertical {{ background: {COLOR_BG_MAIN}; width: 12px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: {COLOR_BORDER}; border-radius: 5px; min-height: 24px; }}

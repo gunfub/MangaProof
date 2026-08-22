@@ -674,6 +674,65 @@ def test_compare_manual_mode_workflow() -> None:
     print("PASS test_compare_manual_mode_workflow")
 
 
+def test_settings_keybindings_subdialog() -> None:
+    """快捷键子对话框：独立编辑/恢复默认；主对话框 OK 才写回。"""
+    from PySide6.QtGui import QKeySequence
+
+    from mangaproof.config.settings import (
+        DEFAULT_ISSUE_TYPES,
+        DEFAULT_KEYBINDINGS,
+        Settings,
+    )
+    from mangaproof.ui.settings_dialog import KeybindingsDialog, SettingsDialog
+
+    s = Settings()
+    # 未打开子对话框 → 主对话框 apply 不动快捷键
+    dlg = SettingsDialog(s)
+    dlg.apply_to(s)
+    assert s.keybindings["prev_psd"] == "Up"
+
+    # 子对话框编辑并应用
+    kb = KeybindingsDialog(s)
+    kb._core_edits["prev_psd"].setKeySequence(QKeySequence("F1"))
+    kb._issue_edits[0].setKeySequence(QKeySequence(""))
+    kb.apply_to(s)
+    assert s.keybindings["prev_psd"] == "F1"
+    assert s.issue_types[0]["key"] == ""
+
+    # 子对话框内恢复默认快捷键
+    kb._reset_defaults()
+    kb.apply_to(s)
+    assert s.keybindings["prev_psd"] == DEFAULT_KEYBINDINGS["prev_psd"]
+    assert s.issue_types[0]["key"] == DEFAULT_ISSUE_TYPES[0]["key"]
+    assert s.custom_comment_key == DEFAULT_KEYBINDINGS["custom_comment"]
+
+    # 主对话框"恢复默认设置"→ apply 后快捷键回默认
+    s2 = Settings()
+    s2.keybindings["prev_psd"] = "F2"
+    dlg2 = SettingsDialog(s2)
+    dlg2._reset_defaults()
+    dlg2.apply_to(s2)
+    assert s2.keybindings["prev_psd"] == DEFAULT_KEYBINDINGS["prev_psd"]
+    assert s2.custom_comment_key == DEFAULT_KEYBINDINGS["custom_comment"]
+
+    # 主对话框接受过子对话框 → apply 写回子对话框修改
+    s3 = Settings()
+    dlg3 = SettingsDialog(s3)
+    kb3 = KeybindingsDialog(s3)
+    kb3._core_edits["next_psd"].setKeySequence(QKeySequence("F3"))
+    dlg3._kb_dialog = kb3
+    dlg3.apply_to(s3)
+    assert s3.keybindings["next_psd"] == "F3"
+
+    # 主对话框 Cancel（不 apply）→ 设置不变
+    s4 = Settings()
+    dlg4 = SettingsDialog(s4)
+    dlg4._kb_dialog = kb3
+    assert s4.keybindings["next_psd"] == DEFAULT_KEYBINDINGS["next_psd"]
+
+    print("PASS test_settings_keybindings_subdialog")
+
+
 if __name__ == "__main__":
     import traceback
 
