@@ -133,14 +133,27 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Rename-Item "dist\MangaProof" "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}"
+          $dest = "MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}"
+          Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+          Rename-Item "dist\MangaProof" $dest
 
-      - name: Upload artifact
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
           name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
-          path: ${{ runner.os == 'Windows' && 'MangaProof-*-windows-x64' || 'MangaProof-*.*' }}
-          if-no-files-found: ignore
+          path: MangaProof-${{ steps.version.outputs.version }}-windows-x64
+          if-no-files-found: error
+
+      - name: Upload artifact (Linux / macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}
+          path: |
+            MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.tar.gz
+            MangaProof-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.zip
+          if-no-files-found: error
 
   release:
     name: Create release
