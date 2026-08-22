@@ -2,6 +2,12 @@
 
 漫画翻译质量检查与返修标注工具 —— 面向漫画翻译 / 嵌字 / 修图 / 监制的独立桌面 QA 工作台。
 
+## 运行截图 (Ubuntu & Windows)
+
+![image-20260822123526467](./README.assets/screenshot-1.png)
+
+![image-20260822123637194](./README.assets/screenshot-2.png)
+
 ## 核心原则
 
 - **独立于 Photoshop**：不调用任何 Photoshop API（UXP/JSX/CEP），所有视图控制由 MangaProof 完成；
@@ -53,14 +59,17 @@ uv run pyinstaller --clean --noconfirm packaging/main_linux.spec
 
 控制台行为（按平台）：
 - **直接运行 `python main.py`**：控制台始终保留，设置开关不生效；
-- **Windows 打包**：spec 使用 `console=True`（保留控制台子系统），运行时默认隐藏，
-  可在「设置」中关闭「打包产物隐藏控制台窗口」即时恢复显示；
+- **Windows 打包**：spec 使用 `console=True`（保留控制台子系统），运行时默认
+  关闭控制台窗口——FreeConsole 直接销毁窗口（彻底消失，不是最小化）；
+  在「设置」中关闭「打包产物关闭控制台窗口」后 AllocConsole 重新打开并
+  恢复日志输出；
 - **macOS / Linux 打包**：无独立控制台窗口，spec 使用 `console=False`（windowed，
   图形启动无终端输出），运行时无法也不应切换。
 
 ## CI 自动打包
 
-`.github/workflows/build.yml`：推送 `v*` 标签或手动触发（Actions → build →
+`.github/workflows/build.yml`：推送 `master`（构建并上传工件）、推送 `v*` 标签
+（构建 + 自动创建 GitHub Release），或手动触发（Actions → build →
 Run workflow）时，构建 5 个主流平台组合：
 
 | 平台 | 架构 | 跑者 | 产物 |
