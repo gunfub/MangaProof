@@ -8,12 +8,14 @@ from __future__ import annotations
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -21,6 +23,31 @@ from PySide6.QtWidgets import (
 from mangaproof.review.issue import Issue
 from mangaproof.review.state import FAILED, PASSED, UNREVIEWED
 from mangaproof.ui.theme import COLOR_FAIL, COLOR_PASS, COLOR_UNREVIEWED, COLOR_WARN
+
+
+class _ElidedLabel(QLabel):
+    """单行显示、超出宽度以省略号截断的标签。
+
+    PSD 文字图层名常与文字内容相同（可能非常长）：与图层列表面板的
+    QListWidget 一致，按宽度省略而不是撑宽布局或换行。完整名称悬停
+    查看（tooltip）。
+    """
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(text, parent)
+        # 水平 Ignored：布局忽略本标签的文本宽度，面板宽度由其他控件
+        # 决定，长图层名不再把 UI 撑宽
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(0)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        elided = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, self.width()
+        )
+        flags = int(self.alignment()) | int(Qt.TextFlag.TextSingleLine)
+        painter.drawText(self.rect(), flags, elided)
+        painter.end()
 
 
 class IssuePanel(QWidget):
@@ -43,8 +70,7 @@ class IssuePanel(QWidget):
         title.setStyleSheet("font-weight: bold;")
         layout.addWidget(title)
 
-        self.layer_name_label = QLabel("图层：-")
-        self.layer_name_label.setWordWrap(True)
+        self.layer_name_label = _ElidedLabel("图层：-")
         layout.addWidget(self.layer_name_label)
 
         self.status_label = QLabel("状态：○ 未监制")
@@ -97,6 +123,7 @@ class IssuePanel(QWidget):
         self._issues = list(issues)
         self._status = status
         self.layer_name_label.setText(f"图层：{layer_name}")
+        self.layer_name_label.setToolTip(f"图层：{layer_name}")
         status_text = {"unreviewed": "○ 未监制", "passed": "✓ 已通过", "failed": "✗ 未通过"}
         self.status_label.setText(f"状态：{status_text.get(status, status_text['unreviewed'])}")
 

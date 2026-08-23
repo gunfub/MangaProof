@@ -24,11 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
-from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QMessageBox, QSizePolicy, QWidget
 
 from mangaproof.config.settings import SettingsManager
 from mangaproof.review import persistence
-from mangaproof.review.state import FAILED, PASSED
+from mangaproof.review.state import FAILED, PASSED, UNREVIEWED
 from mangaproof.ui.dialogs import IssueDialog
 from mangaproof.ui.main_window import MainWindow
 from mangaproof.ui.task_loader import TaskLoadWorker
@@ -838,6 +838,23 @@ def test_wheel_modes() -> None:
         window.close()
 
     print("PASS test_wheel_modes")
+
+
+def test_issue_panel_long_layer_name() -> None:
+    """当前图层问题面板：超长图层名单行省略显示（不撑宽、不换行）。"""
+    from mangaproof.ui.issue_panel import IssuePanel
+
+    panel = IssuePanel()
+    long_name = "同一段文字内容被用作图层名" * 50
+    panel.set_current(long_name, UNREVIEWED, [])
+    assert panel.layer_name_label.text() == f"图层：{long_name}"
+    assert panel.layer_name_label.wordWrap() is False
+    assert panel.layer_name_label.sizePolicy().horizontalPolicy() == (
+        QSizePolicy.Policy.Ignored
+    )
+    assert panel.layer_name_label.toolTip() == f"图层：{long_name}"
+
+    print("PASS test_issue_panel_long_layer_name")
 
 
 if __name__ == "__main__":
