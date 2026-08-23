@@ -161,6 +161,47 @@ def test_preload_worker() -> None:
     print("PASS test_preload_worker")
 
 
+def test_layer_panel_layout_and_elide() -> None:
+    """图层列表：竖向占用与左侧文件面板对齐（2:3），长名省略号截断、
+    禁止横向滚动、完整名 tooltip（与问题面板 _ElidedLabel 风格一致）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        sm = SettingsManager(Path(tmp) / "settings.json")
+        window = MainWindow(sm)
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+
+        # 左右 dock 拉伸比一致：file:stats = layer:issue = 2:3
+        left_layout = window.left_dock.widget().layout()
+        right_layout = window.right_dock.widget().layout()
+        assert left_layout.stretch(0) == 2 and left_layout.stretch(1) == 3
+        assert right_layout.stretch(0) == 2 and right_layout.stretch(1) == 3
+
+        lw = window.layer_panel.list_widget
+        assert lw.textElideMode() == Qt.TextElideMode.ElideRight
+        assert lw.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert lw.wordWrap() is False
+        assert lw.uniformItemSizes() is True
+
+        # 长图层名：条目保留完整文本、tooltip 完整、无横向滚动
+        long_name = "对话气泡_第3页_主角台词_这一段非常长需要省略号截断" * 3
+        window.layer_panel.set_layers([long_name])
+        app.processEvents()
+        item = lw.item(0)
+        assert item is not None and long_name in item.text()
+        assert item.toolTip() == item.text()
+
+        # set_statuses 后 tooltip 跟随更新（含问题数后缀）
+        window.layer_panel.set_statuses(["failed"], [2])
+        item = lw.item(0)
+        assert item is not None and "（2 个问题）" in item.toolTip()
+
+        window.close()
+        app.processEvents()
+
+    print("PASS test_layer_panel_layout_and_elide")
+
+
 def test_task_loader_progress() -> None:
     """后台加载 worker：进度消息覆盖扫描/解析阶段，任务正确产出。"""
     with tempfile.TemporaryDirectory() as tmp:

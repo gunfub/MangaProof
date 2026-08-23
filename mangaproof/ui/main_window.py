@@ -190,8 +190,10 @@ class MainWindow(QMainWindow):
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.layer_panel, 3)
-        right_layout.addWidget(self.issue_panel, 2)
+        # 拉伸比与左侧 file_panel:stats_panel（2:3）一致：
+        # 图层列表竖向占用与左侧 PSD 文件选择对齐
+        right_layout.addWidget(self.layer_panel, 2)
+        right_layout.addWidget(self.issue_panel, 3)
         self.right_dock = QDockWidget("图层与问题", self)
         self.right_dock.setWidget(right_container)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.right_dock)

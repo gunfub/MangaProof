@@ -44,14 +44,24 @@ class LayerPanel(QWidget):
 
         self.list_widget = QListWidget()
         self.list_widget.currentRowChanged.connect(self._on_current_row_changed)
+        # 长图层名单行省略号截断（与问题面板 _ElidedLabel 风格一致），
+        # 不横向滚动；完整名称悬停 tooltip 查看。
+        self.list_widget.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.list_widget.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.list_widget.setWordWrap(False)
+        self.list_widget.setUniformItemSizes(True)
         layout.addWidget(self.list_widget)
 
     def set_layers(self, names: List[str]) -> None:
         self._layer_names = list(names)
         self.list_widget.clear()
         for name in names:
-            item = QListWidgetItem(f"{STATUS_ICONS[UNREVIEWED]} {name}")
+            text = f"{STATUS_ICONS[UNREVIEWED]} {name}"
+            item = QListWidgetItem(text)
             item.setForeground(STATUS_COLORS[UNREVIEWED])
+            item.setToolTip(text)
             self.list_widget.addItem(item)
 
     def set_statuses(self, statuses: List[str], issue_counts: List[int]) -> None:
@@ -62,7 +72,9 @@ class LayerPanel(QWidget):
                 continue
             name = self._layer_names[row] if row < len(self._layer_names) else ""
             extra = f"（{issue_counts[row]} 个问题）" if issue_counts[row] > 0 else ""
-            item.setText(f"{STATUS_ICONS.get(status, STATUS_ICONS[UNREVIEWED])} {name}{extra}")
+            text = f"{STATUS_ICONS.get(status, STATUS_ICONS[UNREVIEWED])} {name}{extra}"
+            item.setText(text)
+            item.setToolTip(text)
             item.setForeground(STATUS_COLORS.get(status, STATUS_COLORS[UNREVIEWED]))
 
     def set_current_row(self, row: int) -> None:
