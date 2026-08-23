@@ -78,6 +78,10 @@ COMPARE_SPEED_TIERS: list[tuple[int, str]] = [
 DEFAULT_COMPARE_SPEED_HZ = 4
 DEFAULT_COMPARE_MODE = "auto"   # "auto" 自动切换 / "manual" 手动切换
 
+# 裸滚轮（不按修饰键）行为：默认上下平移；可切换为缩放（需求 §27）。
+# 触控板双指滚不受此设置影响，恒为双轴平移。
+DEFAULT_WHEEL_MODE = "pan"      # "pan" 上下移动 / "zoom" 缩放
+
 
 @dataclass
 class Settings:
@@ -86,6 +90,7 @@ class Settings:
     layer_display_ratio: float = DEFAULT_DISPLAY_RATIO
     compare_mode: str = DEFAULT_COMPARE_MODE   # "auto" / "manual"
     compare_speed_hz: int = DEFAULT_COMPARE_SPEED_HZ
+    wheel_mode: str = DEFAULT_WHEEL_MODE       # "pan" / "zoom"
     recursive_scan: bool = False
     generate_pdf_on_complete: bool = True
     report_name: str = ""
@@ -157,6 +162,9 @@ class SettingsManager:
             hz = DEFAULT_COMPARE_SPEED_HZ
         s.compare_speed_hz = hz
 
+        wheel = raw.get("wheel_mode", DEFAULT_WHEEL_MODE)
+        s.wheel_mode = wheel if wheel in ("pan", "zoom") else DEFAULT_WHEEL_MODE
+
         s.recursive_scan = bool(raw.get("recursive_scan", False))
         s.generate_pdf_on_complete = bool(
             raw.get("generate_pdf_on_complete", True)
@@ -204,6 +212,7 @@ class SettingsManager:
                     "layer_display_ratio": self.settings.layer_display_ratio,
                     "compare_mode": self.settings.compare_mode,
                     "compare_speed_hz": self.settings.compare_speed_hz,
+                    "wheel_mode": self.settings.wheel_mode,
                     "recursive_scan": self.settings.recursive_scan,
                     "generate_pdf_on_complete": self.settings.generate_pdf_on_complete,
                     "report_name": self.settings.report_name,

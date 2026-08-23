@@ -16,11 +16,14 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from mangaproof.config.settings import SettingsManager
@@ -681,6 +684,7 @@ def test_settings_keybindings_subdialog() -> None:
     from mangaproof.config.settings import (
         DEFAULT_ISSUE_TYPES,
         DEFAULT_KEYBINDINGS,
+        DEFAULT_WHEEL_MODE,
         Settings,
     )
     from mangaproof.ui.settings_dialog import KeybindingsDialog, SettingsDialog
@@ -730,7 +734,110 @@ def test_settings_keybindings_subdialog() -> None:
     dlg4._kb_dialog = kb3
     assert s4.keybindings["next_psd"] == DEFAULT_KEYBINDINGS["next_psd"]
 
+    # 滚轮模式下拉框：默认上下移动；切换缩放后 apply 写回；恢复默认复位
+    s5 = Settings()
+    assert s5.wheel_mode == DEFAULT_WHEEL_MODE == "pan"
+    dlg5 = SettingsDialog(s5)
+    zidx = dlg5.wheel_mode_combo.findData("zoom")
+    assert zidx >= 0
+    dlg5.wheel_mode_combo.setCurrentIndex(zidx)
+    dlg5.apply_to(s5)
+    assert s5.wheel_mode == "zoom"
+    dlg5._reset_defaults()
+    dlg5.apply_to(s5)
+    assert s5.wheel_mode == DEFAULT_WHEEL_MODE
+
     print("PASS test_settings_keybindings_subdialog")
+
+
+def _send_wheel(
+    viewer: QWidget,
+    angle: tuple[int, int] = (0, 0),
+    pixel: tuple[int, int] = (0, 0),
+    modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+) -> None:
+    """构造真实 QWheelEvent 并同步派发。"""
+    w, h = viewer.width(), viewer.height()
+    ev = QWheelEvent(
+        QPointF(w / 2.0, h / 2.0),  # pos
+        QPointF(w / 2.0, h / 2.0),  # globalPos
+        QPoint(*pixel),             # pixelDelta
+        QPoint(*angle),             # angleDelta
+        Qt.MouseButton.NoButton,
+        modifiers,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,                      # inverted
+    )
+    QApplication.sendEvent(viewer, ev)
+
+
+def test_wheel_modes() -> None:
+    """滚轮交互：裸滚轮默认上下平移/可设置切换为缩放；Ctrl=缩放；
+    Alt=左右平移；触控板双指滚（pixelDelta）恒为双轴平移。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        folder = _copy_fixtures(root / "chapter01")
+        sm = SettingsManager(root / "settings.json")
+        window = MainWindow(sm)
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+
+        with patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window.open_folder(folder)
+        _wait_for_task(window)
+        app.processEvents()
+
+        viewer = window.viewer
+        cam = viewer.camera
+        assert viewer._doc is not None
+
+        cx0, cy0, zoom0 = cam.center_x, cam.center_y, cam.zoom
+
+        # 默认：裸鼠标滚轮 → 上下平移，不缩放
+        _send_wheel(viewer, angle=(0, 120))
+        assert cam.zoom == zoom0
+        assert cam.center_x == cx0
+        assert cam.center_y < cy0  # 滚轮向上 → 视图向上
+
+        # Ctrl+滚轮 → 缩放（锚点=视口中心 → 相机中心不动）
+        cx1, cy1, zoom1 = cam.center_x, cam.center_y, cam.zoom
+        _send_wheel(viewer, angle=(0, 120), modifiers=Qt.KeyboardModifier.ControlModifier)
+        assert cam.zoom == pytest.approx(zoom1 * 1.25)
+        assert cam.center_x == cx1 and cam.center_y == cy1
+
+        # Alt+滚轮 → 左右平移（纵向刻度映射为横向）
+        cx2, cy2, zoom2 = cam.center_x, cam.center_y, cam.zoom
+        _send_wheel(viewer, angle=(0, 120), modifiers=Qt.KeyboardModifier.AltModifier)
+        assert cam.zoom == zoom2
+        assert cam.center_x < cx2
+        assert cam.center_y == cy2
+
+        # 设置切换：裸滚轮 → 缩放
+        viewer.set_wheel_mode("zoom")
+        cx3, cy3, zoom3 = cam.center_x, cam.center_y, cam.zoom
+        _send_wheel(viewer, angle=(0, 120))
+        assert cam.zoom == pytest.approx(zoom3 * 1.25)
+        assert cam.center_x == cx3 and cam.center_y == cy3
+
+        # 触控板双指滚（pixelDelta）：无论 wheel_mode 如何，恒为双轴平移
+        cx4, cy4, zoom4 = cam.center_x, cam.center_y, cam.zoom
+        _send_wheel(viewer, pixel=(100, 60))
+        assert cam.zoom == zoom4
+        assert cam.center_x < cx4 and cam.center_y < cy4
+
+        # 恢复默认模式后，裸滚轮再次为上下平移
+        viewer.set_wheel_mode("pan")
+        cx5, cy5, zoom5 = cam.center_x, cam.center_y, cam.zoom
+        _send_wheel(viewer, angle=(0, -120))
+        assert cam.zoom == zoom5
+        assert cam.center_x == cx5 and cam.center_y > cy5
+
+        window.close()
+
+    print("PASS test_wheel_modes")
 
 
 if __name__ == "__main__":

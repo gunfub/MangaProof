@@ -156,6 +156,7 @@ class MainWindow(QMainWindow):
 
         # ---- 中央 Viewer ----
         self.viewer = ViewerWidget()
+        self.viewer.set_wheel_mode(self.settings.wheel_mode)
         self.viewer.rect_drawn.connect(self._on_rect_drawn)
         self.viewer.issue_drawn.connect(self._on_issue_drawn)
         self.viewer.camera_changed.connect(self._on_camera_changed)
@@ -351,7 +352,8 @@ class MainWindow(QMainWindow):
             f"{d(kb.get('fail_layer', '/'))} 未通过　"
             f"{d(kb.get('toggle_compare', 'Space'))} 对比　"
             f"{d(kb.get('cancel_operation', 'Esc'))} 取消　"
-            f"{d(kb.get('save_task', 'Ctrl+S'))} 保存"
+            f"{d(kb.get('save_task', 'Ctrl+S'))} 保存　"
+            f"Ctrl+滚轮 缩放　Alt+滚轮 左右移动"
         )
         # 工具栏/菜单按钮同步显示当前绑定（需求 §30）
         self.action_open_psd.setText(f"打开 PSD ({d(kb.get('open_psd', 'Ctrl+O'))})")
@@ -1454,6 +1456,7 @@ class MainWindow(QMainWindow):
             self.settings_manager.save()
             self._rebuild_shortcuts()
             self._apply_compare_settings()
+            self.viewer.set_wheel_mode(self.settings.wheel_mode)
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))
             self.recenter_current_layer()

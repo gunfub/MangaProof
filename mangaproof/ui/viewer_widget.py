@@ -1,6 +1,7 @@
 """Viewer Canvas（需求 §19、§23、§27、§31、§39）。
 
-- 自维护 Camera（center/zoom），鼠标滚轮缩放、拖拽平移；
+- 自维护 Camera（center/zoom），鼠标滚轮上下平移（可在设置中切换为缩放）、
+  Ctrl+滚轮缩放、Alt+滚轮左右平移；触控板双指滚双轴平移、捏合缩放；拖拽平移；
 - 显示源：merged（PSD 自带 Original）↔ bg（背景图层，需求 §24、§25）；
 - Overlay：当前图层视觉边界虚线框、问题红框 + 问题编号、拖框橡皮筋；
 - 红框为 Viewer Overlay，绝不写入 PSD（需求 §2.2、§31）。
@@ -87,6 +88,14 @@ class ViewerWidget(QWidget):
         self._redraw_mode = False
         self._pending_type: Optional[str] = None
         self._drag: Optional[dict] = None
+        self._wheel_mode = "pan"   # 裸滚轮行为："pan" 上下移动 / "zoom" 缩放
+
+    def set_wheel_mode(self, mode: str) -> None:
+        """裸滚轮（不按修饰键）行为：'pan' 上下移动 / 'zoom' 缩放。
+
+        触控板双指滚（pixelDelta）不受影响，恒为双轴平移。
+        """
+        self._wheel_mode = mode if mode in ("pan", "zoom") else "pan"
 
     # ------------------------------------------------------------------ API
 
@@ -420,19 +429,56 @@ class ViewerWidget(QWidget):
             event.accept()
             return
 
-        # 模式 2：不按修饰键 -> 画布平移逻辑（适配 Mac 触控板与传统鼠标）
-        dx = 0
-        dy = 0
+        # 模式 2：按住 Alt(Win) / Option(Mac) + 滚轮 -> 左右平移逻辑。
+        # 传统鼠标无横向刻度时，纵向刻度映射为横向（Photoshop 行为）。
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            dx = 0.0
+            if not pixel_delta.isNull():
+                dx = pixel_delta.x()
+                if dx == 0:
+                    dx = pixel_delta.y()
+            elif not angle_delta.isNull():
+                dx = angle_delta.x() / 2.0
+                if dx == 0:
+                    dx = angle_delta.y() / 2.0
+            if dx != 0:
+                self._camera.pan_by_screen(dx, 0.0)
+                self.camera_changed.emit()
+                self.update()
+            event.accept()
+            return
 
+        # 模式 3：不按修饰键。触控板双指滚（pixelDelta）恒为双轴平移；
+        # 鼠标滚轮按设置：默认上下平移（wheel_mode="pan"），
+        # 可切换为缩放（wheel_mode="zoom"）。
         if not pixel_delta.isNull():
             # Mac 触控板快车道：读取高精度平滑像素偏移
             dx = pixel_delta.x()
             dy = pixel_delta.y()
-        elif not angle_delta.isNull():
-            # Win/传统鼠标慢车道：将滚轮的 120 刻度除以 2 转换为柔和的平移像素
+            if dx != 0 or dy != 0:
+                self._camera.pan_by_screen(dx, dy)
+                self.camera_changed.emit()
+                self.update()
+            event.accept()
+            return
+
+        if self._wheel_mode == "zoom":
+            delta = angle_delta.y()
+            if delta != 0:
+                factor = 1.25 ** (delta / 120.0)
+                pos = event.position()
+                self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
+                self.camera_changed.emit()
+                self.update()
+            event.accept()
+            return
+
+        # Win/传统鼠标慢车道：将滚轮的 120 刻度除以 2 转换为柔和的平移像素
+        dx = 0.0
+        dy = 0.0
+        if not angle_delta.isNull():
             dx = angle_delta.x() / 2.0
             dy = angle_delta.y() / 2.0
-
         if dx != 0 or dy != 0:
             # 复用相机原有的平移接口
             self._camera.pan_by_screen(dx, dy)

@@ -38,6 +38,7 @@ from mangaproof.config.settings import (
     DEFAULT_DISPLAY_RATIO,
     DEFAULT_ISSUE_TYPES,
     DEFAULT_KEYBINDINGS,
+    DEFAULT_WHEEL_MODE,
     DISPLAY_RATIOS,
     Settings,
 )
@@ -245,8 +246,19 @@ class SettingsDialog(QDialog):
         layout.addWidget(report_group)
 
         # ---- 快捷键（入口按钮 → 独立子对话框）----
-        shortcut_group = QGroupBox("快捷键")
+        shortcut_group = QGroupBox("快捷键与滚轮")
         shortcut_form = QFormLayout(shortcut_group)
+        self.wheel_mode_combo = QComboBox()
+        self.wheel_mode_combo.addItem("上下移动视图（默认）", "pan")
+        self.wheel_mode_combo.addItem("缩放视图", "zoom")
+        wheel_idx = self.wheel_mode_combo.findData(settings.wheel_mode)
+        self.wheel_mode_combo.setCurrentIndex(max(0, wheel_idx))
+        self.wheel_mode_combo.setToolTip(
+            "不按修饰键时鼠标滚轮的行为。\n"
+            "Ctrl+滚轮始终为缩放，Alt+滚轮始终为左右移动；\n"
+            "触控板双指滚不受影响，始终为平移。"
+        )
+        shortcut_form.addRow("鼠标滚轮（不按修饰键）：", self.wheel_mode_combo)
         self.kb_button = QPushButton("设置快捷键…")
         self.kb_button.setToolTip("在独立窗口中设置核心快捷键与问题类型快捷键")
         self.kb_button.clicked.connect(self._open_keybindings_dialog)
@@ -292,6 +304,8 @@ class SettingsDialog(QDialog):
         self.compare_mode_combo.setCurrentIndex(max(0, idx))
         idx = self.compare_speed_combo.findData(DEFAULT_COMPARE_SPEED_HZ)
         self.compare_speed_combo.setCurrentIndex(max(0, idx))
+        idx = self.wheel_mode_combo.findData(DEFAULT_WHEEL_MODE)
+        self.wheel_mode_combo.setCurrentIndex(max(0, idx))
         self.recursive_check.setChecked(False)
         self.console_check.setChecked(True)
         self.pdf_check.setChecked(True)
@@ -304,6 +318,7 @@ class SettingsDialog(QDialog):
         settings.layer_display_ratio = float(self.ratio_combo.currentData())
         settings.compare_mode = str(self.compare_mode_combo.currentData())
         settings.compare_speed_hz = int(self.compare_speed_combo.currentData())
+        settings.wheel_mode = str(self.wheel_mode_combo.currentData())
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.generate_pdf_on_complete = self.pdf_check.isChecked()
         settings.report_name = self.report_name_edit.text().strip()
