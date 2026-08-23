@@ -12,7 +12,7 @@ import logging
 from typing import List, Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QEvent
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -327,6 +327,22 @@ class ViewerWidget(QWidget):
     def _world_at(self, pos: QPointF) -> Tuple[float, float]:
         return self._camera.screen_to_world(pos.x(), pos.y(), self.width(), self.height())
 
+    def event(self, event: QEvent) -> bool:
+        # 捕捉 macOS 触控板原生手势（如双指捏合缩放）
+        if event.type() == QEvent.Type.NativeGesture:
+            if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                if self._doc is None:
+                    return True
+                # Mac 的 NativeGesture Zoom 会返回相对缩放增量，比如 0.01 等
+                # 我们把它转换为 factor（例如 1.01）传给相机的 zoom_around
+                factor = 1.0 + event.value()
+                pos = event.position()
+                self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
+                self.camera_changed.emit()
+                self.update()
+                return True
+        return super().event(event)
+
     def mousePressEvent(self, event) -> None:
         if self._doc is None:
             return
@@ -388,12 +404,39 @@ class ViewerWidget(QWidget):
     def wheelEvent(self, event) -> None:
         if self._doc is None:
             return
-        delta = event.angleDelta().y()
-        if delta == 0:
+
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+
+        # 模式 1：按住 Ctrl(Win) / Cmd(Mac) + 滚轮 -> 缩放逻辑
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = angle_delta.y()
+            if delta != 0:
+                factor = 1.25 ** (delta / 120.0)
+                pos = event.position()
+                self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
+                self.camera_changed.emit()
+                self.update()
+            event.accept()
             return
-        factor = 1.25 ** (delta / 120.0)
-        pos = event.position()
-        self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
-        self.camera_changed.emit()
-        self.update()
+
+        # 模式 2：不按修饰键 -> 画布平移逻辑（适配 Mac 触控板与传统鼠标）
+        dx = 0
+        dy = 0
+
+        if not pixel_delta.isNull():
+            # Mac 触控板快车道：读取高精度平滑像素偏移
+            dx = pixel_delta.x()
+            dy = pixel_delta.y()
+        elif not angle_delta.isNull():
+            # Win/传统鼠标慢车道：将滚轮的 120 刻度除以 2 转换为柔和的平移像素
+            dx = angle_delta.x() / 2.0
+            dy = angle_delta.y() / 2.0
+
+        if dx != 0 or dy != 0:
+            # 复用相机原有的平移接口
+            self._camera.pan_by_screen(dx, dy)
+            self.camera_changed.emit()
+            self.update()
+
         event.accept()
