@@ -299,15 +299,14 @@ class PSDDocument:
             if info.name == "bg":
                 if self._has_content(info):
                     return info.id
-        # 2) 兜底：取迭代序中最后一个有像素内容的图层
-        #    注意 psd-tools 1.18 迭代顺序为自下而上（实证），因此实际取到
-        #    的是最顶部有内容图层；保留现状行为不变（需求 §24 的“最底部”
-        #    语义见 build_layers 的 bottom_pixel_id，如需对齐再评估改动）。
-        bottom = None
+        # 2) 最底部具有可用像素内容的图层（需求 §24）。
+        #    psd-tools 1.18 迭代顺序为自下而上（已用合成结果实证）：
+        #    第一个有内容的图层即 PS 图层面板最底部的图层——
+        #    漫画翻译监制场景中即原版未翻译底图（对比基准）。
         for info in layers:
             if self._has_content(info):
-                bottom = info.id
-        return bottom
+                return info.id
+        return None
 
     @staticmethod
     def _has_content(info: LayerInfo) -> bool:

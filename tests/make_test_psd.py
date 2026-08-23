@@ -88,9 +88,10 @@ def _make_002() -> None:
     d.rectangle([0, 400, 400, 600], fill=(240, 220, 180, 255))    # 背景画（底部）
 
     psd = PSDImage.frompil(merged)
-    PixelLayer.frompil(_box((200, 100), (10, 120, 200, 255)), psd, name="text_01", top=100, left=100)
+    # append 追加到最上层（迭代序末尾），先 append 的即最底部：
     # 无精确 "bg" 名 → 应回退到最底部有像素图层 background_painting
     PixelLayer.frompil(_box((400, 200), (240, 220, 180, 255)), psd, name="background_painting", top=400, left=0)
+    PixelLayer.frompil(_box((200, 100), (10, 120, 200, 255)), psd, name="text_01", top=100, left=100)
     psd.save(DATA_DIR / "002.psd")
 
 

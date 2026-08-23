@@ -168,10 +168,20 @@ def test_visual_bounds_and_center():
 
 
 def test_bg_fallback_bottom_most():
+    """无 "bg" 名时兜底选最底部有内容图层（需求 §24）。
+
+    psd-tools 1.18 迭代顺序为自下而上（实证）：第一个即 PS 图层面板
+    最底部图层——回归保护：不能选到最顶部的内容图层（text_01）。
+    """
     doc = PSDDocument(DATA_DIR / "002.psd")
+    names = [info.name for info in doc.layers]
+    assert names[0] == "background_painting", names  # 最底部
+    assert names[-1] == "text_01", names             # 最顶部
     bg_id = doc.bg_layer_id()
     info = doc.layer_by_id(bg_id)
     assert info.name == "background_painting", info.name
+    # bg 取 topil 路径（原版底图无蒙版/特效）
+    assert info.image_mode == "topil", info.image_mode
     bg = doc.bg_image()
     assert bg is not None and bg[2].shape == (200, 400, 4)
 
