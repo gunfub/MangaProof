@@ -241,7 +241,6 @@ class MainWindow(QMainWindow):
         self.warmup_label = QLabel("")     # 阶段 B：图层预热
         self.save_label = QLabel("")
         self.zoom_label = QLabel("缩放：100%")
-        self.progress_label = QLabel("")
         self.hint_label = QLabel("")
         self.statusBar().addPermanentWidget(self.save_label)
         # 实测 addPermanentWidget 后加者紧邻先前者左侧：
@@ -249,7 +248,6 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.preload_label)
         self.statusBar().addPermanentWidget(self.warmup_label)
         self.statusBar().addPermanentWidget(self.zoom_label)
-        self.statusBar().addPermanentWidget(self.progress_label)
         self.statusBar().addWidget(self.hint_label)
 
         self._update_shortcut_hints()
@@ -1563,14 +1561,7 @@ class MainWindow(QMainWindow):
     def _refresh_title(self) -> None:
         if self.task is None:
             self.setWindowTitle(f"{APP_NAME} v{__version__}")
-            self.progress_label.setText("")
             return
-        layer_counts = {rel: len(v) for rel, v in self._layer_ids_by_file.items()}
-        counts = self.task.count_all(layer_counts)
-        self.progress_label.setText(
-            f"监制进度：{counts['reviewed']} / {counts['total']}　"
-            f"通过 {counts['passed']}　未通过 {counts['failed']}　未监制 {counts['unreviewed']}"
-        )
         self.setWindowTitle(
             f"{APP_NAME} v{__version__} — {self.task.task_name} — {self._current_file}"
         )
