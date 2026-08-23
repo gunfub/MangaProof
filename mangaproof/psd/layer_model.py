@@ -27,6 +27,7 @@ class LayerInfo:
     bounds: Tuple[int, int, int, int]   # (left, top, right, bottom)
     visible: bool
     layer_type: str              # psd-tools kind
+    image_mode: str = "composite"  # 像素提取路径：composite | topil | topil_only
     parent_id: Optional[str] = None
     children: list[str] = field(default_factory=list)
     image_loader: Optional[Callable[[], Optional[np.ndarray]]] = None

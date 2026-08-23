@@ -330,7 +330,8 @@ def test_full_workflow() -> None:
             assert "<br/>" in cell.text()
         assert "通过" in window.stats_panel.total_cells["passed"].text()
         assert "3" in window.stats_panel.total_cells["files"].text()  # 3 个 PSD
-        assert "8" in window.stats_panel.total_cells["layers"].text()  # 8 个图层
+        # 总图层 = 001 可监制 6（bg/dialogue×3/text1/text2）+ 002 两个 + 10 两个
+        assert "10" in window.stats_panel.total_cells["layers"].text()
 
         # 回归：按钮动态显示当前绑定（需求 §30），重绑定后文案跟随更新
         assert "Enter" in window.issue_panel.pass_btn.text()

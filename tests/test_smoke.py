@@ -36,8 +36,10 @@ def test_natural_sort():
 def test_document_load_001():
     doc = PSDDocument(DATA_DIR / "001.psd")
     names = [info.name for info in doc.layers]
-    # 隐藏图层不应进入可监制列表；顺序为文档顺序（自上而下）
-    assert names == ["bg", "dialogue_01", "dialogue_02", "dialogue_03"], names
+    # 隐藏图层不应进入可监制列表；顺序为 psd-tools 迭代顺序（自下而上）
+    assert names == [
+        "bg", "dialogue_01", "dialogue_02", "dialogue_03", "text1", "text2",
+    ], names
     # merged image 来自 PSD 自带数据
     merged = doc.merged_np()
     assert merged.shape == (600, 400, 4)
@@ -46,6 +48,104 @@ def test_document_load_001():
     assert img.shape == (60, 120, 4)
     # bg 选择：精确 "bg"
     assert doc.bg_layer_id() == doc.layers[0].id
+
+
+def test_layer_image_mode_split():
+    """图层预热分流：type→topil_only，bg/最底部→topil，其余→composite。"""
+    import numpy as np
+    from psd_tools import PSDImage
+
+    doc = PSDDocument(DATA_DIR / "001.psd")
+    by_name = {info.name: info for info in doc.layers}
+    # 迭代顺序自下而上：bg 是第一个（最底部）可见 pixel 层
+    assert by_name["bg"].image_mode == "topil"
+    assert by_name["dialogue_01"].image_mode == "composite"
+    assert by_name["text1"].image_mode == "topil_only"   # type → 仅 topil
+    assert by_name["text2"].image_mode == "composite"    # 顶层 pixel → composite
+
+    # type 层视觉边界 = PS 预生成文字栅格的 alpha bbox（与 topil 一致），
+    # 而不是整个 bbox 矩形（composite 不渲染字形，只会整块/全透明）
+    vb = layer_visual_bounds(by_name["text1"])
+    assert vb is not None
+    psd = PSDImage.open(DATA_DIR / "001.psd")
+    node = next(l for l in psd if l.name == "text1")
+    img = np.asarray(node.topil().convert("RGBA"))
+    ys, xs = np.where(img[:, :, 3] > 0)
+    left, top = int(node.bbox[0]), int(node.bbox[1])
+    expect = (left + int(xs.min()), top + int(ys.min()),
+              left + int(xs.max()) + 1, top + int(ys.max()) + 1)
+    assert vb == expect, (vb, expect)
+
+    # text1/text2 像素可提取、视觉边界已可用（WARM_ALL 预热路径）
+    for name in ("text1", "text2"):
+        info = by_name[name]
+        img = doc.layer_image(info.id)
+        assert img is not None and img.shape[2] == 4
+        assert info.visual_bounds() is not None
+
+
+def test_make_image_loader_modes():
+    """_make_image_loader 分流：各模式下 composite/topil 的调用与回退。"""
+    from PIL import Image
+
+    from mangaproof.psd.document import (
+        _LOADER_COMPOSITE,
+        _LOADER_TOPIL,
+        _LOADER_TOPIL_ONLY,
+    )
+
+    class StubNode:
+        def __init__(self, topil_img=None, composite_img=None,
+                     topil_raise=False, composite_raise=False):
+            self.topil_img = topil_img
+            self.composite_img = composite_img
+            self.topil_raise = topil_raise
+            self.composite_raise = composite_raise
+            self.calls = []
+
+        def topil(self):
+            self.calls.append("topil")
+            if self.topil_raise:
+                raise RuntimeError("topil boom")
+            return self.topil_img
+
+        def composite(self, force=False):
+            self.calls.append("composite")
+            if self.composite_raise:
+                raise RuntimeError("composite boom")
+            return self.composite_img
+
+    def pil(fill):
+        return Image.new("RGBA", (4, 4), fill)
+
+    def make(mode, node):
+        doc = PSDDocument(Path("stub.psd"), psd=object())
+        return doc._make_image_loader(node, mode)
+
+    # topil_only：只用 topil，绝不调用 composite
+    node = StubNode(topil_img=pil((1, 2, 3, 255)), composite_img=pil((9, 9, 9, 255)))
+    out = make(_LOADER_TOPIL_ONLY, node)()
+    assert out[0, 0].tolist() == [1, 2, 3, 255]
+    assert node.calls == ["topil"], node.calls
+    # topil_only：topil 无内容/异常 → 直接放弃（不兜底 composite）
+    for node in (StubNode(), StubNode(topil_raise=True)):
+        assert make(_LOADER_TOPIL_ONLY, node)() is None
+        assert node.calls == ["topil"], node.calls
+    # topil：优先 topil，成功则不调用 composite
+    node = StubNode(topil_img=pil((1, 2, 3, 255)), composite_img=pil((9, 9, 9, 255)))
+    assert make(_LOADER_TOPIL, node)()[0, 0].tolist() == [1, 2, 3, 255]
+    assert node.calls == ["topil"], node.calls
+    # topil：无内容 → 退化 composite
+    node = StubNode(composite_img=pil((9, 9, 9, 255)))
+    assert make(_LOADER_TOPIL, node)()[0, 0].tolist() == [9, 9, 9, 255]
+    assert node.calls == ["topil", "composite"], node.calls
+    # composite：现状行为（composite → None/异常时退化 topil）
+    node = StubNode(composite_img=pil((9, 9, 9, 255)), topil_img=pil((1, 2, 3, 255)))
+    assert make(_LOADER_COMPOSITE, node)()[0, 0].tolist() == [9, 9, 9, 255]
+    assert node.calls == ["composite"], node.calls
+    node = StubNode(topil_img=pil((1, 2, 3, 255)))
+    assert make(_LOADER_COMPOSITE, node)()[0, 0].tolist() == [1, 2, 3, 255]
+    assert node.calls == ["composite", "topil"], node.calls
 
 
 def test_visual_bounds_and_center():

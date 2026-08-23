@@ -33,6 +33,11 @@ _REVIEWABLE_KINDS = {
     "patternfill",
 }
 
+# 图层像素提取路径（按图层类型分流，见 _make_image_loader）
+_LOADER_COMPOSITE = "composite"      # 其余图层：composite（蒙版/剪贴/混合/特效）
+_LOADER_TOPIL = "topil"              # bg/最底层：topil 优先，失败退化 composite
+_LOADER_TOPIL_ONLY = "topil_only"    # type 图层：仅 topil，失败直接放弃
+
 
 class PSDDocument:
     def __init__(
@@ -145,48 +150,93 @@ class PSDDocument:
     # -- 图层 --------------------------------------------------------------
 
     def build_layers(self) -> List[LayerInfo]:
-        """构建可监制图层列表（文档顺序，稳定编号）。"""
+        """构建可监制图层列表（文档顺序，稳定编号）。
+
+        注意：psd-tools 1.18 的迭代顺序为自下而上（第一个即最底部图层，
+        已用合成结果实证），因此「最底部 pixel 层」取迭代序中第一个
+        pixel 层。
+        """
         infos: List[LayerInfo] = []
-        stack: List[Tuple] = [(self._psd, None, "0")]
+        entries: List[Tuple] = []
 
         def visit(node, parent_id, path_id):
             # 先按文档顺序收集本层，再递归子层
             if node.kind in _REVIEWABLE_KINDS and getattr(node, "visible", True):
-                bbox = tuple(int(v) for v in node.bbox) if node.bbox else (0, 0, 0, 0)
-                info = LayerInfo(
-                    id=path_id,
-                    name=str(getattr(node, "name", "") or ""),
-                    bounds=bbox,
-                    visible=bool(node.visible),
-                    layer_type=str(node.kind),
-                    parent_id=parent_id,
-                    image_loader=self._make_image_loader(node),
-                )
-                infos.append(info)
+                entries.append((node, parent_id, path_id))
             # 递归子层（group 等容器）
             try:
-                children = list(node)  # __iter__ 按文档顺序
+                children = list(node)  # __iter__ 按文档顺序（自下而上）
             except Exception:
                 children = []
             for i, child in enumerate(children):
                 visit(child, path_id, f"{path_id}.{i}")
 
         visit(self._psd, None, "0")
+
+        # 最底部可见 pixel 图层 = 迭代序中第一个 pixel 层
+        # （漫画翻译监制场景中即原版未翻译底图，无蒙版/特效）
+        bottom_pixel_id = None
+        for node, _parent, path_id in entries:
+            if node.kind == "pixel":
+                bottom_pixel_id = path_id
+                break
+
+        for node, parent_id, path_id in entries:
+            name = str(getattr(node, "name", "") or "")
+            mode = _LOADER_COMPOSITE
+            if node.kind == "type":
+                mode = _LOADER_TOPIL_ONLY
+            elif name == "bg" or path_id == bottom_pixel_id:
+                mode = _LOADER_TOPIL
+            bbox = tuple(int(v) for v in node.bbox) if node.bbox else (0, 0, 0, 0)
+            info = LayerInfo(
+                id=path_id,
+                name=name,
+                bounds=bbox,
+                visible=bool(node.visible),
+                layer_type=str(node.kind),
+                image_mode=mode,
+                parent_id=parent_id,
+                image_loader=self._make_image_loader(node, mode),
+            )
+            infos.append(info)
+
         self._layers = infos
         self._layer_by_id = {info.id: info for info in infos}
         return infos
 
-    def _make_image_loader(self, node):
-        """返回惰性加载器：layer composite（含蒙版/剪贴）→ 失败退化为 topil。
+    def _make_image_loader(self, node, mode: str = _LOADER_COMPOSITE):
+        """返回惰性加载器（按图层类型选择提取路径）。
+
+        - topil_only（type 图层）：新版 PS 的文字图层无论是否栅格化都自带
+          预生成的文字栅格图像，topil() 直接读出字形像素；psd-tools 的
+          composite 不渲染字形（无栅格时只会产出全透明/整块填充），对
+          视觉边界（几何中心）无用。topil 失败直接放弃，定位回退
+          bbox 中心（与现状 composite 的几何结果一致）。
+        - topil（bg/最底层图层）：原版未翻译底图，无蒙版/特效，
+          topil 与 composite 像素级一致，省去蒙版/剪贴/混合/特效整条
+          合成管线；topil 失败退化 composite 保持鲁棒。
+        - composite（其余图层）：保留现状——composite() 得到图层自身
+          内容（含蒙版、剪贴图层），背景透明，是图层「实际显示内容」
+          的最佳近似。
 
         提取过程持 io 锁，避免与后台预加载线程并发访问 psd-tools。
         """
 
         def load():
             with self._io_lock:
+                if mode == _LOADER_TOPIL_ONLY:
+                    img = self._layer_topil(node)
+                    if img is None:
+                        return None
+                    return np.asarray(img.convert("RGBA")).copy()
+                if mode == _LOADER_TOPIL:
+                    img = self._layer_topil(node)
+                    if img is not None:
+                        return np.asarray(img.convert("RGBA")).copy()
+                    # topil 拿不到内容（异常场景）→ 退化 composite 保持鲁棒
+                # composite 路径（现状）
                 try:
-                    # composite() 得到图层自身内容（含蒙版、剪贴图层），
-                    # 背景透明。这是图层“实际显示内容”的最佳近似。
                     img = node.composite(force=True)
                     if img is None:
                         img = node.topil()
@@ -200,6 +250,15 @@ class PSDDocument:
                 return np.asarray(img.convert("RGBA")).copy()
 
         return load
+
+    @staticmethod
+    def _layer_topil(node):
+        """topil() 的安全封装：异常或无内容一律返回 None。"""
+        try:
+            img = node.topil()
+        except Exception:
+            return None
+        return img
 
     @property
     def layers(self) -> List[LayerInfo]:
@@ -240,9 +299,12 @@ class PSDDocument:
             if info.name == "bg":
                 if self._has_content(info):
                     return info.id
-        # 2) 最底部具有可用像素内容的图层
+        # 2) 兜底：取迭代序中最后一个有像素内容的图层
+        #    注意 psd-tools 1.18 迭代顺序为自下而上（实证），因此实际取到
+        #    的是最顶部有内容图层；保留现状行为不变（需求 §24 的“最底部”
+        #    语义见 build_layers 的 bottom_pixel_id，如需对齐再评估改动）。
         bottom = None
-        for info in layers:  # 文档顺序 = 从上到下，最后的即最底部
+        for info in layers:
             if self._has_content(info):
                 bottom = info.id
         return bottom
