@@ -91,6 +91,15 @@ _REBIND_WARNING = (
 
 _TEXT_INPUT_TYPES = ("QLineEdit", "QTextEdit", "QPlainTextEdit", "QComboBox")
 
+# 内存回收策略三档预算（文档结构卸载三档一致，见 _schedule_preloads）：
+# - bg_qimage_bytes：预生成 bg QImage 池字节上限（merged 不受限，窗口有界）
+# - lru_bytes：共享图层像素 LRU 预算
+_MEMORY_POLICIES = {
+    "aggressive": {"bg_qimage_bytes": 68 * 1024 * 1024, "lru_bytes": 256 * 1024 * 1024},
+    "balanced": {"bg_qimage_bytes": 512 * 1024 * 1024, "lru_bytes": 512 * 1024 * 1024},
+    "relaxed": {"bg_qimage_bytes": 768 * 1024 * 1024, "lru_bytes": 768 * 1024 * 1024},
+}
+
 
 class MainWindow(QMainWindow):
     def __init__(self, settings_manager: SettingsManager):
@@ -127,6 +136,10 @@ class MainWindow(QMainWindow):
         self._extra_targets: set = set()     # 阶段 B 未完成（背景图/图层）
         self._pending_qimages: Dict[str, Dict[str, object]] = {}  # 后台预热显示图
         self._preload_scheduled = False      # 是否已开始调度（未调度时状态栏留空）
+        # 内存策略状态（_apply_memory_policy 热应用）
+        self._bg_qimage_quota = _MEMORY_POLICIES["balanced"]["bg_qimage_bytes"]
+        self._pinned_bg_key = None           # 当前文档钉住的 LRU 键 (path, layer_id)
+        self._keep_set: set = set()          # 最近一次预加载调度的窗口集合
 
         self._compare = CompareController(self)
         self._compare.display_changed.connect(self._on_compare_display_changed)
@@ -147,6 +160,7 @@ class MainWindow(QMainWindow):
         self._rebuild_shortcuts()
         self._update_save_label(initial=True)
         self._refresh_enabled_state()
+        self._apply_memory_policy()   # 按设置档位初始化 LRU 预算与 bg QImage 配额
 
     # ================================================================= UI
 
@@ -494,6 +508,7 @@ class MainWindow(QMainWindow):
             mode, path,
             recursive=self.settings.recursive_scan,
             force_fresh=force_fresh,
+            layer_cache=self._layer_cache,
         )
         dialog = QProgressDialog("准备…", "取消", 0, 1, self)
         dialog.setWindowTitle("打开任务")
@@ -718,7 +733,7 @@ class MainWindow(QMainWindow):
 
         快速连续切换时，新请求会替换未处理的旧请求（见 PreloadWorker）。
         """
-        doc = self._docs.get(rel)
+        doc = self._ensure_doc(rel)
         if doc is None:
             QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
             return
@@ -775,12 +790,16 @@ class MainWindow(QMainWindow):
         return index
 
     def _open_file_internal(self, rel: str, restore: bool) -> None:
-        """打开 PSD 并选择图层（快路径：图像已缓存，需求 §12、§13）。"""
-        doc = self._docs.get(rel)
+        """打开 PSD 并选择图层（快路径：图像已缓存，需求 §12、§13）。
+
+        文档对象可能已被内存策略驱逐（窗口外），此处惰性重建。
+        """
+        doc = self._ensure_doc(rel)
         if doc is None:
             QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
             return
         self._current_file = rel
+        self._pin_current_bg()
         self.viewer.set_document(doc)
         self.viewer.set_source(SOURCE_MERGED)
         # 注入后台预热好的显示图像（首帧免 QImage 转换，消除切换卡顿）
@@ -822,11 +841,16 @@ class MainWindow(QMainWindow):
     # -- 预加载与异步打开（大 PSD 切换不卡顿） -----------------------------
 
     def _on_preload_done(self, rel: str, kind: str, ok: bool, images=None) -> None:
-        if images:
-            slot = self._pending_qimages.setdefault(rel, {})
+        if images and (rel in self._keep_set or rel == self._current_file):
+            # 被驱逐文档的在途结果不再入池（避免窗口外残留）
+            # 重插字典键保持「最近预生成」序，供配额驱逐按最久未用挑选
+            slot = self._pending_qimages.pop(rel, {})
             for source in ("merged", "bg"):
                 if images.get(source) is not None:
                     slot[source] = images[source]
+            if slot:
+                self._pending_qimages[rel] = slot
+                self._trim_bg_qimages()
         if kind == KIND_PRELOAD:
             # 阶段 A（merged）完成：切换文件已可用
             self._preload_targets.discard(rel)
@@ -836,6 +860,8 @@ class MainWindow(QMainWindow):
             # 阶段 B（背景图/目标图层像素）完成
             self._extra_targets.discard(rel)
             self._update_preload_label()
+            if rel == self._current_file:
+                self._pin_current_bg()   # bg id 此刻已解析，补钉当前页
             return
         # open 结果：统一按单一 pending 标记分派（文件 / 图层），过期结果丢弃
         pending = self._pending_open
@@ -915,6 +941,7 @@ class MainWindow(QMainWindow):
         for j in (i + 1, i + 2, i + 3, i - 1):
             if 0 <= j < len(order):
                 candidates.append(order[j])
+        keep = {rel, *candidates}   # 窗口集合：当前 + 后 3 + 前 1
 
         def target_layer_of(target_rel: str) -> str:
             index = self._choose_layer_index(target_rel, restore=False)
@@ -939,6 +966,7 @@ class MainWindow(QMainWindow):
 
         self._preload_targets = {r for r, _ in merged_jobs}
         self._extra_targets = {r for r, _ in extra_jobs}
+        self._keep_set = keep
         self._preload.set_preloads(merged_jobs, extra_jobs)
         self._preload_scheduled = True
         self._update_preload_label()
@@ -946,7 +974,6 @@ class MainWindow(QMainWindow):
         # 内存策略：释放窗口外文档的 merged/bg 与预热显示图
         #（图层树与 LRU 保留）。release_images 非阻塞：后台仍在
         # 提取的文档自动跳过，下轮再回收。
-        keep = {rel, *candidates}
         for r in order:
             if r in keep:
                 continue
@@ -954,6 +981,9 @@ class MainWindow(QMainWindow):
             if doc is not None:
                 doc.release_images()
             self._pending_qimages.pop(r, None)
+        # 内存策略：窗口外完整文档对象驱逐（psd-tools 结构 ≈ 文件大小，
+        # 是最大的随书增长内存池）。驱逐后重看时 _ensure_doc 惰性重建。
+        self._evict_outside_window(keep)
 
     @staticmethod
     def _all_layers_warm(doc: PSDDocument) -> bool:
@@ -964,6 +994,102 @@ class MainWindow(QMainWindow):
         return doc.all_layers_warmed or all(
             info.has_visual_bounds() for info in doc.layers
         )
+
+    # -- 内存策略（三档热应用 / 驱逐 / 钉住 / bg QImage 池配额） -----------
+
+    def _apply_memory_policy(self) -> None:
+        """按设置档位热应用 LRU 预算与 bg QImage 池配额（无需重启）。"""
+        cfg = (
+            _MEMORY_POLICIES.get(self.settings.memory_policy)
+            or _MEMORY_POLICIES["balanced"]
+        )
+        self._layer_cache.set_max_bytes(cfg["lru_bytes"])
+        self._bg_qimage_quota = cfg["bg_qimage_bytes"]
+        self._trim_bg_qimages()
+
+    def _trim_bg_qimages(self) -> None:
+        """bg QImage 池超配额时按「最久未预生成」驱逐（当前页除外）。
+
+        merged QImage 不参与配额（窗口有界，且是切页关键路径）。
+        """
+        total = 0
+        for slot in self._pending_qimages.values():
+            bg = slot.get("bg")
+            if bg is not None:
+                total += int(bg.sizeInBytes())
+        if total <= self._bg_qimage_quota:
+            return
+        for rel in list(self._pending_qimages):   # 插入序 = 最旧在前
+            if rel == self._current_file:
+                continue
+            slot = self._pending_qimages.get(rel)
+            if slot is None or slot.get("bg") is None:
+                continue
+            total -= int(slot["bg"].sizeInBytes())
+            del slot["bg"]
+            if not slot:
+                self._pending_qimages.pop(rel, None)
+            if total <= self._bg_qimage_quota:
+                return
+
+    def _pin_current_bg(self) -> None:
+        """钉住当前文档的 bg 条目（LRU 淘汰时跳过），解钉旧页。
+
+        bg id 未解析（None）时跳过：LRU 条目尚不存在，等阶段 B
+        完成后由 _on_preload_done 补钉；钉住集与条目存在性解耦。
+        """
+        if self._pinned_bg_key is not None:
+            self._layer_cache.unpin(*self._pinned_bg_key)
+            self._pinned_bg_key = None
+        doc = self.current_doc
+        if doc is None:
+            return
+        bg_id = doc.resolved_bg_layer_id()
+        if bg_id:
+            key = (str(doc.path), bg_id)
+            self._layer_cache.pin(*key)
+            self._pinned_bg_key = key
+
+    def _current_keep_set(self) -> set:
+        """当前窗口集合：当前页 + 后 3 + 前 1（与预加载邻域一致）。"""
+        if self.task is None or not self._current_file:
+            return set()
+        order = [r.relative_path for r in self.task.files]
+        try:
+            i = order.index(self._current_file)
+        except ValueError:
+            return {self._current_file}
+        return {
+            order[j] for j in (i, i + 1, i + 2, i + 3, i - 1)
+            if 0 <= j < len(order)
+        }
+
+    def _evict_outside_window(self, keep: set) -> None:
+        """驱逐窗口外的完整文档对象（psd-tools 结构 ≈ 文件大小，
+        是唯一随书本页数线性增长的内存池）。
+
+        保护规则：当前页 / 在途打开目标 / io 锁被预加载线程占用
+        的文档跳过本轮（下次调度再试）；监制进度数据（task 模型
+        与图层 id/名称缓存）与文档对象解耦，驱逐不影响进度。
+        """
+        for rel in list(self._docs):
+            if rel in keep or rel == self._current_file:
+                continue
+            pending = self._pending_open
+            if pending is not None and pending[0] == rel:
+                continue
+            doc = self._docs.get(rel)
+            if doc is None:
+                continue
+            # 非阻塞拿锁：后台正在提取则跳过，避免 UI 卡在锁上
+            if not doc._io_lock.acquire(blocking=False):
+                continue
+            try:
+                self._docs.pop(rel, None)
+                self._pending_qimages.pop(rel, None)
+                doc.release()   # 释放 merged/bg + 按路径逐出共享 LRU 条目
+            finally:
+                doc._io_lock.release()
 
     def _update_preload_label(self) -> None:
         """两阶段独立显示：图像预加载（A）在左、图层预热（B）在右。"""
@@ -1434,7 +1560,8 @@ class MainWindow(QMainWindow):
                 self.task,
                 self._layer_ids_by_file,
                 out_path,
-                image_provider=lambda rel: self._docs.get(rel),
+                # 文档对象可能已被内存策略驱逐：按需惰性重建
+                image_provider=lambda rel: self._ensure_doc(rel),
             )
         except Exception:
             log.exception("生成返修单失败")
@@ -1443,6 +1570,8 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
+        # 报告按需重开的文档对象及时回收，避免驻留
+        self._evict_outside_window(self._current_keep_set())
 
         QMessageBox.information(self, "生成返修单", f"已生成：\n{out_path}")
         log.info("返修单已生成：%s", out_path)
@@ -1456,6 +1585,7 @@ class MainWindow(QMainWindow):
             self.settings_manager.save()
             self._rebuild_shortcuts()
             self._apply_compare_settings()
+            self._apply_memory_policy()   # 内存策略档位热应用
             self.viewer.set_wheel_mode(self.settings.wheel_mode)
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))

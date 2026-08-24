@@ -82,6 +82,13 @@ DEFAULT_COMPARE_MODE = "auto"   # "auto" 自动切换 / "manual" 手动切换
 # 触控板双指滚不受此设置影响，恒为双轴平移。
 DEFAULT_WHEEL_MODE = "pan"      # "pan" 上下移动 / "zoom" 缩放
 
+# 内存回收策略档位：宽松 / 平衡 / 激进。
+# 各档预算（bg QImage 池字节上限、图层像素 LRU 字节上限）在
+# mangaproof/ui/main_window.py 的 _MEMORY_POLICIES 中定义；
+# 文档结构卸载（窗口外驱逐）三档一致。
+MEMORY_POLICIES: tuple[str, ...] = ("relaxed", "balanced", "aggressive")
+DEFAULT_MEMORY_POLICY = "balanced"
+
 
 @dataclass
 class Settings:
@@ -101,6 +108,8 @@ class Settings:
     )
     custom_comment_key: str = "Ctrl+Return"
     recent_paths: list[str] = field(default_factory=list)
+    # 内存回收策略：aggressive（激进）/ balanced（平衡）/ relaxed（宽松）
+    memory_policy: str = DEFAULT_MEMORY_POLICY
 
     # -- 派生查询 ----------------------------------------------------------
 
@@ -202,6 +211,9 @@ class SettingsManager:
         if isinstance(recent, list):
             s.recent_paths = [str(p) for p in recent if isinstance(p, str)][:10]
 
+        policy = raw.get("memory_policy", DEFAULT_MEMORY_POLICY)
+        s.memory_policy = policy if policy in MEMORY_POLICIES else DEFAULT_MEMORY_POLICY
+
         return s
 
     def save(self) -> None:
@@ -221,6 +233,7 @@ class SettingsManager:
                     "keybindings": self.settings.keybindings,
                     "issue_types": self.settings.issue_types,
                     "recent_paths": self.settings.recent_paths,
+                    "memory_policy": self.settings.memory_policy,
                 }
                 tmp = self._path.with_suffix(".json.tmp")
                 with open(tmp, "w", encoding="utf-8") as f:

@@ -38,6 +38,7 @@ from mangaproof.config.settings import (
     DEFAULT_DISPLAY_RATIO,
     DEFAULT_ISSUE_TYPES,
     DEFAULT_KEYBINDINGS,
+    DEFAULT_MEMORY_POLICY,
     DEFAULT_WHEEL_MODE,
     DISPLAY_RATIOS,
     Settings,
@@ -232,6 +233,19 @@ class SettingsDialog(QDialog):
         if _sys.platform != "win32":
             self.console_check.setEnabled(False)
         task_form.addRow(self.console_check)
+
+        # 内存回收策略（三档：宽松/平衡/激进），运行时热应用
+        self.memory_policy_combo = QComboBox()
+        self.memory_policy_combo.addItem("宽松（LRU 768MB，bg 预生成池 768MB）", "relaxed")
+        self.memory_policy_combo.addItem("平衡（LRU 512MB，bg 预生成池 512MB）", "balanced")
+        self.memory_policy_combo.addItem("激进（LRU 256MB，bg 预生成仅留 2 张）", "aggressive")
+        policy_idx = self.memory_policy_combo.findData(settings.memory_policy)
+        self.memory_policy_combo.setCurrentIndex(max(0, policy_idx))
+        self.memory_policy_combo.setToolTip(
+            "内存占用与缓存慷慨度的平衡档位，切换后立即生效，无需重启。\n"
+            "三档均会驱逐窗口外文档结构（内存与书本页数无关）。"
+        )
+        task_form.addRow("内存策略：", self.memory_policy_combo)
         layout.addWidget(task_group)
 
         # ---- 返修单 ----
@@ -310,6 +324,8 @@ class SettingsDialog(QDialog):
         self.console_check.setChecked(True)
         self.pdf_check.setChecked(True)
         self.report_name_edit.clear()
+        idx = self.memory_policy_combo.findData(DEFAULT_MEMORY_POLICY)
+        self.memory_policy_combo.setCurrentIndex(max(0, idx))
         # 快捷键同样复位：记录"应用默认"意图，OK 时写回默认值
         self._kb_dialog = None
         self._kb_reset_defaults = True
@@ -323,6 +339,7 @@ class SettingsDialog(QDialog):
         settings.generate_pdf_on_complete = self.pdf_check.isChecked()
         settings.report_name = self.report_name_edit.text().strip()
         settings.hide_console = self.console_check.isChecked()
+        settings.memory_policy = str(self.memory_policy_combo.currentData())
 
         if self._kb_reset_defaults:
             settings.keybindings = dict(DEFAULT_KEYBINDINGS)

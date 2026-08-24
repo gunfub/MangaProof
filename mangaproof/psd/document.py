@@ -364,6 +364,14 @@ class PSDDocument:
             self._bg_layer_id = self._select_bg_layer()
         return self._bg_layer_id
 
+    def resolved_bg_layer_id(self) -> Optional[str]:
+        """已解析的背景图层 id（未解析返回 None，不触发提取）。
+
+        供内存策略钉住逻辑使用：只在 bg 已确定时钉住 LRU 条目，
+        避免在 UI 线程触发背景探测提取。
+        """
+        return self._bg_layer_id
+
     def _select_bg_layer(self) -> Optional[str]:
         layers = self.layers
         # 1) 名称严格等于 "bg"（大小写敏感）
@@ -422,12 +430,15 @@ class PSDDocument:
     # -- 资源 --------------------------------------------------------------
 
     def release(self) -> None:
-        """释放缓存（PSD 句柄由 psd-tools 惰性管理，无需显式关闭）。"""
+        """释放本档缓存（PSD 句柄由 psd-tools 惰性管理，无需显式关闭）。
+
+        只逐出本档在共享 LRU 中的条目（含钉住项），不动其他文档。
+        """
         self._merged_np = None
         self._merged_error = None
         self._bg = None
         if self._layer_cache is not None:
-            self._layer_cache.clear()
+            self._layer_cache.drop(str(self.path))
 
 
 def pil_to_rgba_np(pil: Image.Image) -> np.ndarray:

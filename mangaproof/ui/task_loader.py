@@ -70,6 +70,7 @@ class TaskLoadWorker(QThread):
         path: Path,
         recursive: bool = False,
         force_fresh: bool = False,  # 放弃旧进度，强制新建任务
+        layer_cache=None,           # 共享图层像素 LRU（内存策略统一预算）
         parent=None,
     ):
         super().__init__(parent)
@@ -77,6 +78,7 @@ class TaskLoadWorker(QThread):
         self._path = Path(path)
         self._recursive = recursive
         self._force_fresh = force_fresh
+        self._layer_cache = layer_cache
         self._cancel = False
 
     def request_cancel(self) -> None:
@@ -155,22 +157,36 @@ class TaskLoadWorker(QThread):
         return self._parse(task, path.parent, rebind=False)
 
     def _parse(self, task: TaskState, base_dir: Path, rebind: bool) -> TaskLoadResult:
-        """逐个解析 PSD 图层树（每个 PSD 只解析一次，需求 §59）。"""
+        """逐个解析 PSD 图层树（每个 PSD 只解析一次，需求 §59）。
+
+        流式扫描：解析一页 → 存 ids/names → 窗口外页面立即释放，
+        只保留「当前页 + 后 3 + 前 1」的完整文档对象。这样打开大书时
+        内存峰值 O(窗口) 而非 O(全书)（文档结构 ≈ 文件大小）。
+        """
         layer_ids: Dict[str, List[str]] = {}
         layer_names: Dict[str, List[str]] = {}
         docs: Dict[str, object] = {}
         errors: List[str] = []
         total = len(task.files)
+        keep = _window_set(task)
         for i, record in enumerate(task.files):
             rel = record.relative_path
             self._cb(i, total, f"解析 PSD（{i + 1}/{total}）：{record.file_name}")
             try:
-                doc = PSDDocument(base_dir / rel)
+                doc = PSDDocument(
+                    base_dir / rel,
+                    layer_cache=self._layer_cache,
+                )
                 ids = [info.id for info in doc.layers]
                 names = [info.name for info in doc.layers]
                 layer_ids[rel] = ids
                 layer_names[rel] = names
-                docs[rel] = doc
+                if rel in keep:
+                    docs[rel] = doc
+                else:
+                    # 窗口外：只留 id/name 列表（监制进度数据源），
+                    # 文档对象立即释放，重看时按需重建。
+                    doc.release()
             except Exception as exc:
                 log.warning("解析失败 %s：%s", rel, exc)
                 errors.append(f"{rel}：无法读取该 PSD 文件")
@@ -185,3 +201,18 @@ class TaskLoadWorker(QThread):
             rebind=rebind,
             file_errors=errors,
         )
+
+
+def _window_set(task: TaskState) -> set:
+    """任务打开时保留完整文档对象的窗口集合（当前页 + 后 3 + 前 1）。
+
+    与 MainWindow._schedule_preloads 的邻域策略一致；当前页无效时
+    退化为「第一页 + 后 3」。
+    """
+    rels = [r.relative_path for r in task.files]
+    try:
+        i = rels.index(task.current_file)
+    except ValueError:
+        i = 0
+    keep = {rels[j] for j in (i, i + 1, i + 2, i + 3, i - 1) if 0 <= j < len(rels)}
+    return keep or {rels[0]} if rels else set()
