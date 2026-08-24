@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
+from psd_tools.constants import BlendMode, ChannelID
 
 from mangaproof.psd import loader
 from mangaproof.psd.image_cache import LayerImageCache
@@ -198,6 +199,7 @@ class PSDDocument:
                 image_mode=mode,
                 parent_id=parent_id,
                 image_loader=self._make_image_loader(node, mode),
+                bounds_loader=self._make_bounds_loader(node, mode),
             )
             infos.append(info)
 
@@ -260,6 +262,76 @@ class PSDDocument:
             return None
         return img
 
+    @staticmethod
+    def _is_flat_layer(node) -> bool:
+        """图层是否「平坦」：无蒙版/矢量蒙版/特效/剪贴关系，
+        NORMAL 混合且完全不透明。
+
+        平坦图层的 alpha 通道即有效 alpha，视觉边界可走 alpha
+        直取快路径（跳过 composite 合成管线/ICC/RGBA 转换）。
+        任何元数据异常都保守返回 False（回退完整提取）。
+        """
+        try:
+            if getattr(node, "blend_mode", None) != BlendMode.NORMAL:
+                return False
+            if int(getattr(node, "opacity", 0)) != 255:
+                return False
+            if node.has_mask() or node.has_vector_mask() or node.has_effects():
+                return False
+            # 剪贴层：有效 alpha 由基底图层决定，通道 alpha 不准确
+            if bool(getattr(node, "clipping", False)):
+                return False
+            # 存在剪贴关系的图层组保守回退（罕见场景，正确性优先）
+            if getattr(node, "clip_layers", None):
+                return False
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _alpha_fast(node) -> Optional[np.ndarray]:
+        """直接解码图层 alpha 通道（8/16 位），返回 (h, w) 掩码数组。
+
+        与 psd-tools numpy_io.get_layer_data 相同的通道定位方式：
+        channel_info.id == TRANSPARENCY_MASK 的通道。任何异常或
+        非常规位深返回 None（调用方回退完整提取）。
+        """
+        try:
+            width, height = node.width, node.height
+            depth, version = node._psd.depth, node._psd.version
+            iterator = zip(node._record.channel_info, node._channels)
+            for info, data in iterator:
+                if getattr(info, "id", None) != ChannelID.TRANSPARENCY_MASK:
+                    continue
+                if not getattr(data, "data", b""):
+                    continue
+                raw = data.get_data(width, height, depth, version)
+                if depth == 8:
+                    return np.frombuffer(raw, dtype=">u1").reshape(height, width)
+                if depth == 16:
+                    return np.frombuffer(raw, dtype=">u2").reshape(height, width)
+                return None
+            return None
+        except Exception:
+            return None
+
+    def _make_bounds_loader(self, node, mode: str = _LOADER_COMPOSITE):
+        """视觉边界专用加载器：平坦图层走 alpha 直取快路径，其余 None。
+
+        type 图层（topil_only）本身约 10ms，保持原路径；
+        提取过程持 io 锁，与像素提取一致。
+        """
+        if mode not in (_LOADER_TOPIL, _LOADER_COMPOSITE):
+            return None
+        if not self._is_flat_layer(node):
+            return None
+
+        def load_alpha():
+            with self._io_lock:
+                return self._alpha_fast(node)
+
+        return load_alpha
+
     @property
     def layers(self) -> List[LayerInfo]:
         if self._layers is None:
@@ -308,12 +380,12 @@ class PSDDocument:
                 return info.id
         return None
 
-    @staticmethod
-    def _has_content(info: LayerInfo) -> bool:
+    def _has_content(self, info: LayerInfo) -> bool:
         if info.bounds[2] <= info.bounds[0] or info.bounds[3] <= info.bounds[1]:
             return False
         try:
-            img = info.load_image()
+            # 走 LRU：探测提取的像素直接入缓存，bg_image() 无需二次提取
+            img = self.layer_image(info.id)
         except Exception:
             return False
         return img is not None and img.size > 0

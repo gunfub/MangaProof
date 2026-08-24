@@ -136,24 +136,37 @@ class PreloadWorker(QThread):
 
     @staticmethod
     def _warm_layer(doc, layer_id: str) -> None:
-        """预热目标图层像素与视觉边界（定位/缩放免等待）。"""
+        """预热目标图层的视觉边界（定位/缩放免等待）。
+
+        平坦图层走 alpha 直取快路径（像素不进 LRU，切换路径
+        不消费图层像素）；其余图层提取一次、像素入 LRU 并复用
+        同一份像素算边界（不再二次提取）。
+        """
         if not layer_id:
             return
         info = doc.layer_by_id(layer_id)
         if info is None:
             return
-        if doc.layer_image(layer_id) is not None:
+        if info.bounds_loader is not None:
             info.visual_bounds()
+            return
+        img = doc.layer_image(layer_id)
+        if img is not None:
+            info.visual_bounds(image=img)
 
     @staticmethod
     def _warm_all_layers(doc) -> None:
-        """预热文档全部图层的视觉边界（层像素走 LRU，不常驻）。
+        """预热文档全部图层的视觉边界（平坦图层走 alpha 快路径）。
 
         无论个别图层是否提取失败，结束都标记完成，避免反复重试。
         """
         for info in doc.layers:
             if info.has_visual_bounds():
                 continue
-            if doc.layer_image(info.id) is not None:
+            if info.bounds_loader is not None:
                 info.visual_bounds()
+                continue
+            img = doc.layer_image(info.id)
+            if img is not None:
+                info.visual_bounds(image=img)
         doc.mark_all_layers_warmed()
