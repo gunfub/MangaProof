@@ -19,6 +19,7 @@ logs/
 AI-rules/
 MangaProof_产品开发需求_v1.0.md
 美术素材原文件/
+local_samples/
 
 # 测试产物
 tests/data/out/
