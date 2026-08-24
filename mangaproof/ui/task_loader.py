@@ -204,15 +204,19 @@ class TaskLoadWorker(QThread):
 
 
 def _window_set(task: TaskState) -> set:
-    """任务打开时保留完整文档对象的窗口集合（当前页 + 后 3 + 前 1）。
+    """任务打开时保留完整文档对象的窗口集合。
 
-    与 MainWindow._schedule_preloads 的邻域策略一致；当前页无效时
-    退化为「第一页 + 后 3」。
+    与 MainWindow 驱逐窗口一致：当前页 + 后 3 + 前 1（预加载邻域）
+    + 前 2（回看松弛）；当前页无效时退化为「第一页 + 后 3」。
     """
     rels = [r.relative_path for r in task.files]
     try:
         i = rels.index(task.current_file)
     except ValueError:
         i = 0
-    keep = {rels[j] for j in (i, i + 1, i + 2, i + 3, i - 1) if 0 <= j < len(rels)}
+    keep = {
+        rels[j]
+        for j in (i, i + 1, i + 2, i + 3, i - 1, i - 2)
+        if 0 <= j < len(rels)
+    }
     return keep or {rels[0]} if rels else set()

@@ -73,8 +73,42 @@ def test_streaming_open_keeps_only_window_docs(window, tmp_path):
     # 进度数据全量（监制进度不依赖文档对象）
     assert len(window._layer_ids_by_file) == 8
     assert len(window._layer_names_by_file) == 8
-    # 文档对象窗口有界（当前 + 后 3 + 前 1 = 最多 5 个）
-    assert len(window._docs) <= 5
+    # 文档对象窗口有界（当前 + 后 3 + 前 1 + 前 2 松弛 = 最多 6 个）
+    assert len(window._docs) <= 6
+
+
+def test_neighbor_preload_coverage_forward_chain(window, tmp_path):
+    """前向翻页链上每个新邻域文档必须入队预加载（底栏「完成」= 真就绪）。
+
+    回归：流式加载后 _docs 缺失邻域文档时，_schedule_preloads 需惰性
+    创建并排队，否则切页永远走慢路径重新提取。
+    """
+    folder = _make_folder(tmp_path, 8)
+    _open_task(window, folder)
+    _wait(window, lambda: window._preload_scheduled)
+    # 等队列消化：所有目标完成（阶段 A + 阶段 B）
+    _wait(
+        window,
+        lambda: not window._preload_targets and not window._extra_targets,
+    )
+    for rel in ("p02.psd", "p03.psd", "p04.psd"):
+        doc = window._docs.get(rel)
+        assert doc is not None, f"邻域文档 {rel} 应被惰性创建"
+        assert doc.has_merged(), f"邻域 {rel} merged 应已预加载"
+
+    # 逐页前向切换：下一邻居应已就绪（快速路径不弹重载）
+    for nxt in ("p02.psd", "p03.psd", "p04.psd", "p05.psd"):
+        window._request_open_file(nxt, restore=False)
+        _wait(window, lambda n=nxt: window._current_file == n)
+        app.processEvents()
+        # 切换完成后再等一轮调度：新邻域 p06 入队并完成
+        _wait(
+            window,
+            lambda: not window._preload_targets and not window._extra_targets,
+        )
+    assert window._current_file == "p05.psd"
+    doc6 = window._docs.get("p06.psd")
+    assert doc6 is not None and doc6.has_merged(), "前向链末端邻域应已就绪"
 
 
 def test_eviction_reopen_preserves_progress(window, tmp_path):

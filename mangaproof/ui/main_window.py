@@ -941,7 +941,11 @@ class MainWindow(QMainWindow):
         for j in (i + 1, i + 2, i + 3, i - 1):
             if 0 <= j < len(order):
                 candidates.append(order[j])
-        keep = {rel, *candidates}   # 窗口集合：当前 + 后 3 + 前 1
+        # 驱逐保留窗口：预加载邻域（当前+后3+前1）+ 前 2 回看松弛
+        keep = {rel, *candidates}
+        for j in (i - 2,):
+            if 0 <= j < len(order):
+                keep.add(order[j])
 
         def target_layer_of(target_rel: str) -> str:
             index = self._choose_layer_index(target_rel, restore=False)
@@ -954,11 +958,14 @@ class MainWindow(QMainWindow):
         extra_jobs: List[Tuple[str, str]] = []
         # 当前文件与邻域文件：后台预热背景图 + 全部图层的视觉边界
         #（任意文件的任意 ←→ 图层切换免等待）；已完成的部分跳过，
-        # 避免重复排队
+        # 避免重复排队。流式加载/驱逐后窗口内邻域文档可能缺失，
+        # 此处惰性创建保证预加载覆盖（否则新邻居永不入队，切换必走慢路径）。
         for c in [rel, *candidates]:
             doc = self._docs.get(c)
             if doc is None:
-                continue
+                doc = self._ensure_doc(c)
+                if doc is None:
+                    continue
             if not doc.has_merged():
                 merged_jobs.append((c, target_layer_of(c)))
             if not doc.has_bg() or not self._all_layers_warm(doc):
@@ -1051,7 +1058,7 @@ class MainWindow(QMainWindow):
             self._pinned_bg_key = key
 
     def _current_keep_set(self) -> set:
-        """当前窗口集合：当前页 + 后 3 + 前 1（与预加载邻域一致）。"""
+        """驱逐保留窗口：当前页 + 后 3 + 前 1（预加载邻域）+ 前 2 松弛。"""
         if self.task is None or not self._current_file:
             return set()
         order = [r.relative_path for r in self.task.files]
@@ -1060,7 +1067,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             return {self._current_file}
         return {
-            order[j] for j in (i, i + 1, i + 2, i + 3, i - 1)
+            order[j] for j in (i, i + 1, i + 2, i + 3, i - 1, i - 2)
             if 0 <= j < len(order)
         }
 

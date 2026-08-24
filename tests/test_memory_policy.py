@@ -145,8 +145,8 @@ def _task(rels, current):
 def test_window_set_keeps_current_and_neighbors():
     task = _task([f"p{i:02d}.psd" for i in range(10)], "p04.psd")
     keep = _window_set(task)
-    # 当前(4) + 后3(5,6,7) + 前1(3)
-    assert keep == {"p03.psd", "p04.psd", "p05.psd", "p06.psd", "p07.psd"}
+    # 当前(4) + 后3(5,6,7) + 前1(3) + 松弛前2(2)
+    assert keep == {"p02.psd", "p03.psd", "p04.psd", "p05.psd", "p06.psd", "p07.psd"}
 
 
 def test_window_set_current_invalid_falls_back_first_page():
