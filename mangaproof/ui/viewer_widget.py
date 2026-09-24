@@ -405,7 +405,11 @@ class ViewerWidget(QWidget):
                 # Mac 的 NativeGesture Zoom 会返回相对缩放增量，比如 0.01 等
                 # 我们把它转换为 factor（例如 1.01）传给相机的 zoom_around
                 factor = 1.0 + event.value()
-                pos = event.position()
+
+                # 修改此处的坐标获取：先取屏幕全局坐标，再映射为画布内部局部坐标
+                global_pos = event.globalPosition()
+                pos = self.mapFromGlobal(global_pos)
+
                 self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
                 self.camera_changed.emit()
                 self.update()
