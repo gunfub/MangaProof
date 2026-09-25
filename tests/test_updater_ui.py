@@ -229,9 +229,25 @@ def test_launch_notice_text_keeps_the_fixed_wording():
     assert text.endswith("缺少启动参数：--package"), "诊断行追加在末尾"
 
 
-def test_show_launch_notice_uses_the_native_messagebox(monkeypatch):
+def test_show_launch_notice_uses_the_dark_window(monkeypatch):
+    """首选是深色提示窗（与安装器主窗口同一套视觉，§11.2），不是系统弹窗。"""
+    calls: list[str] = []
+    monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: None)
+    monkeypatch.setattr(ui, "_show_dark_notice", lambda detail="": calls.append(detail))
+    monkeypatch.setattr(ui, "_show_native_message", pytest.fail)  # 不许走兜底
+
+    assert ui.show_launch_notice("缺少启动参数：--token") is True
+    assert calls == ["缺少启动参数：--token"]
+
+
+def test_show_launch_notice_falls_back_to_the_native_dialog(monkeypatch):
+    """深色窗建不起来（Tk 主题异常等）→ 退回系统提示框，仍然要提示到人。"""
+    def boom(detail: str = "") -> None:
+        raise RuntimeError("tcl error")
+
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: None)
+    monkeypatch.setattr(ui, "_show_dark_notice", boom)
     monkeypatch.setattr(ui, "_show_native_message",
                         lambda title, text: calls.append((title, text)))
 
@@ -243,7 +259,8 @@ def test_show_launch_notice_uses_the_native_messagebox(monkeypatch):
 
 def test_show_launch_notice_degrades_without_a_graphical_session(monkeypatch, capsys):
     monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: "没有图形会话")
-    monkeypatch.setattr(ui, "_show_native_message", pytest.fail)  # 不许尝试开窗
+    monkeypatch.setattr(ui, "_show_dark_notice", pytest.fail)    # 不许尝试开窗
+    monkeypatch.setattr(ui, "_show_native_message", pytest.fail)
 
     assert ui.show_launch_notice() is False
     err = capsys.readouterr().err
@@ -252,11 +269,12 @@ def test_show_launch_notice_degrades_without_a_graphical_session(monkeypatch, ca
 
 
 def test_show_launch_notice_survives_a_failing_dialog(monkeypatch, capsys):
-    """提示框自己炸了也不能把异常抛给调用方（宁可少一句提示，不能崩）。"""
-    def boom(title: str, text: str) -> None:
+    """两级窗口都炸了也不能把异常抛给调用方（宁可少一句提示，不能崩）。"""
+    def boom(*_args, **_kwargs) -> None:
         raise RuntimeError("no window manager")
 
     monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: None)
+    monkeypatch.setattr(ui, "_show_dark_notice", boom)
     monkeypatch.setattr(ui, "_show_native_message", boom)
 
     assert ui.show_launch_notice("细节") is False
@@ -265,6 +283,7 @@ def test_show_launch_notice_survives_a_failing_dialog(monkeypatch, capsys):
 
 def test_show_launch_notice_respects_cli(monkeypatch, capsys):
     """``--cli`` = 显式不要 GUI：只写命令行，绝不弹窗。"""
+    monkeypatch.setattr(ui, "_show_dark_notice", pytest.fail)
     monkeypatch.setattr(ui, "_show_native_message", pytest.fail)
 
     assert ui.show_launch_notice("细节", gui=False) is False
@@ -351,3 +370,123 @@ def test_pick_font_family_survives_a_failing_system_lookup(monkeypatch):
     _fake_tkinter_font(monkeypatch, boom)
 
     assert ui.pick_font_family(object()) is None
+
+
+class _FakeWidget:
+    """假 Tk 控件：记录构造参数与 pack 参数，供"深色提示窗长什么样"的断言使用。"""
+
+    def __init__(self, master=None, **kwargs) -> None:
+        self.master = master
+        self.kwargs = dict(kwargs)
+        self.pack_kwargs: dict = {}
+        self.destroyed = False
+        WIDGETS.append(self)
+
+    def pack(self, **kwargs) -> None:
+        self.pack_kwargs = kwargs
+
+    def configure(self, **kwargs) -> None:
+        self.kwargs.update(kwargs)
+
+    config = configure
+
+    def bind(self, sequence, func=None, **kw) -> None:
+        self.bound = getattr(self, "bound", []) + [sequence]
+
+    def protocol(self, name, func=None) -> None:
+        self.protocols = getattr(self, "protocols", {})
+        self.protocols[name] = func
+
+    def title(self, text) -> None:
+        self.title_text = text
+
+    def resizable(self, *_args) -> None: ...
+    def focus_set(self) -> None: ...
+    def update_idletasks(self) -> None: ...
+    def lift(self) -> None: ...
+    def attributes(self, *_args) -> None: ...
+    def geometry(self, spec) -> None:
+        self.geometry_spec = spec
+
+    def winfo_reqwidth(self) -> int:
+        return 320
+
+    def winfo_reqheight(self) -> int:
+        return 180
+
+    def winfo_screenwidth(self) -> int:
+        return 1920
+
+    def winfo_screenheight(self) -> int:
+        return 1080
+
+    def mainloop(self) -> None:      # 立刻返回：单测不许真进事件循环
+        MAINLOOP.append(True)
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+WIDGETS: list[_FakeWidget] = []
+MAINLOOP: list[bool] = []
+
+
+def _install_fake_tk(monkeypatch) -> None:
+    WIDGETS.clear()
+    MAINLOOP.clear()
+    module = types.ModuleType("tkinter")
+    module.Tk = _FakeWidget
+    module.Frame = _FakeWidget
+    module.Label = _FakeWidget
+    module.Button = _FakeWidget
+    monkeypatch.setitem(sys.modules, "tkinter", module)
+
+
+def test_dark_notice_builds_a_styled_window(monkeypatch):
+    """深色提示窗：§11.2 的调色板 + 右下角按钮 + 一次性销毁（不许留空白窗口）。"""
+    _install_fake_tk(monkeypatch)
+    monkeypatch.setattr(ui, "pick_font_family", lambda root: "MiSans")
+
+    ui._show_dark_notice("缺少启动参数：--package")
+
+    root = WIDGETS[0]
+    assert root.title_text == ui.LAUNCH_NOTICE_TITLE
+    assert root.kwargs["bg"] == ui.COLOR_BG_MAIN, "窗口底色必须是主题主背景"
+    assert root.geometry_spec.endswith("+800+") or "+" in root.geometry_spec
+
+    texts = [w.kwargs.get("text") for w in WIDGETS]
+    assert ui.LAUNCH_NOTICE_BODY in texts
+    assert ui.LAUNCH_NOTICE_HINT in texts
+    assert "缺少启动参数：--package" in texts
+
+    detail = next(w for w in WIDGETS if w.kwargs.get("text") == "缺少启动参数：--package")
+    assert detail.kwargs["fg"] == ui.COLOR_WARN, "诊断行要用警告色"
+
+    button = next(w for w in WIDGETS if w.kwargs.get("text") == ui.LAUNCH_NOTICE_BUTTON)
+    assert button.kwargs["bg"] == ui.COLOR_BG_WIDGET
+    assert button.kwargs["activebackground"] == ui.COLOR_BG_SELECTED
+    assert button.pack_kwargs.get("side") == "right", "主按钮在右下角（§11.2 版式）"
+    assert button.kwargs["font"] == ("MiSans", 10), "用与主窗口同一份字体"
+
+    header = next(w for w in WIDGETS if w.kwargs.get("text") == ui.LAUNCH_NOTICE_TITLE
+                  and w is not root)
+    assert header.kwargs["font"] == ("MiSans", 14, "bold")
+
+    assert root.protocols.get("WM_DELETE_WINDOW") is not None
+    assert "<Escape>" in getattr(button, "bound", []) or root.bound == ["<Escape>", "<Return>"]
+    assert MAINLOOP == [True], "必须真的进事件循环等用户确认"
+    assert root.destroyed is True, "确认后必须销毁窗口"
+
+
+def test_dark_notice_omits_the_diagnostic_line_without_a_detail(monkeypatch):
+    """没有诊断行时不留空标签（版式不许出现多余空隙）。"""
+    _install_fake_tk(monkeypatch)
+    monkeypatch.setattr(ui, "pick_font_family", lambda root: None)
+
+    ui._show_dark_notice()
+
+    assert not any(
+        isinstance(w.kwargs.get("text"), str) and w.kwargs["text"].startswith("缺少")
+        for w in WIDGETS
+    )
+    assert any(w.kwargs.get("text") == ui.LAUNCH_NOTICE_BUTTON for w in WIDGETS)

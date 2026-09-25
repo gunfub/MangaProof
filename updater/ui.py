@@ -287,14 +287,24 @@ def _reset_tk_cache() -> None:  # 单测用
 # 直接启动提示（需求 §83）
 # --------------------------------------------------------------------------- #
 
-#: 提示框标题（§83：直接双击 / 缺参启动的唯一提示出口）
+#: 提示窗口标题（§83：直接双击 / 缺参启动的唯一提示出口）
 LAUNCH_NOTICE_TITLE = "无法直接启动"
 
-#: 提示正文（§83 固化的文案：说清"谁能调用"与"要更新该怎么做"）
-LAUNCH_NOTICE_TEXT = (
-    "此程序不能直接打开，只能由 MangaProof 主程序的「更新」功能自动调用。\n\n"
-    "如需更新：打开 MangaProof →「更新」→「保存并检查更新」，按提示完成。"
-)
+#: 正文（说清"谁能调用"）
+LAUNCH_NOTICE_BODY = "此程序不能直接打开，只能由 MangaProof 主程序的「更新」功能自动调用。"
+
+#: 操作提示（说清"要更新该怎么做"）
+LAUNCH_NOTICE_HINT = "如需更新：打开 MangaProof →「更新」→「保存并检查更新」，按提示完成。"
+
+#: 唯一的按钮（Esc / 回车 / 关窗同义）
+LAUNCH_NOTICE_BUTTON = "退出"
+
+#: 纯文本版（控制台降级与日志用；与窗口里的三段文案保持一致）
+LAUNCH_NOTICE_TEXT = f"{LAUNCH_NOTICE_BODY}\n\n{LAUNCH_NOTICE_HINT}"
+
+#: 提示窗口宽度（正文换行宽度按它算）与最小高度
+NOTICE_WIDTH = 470
+NOTICE_MIN_HEIGHT = 200
 
 
 def launch_notice_text(detail: str = "") -> str:
@@ -317,11 +327,101 @@ def _write_stderr(text: str) -> None:
         pass
 
 
-def _show_native_message(title: str, text: str) -> None:
-    """弹一个系统原生提示框；单测用替换本函数的方式避免真的开窗口。
+def _show_dark_notice(detail: str = "") -> None:
+    """§83 的深色提示窗：与安装器主窗口同一套调色板 / 字体 / 按钮样式。
 
-    刻意**不**套 §11.2 的深色调色板：原生样式让人一眼看出"这不是更新进度窗口"，
-    这一点比视觉统一更重要（§83 明确记为规格例外）。
+    刻意做成"主窗口的缩小版"而不是系统原生弹窗：直接双击的人看到的应该是
+    MangaProof 自己的界面语言（§11.2），而不是一个和本程序无关的系统框。
+    窗口用一次性 ``Tk()``，确认后销毁；调用方保证有图形会话。
+    """
+    import tkinter as tk
+
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    try:
+        root.title(LAUNCH_NOTICE_TITLE)
+        root.configure(bg=COLOR_BG_MAIN)
+        root.resizable(False, False)
+        family = pick_font_family(root)      # 随包 MiSans（拿不到就用 Tk 默认字体）
+
+        def font(size: int = 10, bold: bool = False):
+            if not family:
+                return None
+            return (family, size, "bold") if bold else (family, size)
+
+        pad = {"padx": 20}
+        header = tk.Label(root, text=LAUNCH_NOTICE_TITLE, bg=COLOR_BG_MAIN, fg=COLOR_TEXT,
+                          anchor="w", justify="left")
+        if font(14, bold=True):
+            header.configure(font=font(14, bold=True))
+        header.pack(anchor="w", pady=(18, 10), **pad)
+
+        body = tk.Label(root, text=LAUNCH_NOTICE_BODY, bg=COLOR_BG_MAIN, fg=COLOR_TEXT,
+                        anchor="w", justify="left", wraplength=NOTICE_WIDTH - 40)
+        if font(11):
+            body.configure(font=font(11))
+        body.pack(anchor="w", pady=(0, 8), **pad)
+
+        hint = tk.Label(root, text=LAUNCH_NOTICE_HINT, bg=COLOR_BG_MAIN, fg=COLOR_TEXT_DIM,
+                        anchor="w", justify="left", wraplength=NOTICE_WIDTH - 40)
+        if font(10):
+            hint.configure(font=font(10))
+        hint.pack(anchor="w", pady=(0, 10), **pad)
+
+        if detail:
+            # 诊断行（缺了哪些参数）：万一是主程序传参 bug，这行能直接定位
+            diagnose = tk.Label(root, text=detail, bg=COLOR_BG_MAIN, fg=COLOR_WARN,
+                                anchor="w", justify="left", wraplength=NOTICE_WIDTH - 40)
+            if font(9):
+                diagnose.configure(font=font(9))
+            diagnose.pack(anchor="w", pady=(0, 10), **pad)
+
+        def close(*_args) -> None:
+            try:
+                root.destroy()
+            except Exception:  # pragma: no cover - 已销毁
+                pass
+
+        bottom = tk.Frame(root, bg=COLOR_BG_MAIN)
+        bottom.pack(fill="x", side="bottom", pady=(6, 16), **pad)
+        button = tk.Button(
+            bottom, text=LAUNCH_NOTICE_BUTTON, command=close,
+            bg=COLOR_BG_WIDGET, fg=COLOR_TEXT, activebackground=COLOR_BG_SELECTED,
+            activeforeground=COLOR_TEXT, relief="flat", padx=18, pady=4,
+            highlightthickness=1, highlightbackground=COLOR_BORDER, cursor="hand2",
+        )
+        if font(10):
+            button.configure(font=font(10))
+        button.pack(side="right")
+        button.bind("<Enter>", lambda _e: button.configure(bg=COLOR_BG_HOVER))
+        button.bind("<Leave>", lambda _e: button.configure(bg=COLOR_BG_WIDGET))
+        button.focus_set()
+
+        root.protocol("WM_DELETE_WINDOW", close)
+        root.bind("<Escape>", close)
+        root.bind("<Return>", close)
+        try:
+            root.attributes("-topmost", True)
+        except Exception:  # pragma: no cover - 少数 WM 不支持
+            pass
+        root.update_idletasks()
+        width = max(NOTICE_WIDTH, root.winfo_reqwidth())
+        height = max(NOTICE_MIN_HEIGHT, root.winfo_reqheight())
+        left = max(0, (root.winfo_screenwidth() - width) // 2)
+        top = max(0, (root.winfo_screenheight() - height) // 3)   # 略偏上，观感更稳
+        root.geometry(f"{width}x{height}+{left}+{top}")
+        root.mainloop()
+    finally:
+        try:
+            root.destroy()
+        except Exception:  # pragma: no cover - 窗口已销毁
+            pass
+
+
+def _show_native_message(title: str, text: str) -> None:
+    """系统原生提示框：只在深色提示窗起不来时兜底（§83 的第三级降级）。
+
+    单测用替换本函数的方式避免真的开窗口。
     """
     import tkinter as tk
     from tkinter import messagebox
@@ -344,11 +444,11 @@ def _show_native_message(title: str, text: str) -> None:
 def show_launch_notice(detail: str = "", *, gui: bool = True) -> bool:
     """§83：安装器被直接打开时的提示；返回是否**真的弹了窗**。
 
-    - ``gui=True`` 且有图形会话 → 系统原生 ``messagebox``；
-    - ``gui=False``（``--cli``）或无图形会话 / tkinter 缺失 / 弹窗自身失败
-      → 只写 stderr + 日志。
+    降级链（任何一步失败都往下走，全程不抛异常、不阻塞）：
 
-    任何情况下都**不抛异常、不阻塞**：宁可少一句提示，也不能让安装器卡在提示上。
+    1. 深色提示窗（与安装器主窗口同一套视觉，§11.2）；
+    2. 系统原生 ``messagebox``（深色窗建不起来时，例如 Tk 主题异常）；
+    3. stderr + 日志（``--cli``、无图形会话、tkinter 缺失、上面两步都失败）。
     """
     text = launch_notice_text(detail)
     if not gui:
@@ -357,16 +457,23 @@ def show_launch_notice(detail: str = "", *, gui: bool = True) -> bool:
         return False
     reason = tkinter_unavailable_reason()
     if reason:
-        log.info("不弹提示框（%s），改为命令行提示", reason)
+        log.info("不弹提示窗（%s），改为命令行提示", reason)
         _write_stderr(f"{LAUNCH_NOTICE_TITLE}：{text}")
         return False
     try:
+        _show_dark_notice(detail)
+    except Exception as exc:
+        log.warning("深色提示窗显示失败（%s），改用系统提示框", exc)
+    else:
+        log.info("已提示用户：安装器不能直接启动（需求 §83）")
+        return True
+    try:
         _show_native_message(LAUNCH_NOTICE_TITLE, text)
     except Exception as exc:
-        log.warning("提示框显示失败（%s），改为命令行提示", exc)
+        log.warning("系统提示框也显示失败（%s），改为命令行提示", exc)
         _write_stderr(f"{LAUNCH_NOTICE_TITLE}：{text}")
         return False
-    log.info("已提示用户：安装器不能直接启动（需求 §83）")
+    log.info("已提示用户：安装器不能直接启动（系统提示框，需求 §83）")
     return True
 
 
@@ -800,10 +907,15 @@ __all__ = [
     "ConsoleReporter",
     "FONT_CANDIDATES",
     "InstallerWindow",
+    "LAUNCH_NOTICE_BODY",
+    "LAUNCH_NOTICE_BUTTON",
+    "LAUNCH_NOTICE_HINT",
     "LAUNCH_NOTICE_TEXT",
     "LAUNCH_NOTICE_TITLE",
     "LoggingReporter",
     "MultiReporter",
+    "NOTICE_MIN_HEIGHT",
+    "NOTICE_WIDTH",
     "NullReporter",
     "Reporter",
     "TkReporter",
