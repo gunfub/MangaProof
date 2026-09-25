@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 import sys
 from pathlib import Path
@@ -504,3 +505,33 @@ def test_log_directory_falls_back_without_creating_anything(tmp_path: Path, monk
 
     assert updater_main._log_directory([]) == tmp_path / "system-temp"
     assert not missing.exists(), "一次误双击不该凭空造出安装器临时目录"
+
+
+def test_allow_direct_launch_is_recorded_in_the_log(tmp_path: Path, monkeypatch):
+    """调试参数必须留痕（§83）：日志文件里要能查到"这次是谁绕过了防护"。
+
+    断言读日志文件而不是 caplog：``setup_logging`` 用 ``basicConfig(force=True)``
+    重建了 root handler，caplog 的捕获器会被它顶掉。
+    """
+    _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: True)
+    package = tmp_path / "pkg.tar.gz"
+    package.write_bytes(b"nope")
+
+    code = updater_main.main([
+        "--install-dir", str(tmp_path / "missing-install"),
+        "--package", str(package),
+        "--data-backup", str(tmp_path / "backup"),
+        "--success-marker", str(tmp_path / "tmp" / "marker.json"),
+        "--version", "1.1.0.alpha",
+        "--token", "tok-audit",
+        "--platform", "linux",
+        "--cli",
+        "--status-file", str(tmp_path / "installer-state.json"),
+        updater_main.ALLOW_DIRECT_FLAG,
+    ])
+
+    assert code == int(ExitCode.VALIDATION)
+    log_text = (tmp_path / "installer-tok-audit.log").read_text(encoding="utf-8")
+    assert updater_main.ALLOW_DIRECT_FLAG in log_text
+    assert "已放宽" in log_text

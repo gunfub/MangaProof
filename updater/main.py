@@ -398,6 +398,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(ExitCode.USAGE)
 
     _STATUS_PATH = options.state_path
+    if options.allow_direct_launch:
+        # 放宽了检查就必须留痕：出问题时能一眼看出"这次是谁绕过了防护"（§83）
+        log.warning("调试参数 %s：已放宽「只能由主程序调用」检查（需求 §83）", ALLOW_DIRECT_FLAG)
     # Windows：cwd 若在安装目录里，第一步"安装目录改名"就会 WinError 32
     # （见 privilege.ensure_safe_cwd 的说明）。早于任何文件操作执行。
     if options.platform == "windows":
