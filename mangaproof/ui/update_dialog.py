@@ -3,7 +3,7 @@
 
 """更新页面（需求 §10、§11、§13、§29~§34）。
 
-界面结构严格按需求 §11：
+界面结构按需求 §11（按钮行于 2026-09-24 改为"两个语义固定的动作按钮"）：
 
 .. code-block:: text
 
@@ -14,15 +14,20 @@
     下载限速        [ 不限速 ▼ ]
     --------------------------------
     （状态/进度区）
-    [ 检查更新 ]                    [ 取消 ]
+    [ 保存并检查更新 ]      [ 下载更新 ] [ 取消 ]
 
 三条容易做错的约束，这里刻意用代码固化：
 
-1. **按钮左右位置固定**（需求 §11.7：「检查更新」在左、「取消」在右）。
+1. **按钮左右位置固定**（需求 §11.7：「保存并检查更新」在左、「取消」在右）。
    因此**不用** ``QDialogButtonBox`` —— 它会按平台规范重排（macOS 会把主按钮放右侧）。
-2. **只有点「检查更新」才保存配置**（需求 §13）：对话框内部持有 draft，
-   点「检查更新」时才提交到 ``settings.update`` 并发 ``settings_committed``
-   让主窗口落盘；点「取消」直接丢弃 draft。
+2. **保存绑定在语义固定的按钮上**（需求 §13）：左侧按钮**永远是**"保存配置 +
+   检查更新"，右侧按钮按状态在「下载更新 / 安装更新」之间切换，且**下载前同样
+   先保存**。旧版把"检查 / 下载 / 安装"三个动作挤在同一个会改文案的按钮上、
+   只在"检查"那一支保存，于是"检查完之后再改设置"掉进缝里：代理与限速既不会
+   下发给下载线程、也不会写盘，分支与渠道被静默忽略。现在改动的这套语义由
+   :meth:`UpdateDialog._sync_actions` 单点推导，不允许再散落 setText。
+   右侧按钮**常驻置灰**（不做 show/hide），与进度条常驻占位同一个理由：
+   布局一次算准，状态切换不重排、窗口不跳。
 3. **表单区不允许被动态内容压扁**：状态文案可长可短，而 Qt 只会按"窗口大小
    不变"重新分配高度——空间不够时 QFormLayout 会强行压缩行高，实测「代理」
    那一行（内含按钮，行高最大）会被压到 12px。对策见
@@ -111,6 +116,28 @@ BRANCH_LABELS: dict[str, str] = {
     "alpha": "alpha（内测版）",
 }
 
+#: 底部左侧按钮文案：**恒定不变**。它的语义只有一个——保存当前配置并检查更新；
+#: 绝不再像旧版那样变成"立即更新 / 立即安装并重启"（那会让"保存"跟着动作跑掉）。
+CHECK_BTN_TEXT = "保存并检查更新"
+
+#: 底部右侧按钮文案：按状态在"下载 / 安装"之间切换，控件本身常驻置灰。
+DOWNLOAD_BTN_TEXT = "下载更新"
+INSTALL_BTN_TEXT = "安装更新"
+
+#: 检查完成后又改了分支/渠道 → 已查到的包跟当前选择不再对应，必须重新检查。
+#: 写在输出区的详情行里（不动状态正文，用户仍能读到版本与更新说明）。
+STALE_SELECTION_HINT = (
+    "分支或渠道已更改，当前检查结果已失效：请重新点击「保存并检查更新」。"
+)
+
+#: MirrorChyan 渠道缺 CDK（需求 §11.8/§18：CDK 为空时不得发下载请求）。
+#: 必须在界面这一层拦住 —— 否则底层抛的是内部措辞
+#: "CDK 为空：不得发起 MirrorChyan 下载信息请求"，用户看不懂该做什么。
+MIRRORCHYAN_NEEDS_CDK = (
+    "MirrorChyan 渠道需要 CDK：请填写 MirrorChyan CDK 后重试，"
+    "或把更新渠道改为 Cloudflare R2 / GitHub。"
+)
+
 
 def _speed_label(value: int) -> str:
     return "不限速" if value == 0 else f"{value} M"
@@ -119,7 +146,7 @@ def _speed_label(value: int) -> str:
 class UpdateDialog(QDialog):
     """「关于 → 更新」打开的更新页面。"""
 
-    #: 用户在对话框里确认了配置（点「检查更新」）→ 主窗口负责写 settings.json
+    #: 用户在对话框里确认了配置（点「保存并检查更新」或「下载更新」）→ 主窗口负责写 settings.json
     settings_committed = Signal()
     #: 更新包已下载并校验通过，请求主程序启动安装器并退出（需求 §46）。
     #: 载荷是 ``(包路径, SHA-256)`` —— 校验值必须随信号一起递出去，因为本对话框
@@ -134,7 +161,9 @@ class UpdateDialog(QDialog):
         self.setMinimumWidth(560)
 
         self._settings = settings
-        # draft：点「取消」时丢弃，点「检查更新」时提交（需求 §13）
+        # draft：点「取消」时丢弃，点「保存并检查更新」（或「下载更新」）时提交
+        # （需求 §13）。**下载前也提交**：否则检查之后改的代理/限速只改界面，
+        # 既不下发给下载线程也不写盘。
         self._draft = UpdateSettings.from_dict(settings.update.to_dict())
         self._check_worker: UpdateCheckWorker | None = None
         self._download_worker: UpdateDownloadWorker | None = None
@@ -143,7 +172,10 @@ class UpdateDialog(QDialog):
         self._outcome: CheckOutcome | None = None
         self._package: Path | None = None
         self._package_sha256: str = ""       # 下载后本地算出的 SHA-256（传给安装器复核）
-        self._state = "idle"        # idle / checking / checked / no_update / downloading / done
+        self._state = "idle"        # idle / checking / checked / no_update / update_available / downloading / done
+        #: 本轮检查用的分支/渠道：用来判断"检查完之后有没有被改过"（改了 → 结果失效）
+        self._checked_branch: str | None = None
+        self._checked_channel: str | None = None
         #: 关窗时"脱离"出去的线程（信号已摘，等它自己收尾）——主窗口会接管它们，
         #: 见 MainWindow._adopt_update_workers
         self._orphaned_workers: list[object] = []
@@ -232,7 +264,7 @@ class UpdateDialog(QDialog):
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(6)
 
-        self.status_label = QLabel("选择分支与渠道后点击「检查更新」。")
+        self.status_label = QLabel("选择分支与渠道后点击「保存并检查更新」。")
         self.status_label.setWordWrap(True)
         self.status_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -265,14 +297,35 @@ class UpdateDialog(QDialog):
         root.addWidget(self.progress)
 
         buttons = QHBoxLayout()
-        self.primary_btn = QPushButton("检查更新")
-        self.primary_btn.setDefault(True)
-        self.primary_btn.clicked.connect(self._on_primary)
+        # 左：语义恒定（保存 + 检查）。右：常驻置灰，按状态在"下载 / 安装"间切换。
+        self.check_btn = QPushButton(CHECK_BTN_TEXT)
+        self.check_btn.setDefault(True)
+        self.check_btn.clicked.connect(self._on_check_clicked)
+
+        self.download_btn = QPushButton(DOWNLOAD_BTN_TEXT)
+        self.download_btn.clicked.connect(self._on_download_clicked)
+        # 宽度钉死成「下载更新 / 安装更新」里较宽的那个：文案会来回换，
+        # 不钉死按钮就会跟着一伸一缩（与「测试代理」按钮同一个理由）。
+        # 常驻置灰而不是 show/hide：隐藏的控件不参与布局，一露头就得重排
+        # （实测按钮行只需 ~256px，远小于窗口 560px 最小宽，重排虽不至于撑大
+        # 窗口，但会让按钮左右位置在状态切换时抖动）。
+        widest = 0
+        for label in (DOWNLOAD_BTN_TEXT, INSTALL_BTN_TEXT):
+            self.download_btn.setText(label)
+            widest = max(
+                widest,
+                self.download_btn.sizeHint().width(),
+                self.download_btn.minimumSizeHint().width(),
+            )
+        self.download_btn.setFixedWidth(widest)
+        self.download_btn.setText(DOWNLOAD_BTN_TEXT)
+
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.clicked.connect(self._on_cancel)
         # 需求 §11.7：主按钮在左、取消在右 —— 用 HBox 固定，不交给 QDialogButtonBox
-        buttons.addWidget(self.primary_btn)
+        buttons.addWidget(self.check_btn)
         buttons.addStretch(1)
+        buttons.addWidget(self.download_btn)
         buttons.addWidget(self.cancel_btn)
         root.addLayout(buttons)
         #: 按钮行的布局引用：位置是需求 §11.7 的硬要求，测试要能直接断言顺序
@@ -280,6 +333,13 @@ class UpdateDialog(QDialog):
 
         self._update_hint()
         self._fit_status_height()
+        self._sync_actions()
+
+        # 「检查完之后把分支/渠道改掉」→ 已查到的包不再与选择对应，右侧按钮置灰
+        # 并提示重查（需求 §13 的补强）。连接必须放在按钮构造之后：
+        # 上面的 addItem 也会发 currentIndexChanged，那时按钮还不存在。
+        self.branch_combo.currentIndexChanged.connect(self._on_selection_changed)
+        self.channel_combo.currentIndexChanged.connect(self._on_selection_changed)
 
     # -- 布局辅助 ----------------------------------------------------------
 
@@ -379,7 +439,10 @@ class UpdateDialog(QDialog):
         return self._draft
 
     def _commit(self, *, save_cdk: bool = True) -> None:
-        """把 draft 提交到真实设置并发信号（需求 §13：点检查更新才保存）。"""
+        """把 draft 提交到真实设置并发信号（需求 §13：保存由两个动作按钮触发）。
+
+        「取消」不调用它 —— 未执行任何动作的修改直接丢弃。
+        """
         draft = self._collect_draft()
         if save_cdk:
             # 写入 keyring 成功时 draft.cdk 会被清空（需求 §14）
@@ -389,16 +452,108 @@ class UpdateDialog(QDialog):
 
     # -- 按钮行为 ----------------------------------------------------------
 
-    def _on_primary(self) -> None:
-        if self._state in ("idle", "checked", "no_update"):
-            self._start_check()
-        elif self._state == "update_available":
-            self._start_download()
-        elif self._state == "done" and self._package is not None:
+    def _on_check_clicked(self) -> None:
+        """左键：语义永远只有"保存配置 + 检查更新"（需求 §13）。
+
+        不再像旧版那样按状态改文案去兼做下载/安装 —— 那正是"检查完之后改的设置
+        既不生效也不落盘"的来源（保存只挂在这一支上，而它随时会变成别的动作）。
+        """
+        if self._state in ("checking", "downloading"):
+            return
+        self._start_check()
+
+    def _on_download_clicked(self) -> None:
+        """右键：``update_available`` → 下载（先保存配置）；``done`` → 启动安装器。"""
+        if self._state == "done" and self._package is not None:
             # 需求 §46：由主窗口负责"启动安装器 → 确认拉起成功 → 主程序退出"；
             # 先发信号（主窗口可能弹错误框），再关闭本对话框。
             self.install_requested.emit((self._package, self._package_sha256))
             self.accept()
+            return
+        if self._state == "update_available":
+            self._start_download()
+
+    def _on_selection_changed(self, *_args) -> None:
+        """分支/渠道被改动 → 重新判定右侧按钮（可能失效，也可能改回原值而恢复）。"""
+        self._sync_actions()
+
+    # -- 按钮/提示的唯一推导出口 -------------------------------------------
+
+    def _selection_matches_checked(self) -> bool:
+        """当前分支/渠道是否仍与"这一轮检查用的"一致。
+
+        包是按检查时的分支与渠道定位的（文件名、R2 前缀、Release 目标都不同），
+        所以要改这两项就只能重新检查 —— 绝不能让用户以为在下 beta。
+        """
+        return (
+            self.branch_combo.currentData() == self._checked_branch
+            and self.channel_combo.currentData() == self._checked_channel
+        )
+
+    def _download_enabled(self) -> bool:
+        if self._state == "done":
+            return self._package is not None
+        if self._state != "update_available" or self._result is None:
+            return False
+        return self._selection_matches_checked()
+
+    def _download_tooltip(self) -> str:
+        if self._state == "checking":
+            return "正在检查更新，请稍候"
+        if self._state == "downloading":
+            return "正在下载更新包，请稍候"
+        if self._state == "done":
+            return "启动安装器安装已下载的更新包（安装时程序会退出并重启）"
+        if self._state == "update_available":
+            if self._selection_matches_checked():
+                return "下载并校验更新包"
+            return STALE_SELECTION_HINT
+        return "请先点击「保存并检查更新」"
+
+    def _sync_actions(self) -> None:
+        """按当前状态刷新底部两个动作按钮 —— **唯一**改它们文案/可用性的地方。
+
+        集中在这里的原因：旧版散落 7 处 ``setText``（检查/立即更新/立即安装并重启），
+        状态一多就出现"按钮停在上一个动作的文案上"这类漂移。
+        """
+        busy = self._state in ("checking", "downloading")
+        done = self._state == "done" and self._package is not None
+
+        # 左键文案恒定；忙碌时两个动作按钮都不可点（取消仍可用）
+        self.check_btn.setText(CHECK_BTN_TEXT)
+        self.check_btn.setEnabled(not busy)
+        self.check_btn.setToolTip(
+            "正在忙，请等待当前动作结束" if busy else "保存当前配置并检查更新"
+        )
+
+        self.download_btn.setText(INSTALL_BTN_TEXT if done else DOWNLOAD_BTN_TEXT)
+        self.download_btn.setEnabled(self._download_enabled())
+        self.download_btn.setToolTip(self._download_tooltip())
+
+        self._refresh_stale_hint()
+
+    def _show_hint(self, text: str) -> None:
+        """把一条提示写进输出区的详情行（不动状态正文，信息不丢）。"""
+        self.detail_label.setText(text)
+        self.detail_label.setVisible(True)
+
+    def _refresh_stale_hint(self) -> None:
+        """"结果已失效"提示只在需要时出现，改回原值就撤掉。
+
+        判据直接看详情行当前文本，不另存一个布尔量 —— 那一行还可能被下载进度
+        （"已下载 / 总量 + 速度"）或 CDK 缺失提示占用，多存一份状态就会不一致。
+        """
+        stale = (
+            self._state == "update_available"
+            and self._result is not None
+            and not self._selection_matches_checked()
+        )
+        if stale:
+            if self.detail_label.text() != STALE_SELECTION_HINT:
+                self._show_hint(STALE_SELECTION_HINT)
+        elif self.detail_label.text() == STALE_SELECTION_HINT:
+            self.detail_label.clear()
+            self.detail_label.setVisible(False)
 
     def _on_cancel(self) -> None:
         self._orphaned_workers = self._abort_workers()
@@ -441,13 +596,20 @@ class UpdateDialog(QDialog):
 
         self._state = "checking"
         self._result = None
+        # 新一轮检查 → 上一轮下载的包作废：否则「安装更新」会留着指向旧包，
+        # 用户在"又查了一次、这次没更新"之后仍可能点到它（误装旧版本）。
+        self._package = None
+        self._package_sha256 = ""
+        # 记下本轮用的分支/渠道：之后被改动即判为"结果失效"，见 _refresh_stale_hint
+        self._checked_branch = self._draft.branch
+        self._checked_channel = self._draft.channel
         self._set_form_enabled(False)
-        self.primary_btn.setEnabled(False)
         self._clear_output()
         self.cancel_btn.setText("取消")      # 下载完成后这里是「稍后」，新一轮要还原
         self.status_label.setText("正在检查更新……")
         self.progress.setRange(0, 0)         # 需求 §31：不确定进度条
         self._show_progress()
+        self._sync_actions()
 
         worker = UpdateCheckWorker(
             branch=self._draft.branch,
@@ -469,8 +631,7 @@ class UpdateDialog(QDialog):
         if outcome.kind == "unsupported":
             self._state = "no_update"
             self.status_label.setText(outcome.message)
-            self.primary_btn.setText("检查更新")
-            self.primary_btn.setEnabled(True)
+            self._sync_actions()
             return
 
         result = outcome.result
@@ -483,11 +644,10 @@ class UpdateDialog(QDialog):
                 f"当前版本：{result.current_display}\n"
                 f"更新分支：{result.branch}"
             )
-            self.primary_btn.setText("检查更新")
-            self.primary_btn.setEnabled(True)
+            self._sync_actions()
             return
 
-        # 需求 §33：不自动下载，等用户点「立即更新」
+        # 需求 §33：不自动下载，等用户点「下载更新」
         self._state = "update_available"
         size_text = human_size(outcome.filesize) if outcome.filesize else (
             outcome.size_note or "—"
@@ -501,22 +661,40 @@ class UpdateDialog(QDialog):
             f"文件：\n{outcome.filename or '—'}\n\n"
             f"大小：\n{size_text}{note}"
         )
-        self.primary_btn.setText("立即更新")
-        self.primary_btn.setEnabled(True)
+        self._sync_actions()
 
     def _on_check_failed(self, error: object) -> None:
         self._reset_progress()
         self._set_form_enabled(True)
         self._state = "checked"
-        self.primary_btn.setText("检查更新")
-        self.primary_btn.setEnabled(True)
+        self._result = None
         self.status_label.setText(self._error_text(error))
+        self._sync_actions()
 
     # -- 下载 --------------------------------------------------------------
 
     def _start_download(self) -> None:
         if self._result is None:
             return
+        # 守卫 1：分支/渠道被改过 → 查到的包已不对应，要求重查（按钮此刻也是灰的，
+        # 这里再挡一次是为了防"信号/时序"绕过，绝不发错包的请求）。
+        if not self._selection_matches_checked():
+            self._refresh_stale_hint()
+            self._sync_actions()
+            return
+        # 守卫 2：MirrorChyan 渠道必须先有 CDK（需求 §11.8/§18）。放在最前面**且不落盘**：
+        # 被拒绝的操作不该产生副作用；底层为空的措辞是内部术语
+        # （"CDK 为空：不得发起 MirrorChyan 下载信息请求"），不能原样丢给用户。
+        if (
+            self.channel_combo.currentData() == "mirrorchyan"
+            and not self.cdk_edit.text().strip()
+        ):
+            self._show_hint(MIRRORCHYAN_NEEDS_CDK)
+            return
+        # 需求 §13 的补强：下载前把"用户此刻看到的配置"提交并落盘。
+        # 旧版不提交 —— 检查完之后改的代理/限速既不下发也不保存，改了等于没改。
+        self._commit()
+
         from mangaproof.update import detector
 
         target = detector.current_target()
@@ -526,12 +704,12 @@ class UpdateDialog(QDialog):
 
         self._state = "downloading"
         self._set_form_enabled(False)
-        self.primary_btn.setEnabled(False)
         self._clear_output()
         self.status_label.setText("正在准备下载……")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self._show_progress()
+        self._sync_actions()
 
         worker = UpdateDownloadWorker(
             branch=self._draft.branch,
@@ -583,21 +761,21 @@ class UpdateDialog(QDialog):
         self.progress.setValue(100)
         self._state = "done"
         self._package = Path(str(path))
-        # 这里算出的 SHA-256 不只是给界面看：点「立即安装并重启」时会作为
+        # 这里算出的 SHA-256 不只是给界面看：点「安装更新」时会作为
         # --sha256 传给安装器，让它在替换文件前再校验一次（需求 §53）。
         digest = checksum.sha256_of(self._package)
         self._package_sha256 = digest
         self.status_label.setText(
             "更新包已下载并通过校验\n\n"
             f"文件：{self._package.name}\n"
-            f"SHA-256：{digest}"
+            f"SHA-256：{digest}\n\n"
+            "点击「安装更新」将启动安装器：程序会退出并在安装完成后重启。"
         )
         self.detail_label.setText(str(self._package))
         self.detail_label.setVisible(True)
-        self.primary_btn.setText("立即安装并重启")
-        self.primary_btn.setEnabled(True)
         self._set_form_enabled(False)
         self.cancel_btn.setText("稍后")
+        self._sync_actions()
 
     def _on_download_failed(self, error: object) -> None:
         from mangaproof.update.downloader import DownloadCancelled
@@ -605,16 +783,12 @@ class UpdateDialog(QDialog):
         self._reset_progress()
         self._set_form_enabled(True)
         self.detail_label.setVisible(False)
-        if isinstance(error, DownloadCancelled):
-            self._state = "update_available"
-            self.primary_btn.setText("立即更新")
-            self.primary_btn.setEnabled(True)
-            self.status_label.setText("已取消下载。")
-            return
         self._state = "update_available"
-        self.primary_btn.setText("立即更新")
-        self.primary_btn.setEnabled(True)
-        self.status_label.setText(self._error_text(error))
+        if isinstance(error, DownloadCancelled):
+            self.status_label.setText("已取消下载。")
+        else:
+            self.status_label.setText(self._error_text(error))
+        self._sync_actions()
 
     # -- 代理测试 ----------------------------------------------------------
 
@@ -677,4 +851,13 @@ class UpdateDialog(QDialog):
         return self._package_sha256
 
 
-__all__ = ["UpdateDialog", "CHANNEL_LABELS", "BRANCH_LABELS"]
+__all__ = [
+    "UpdateDialog",
+    "CHANNEL_LABELS",
+    "BRANCH_LABELS",
+    "CHECK_BTN_TEXT",
+    "DOWNLOAD_BTN_TEXT",
+    "INSTALL_BTN_TEXT",
+    "STALE_SELECTION_HINT",
+    "MIRRORCHYAN_NEEDS_CDK",
+]

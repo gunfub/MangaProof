@@ -6,6 +6,15 @@
 跑在离屏 Qt 上，不联网、不真的启动 worker（只验界面结构与"保存时机"语义）。
 需要 `qapp` fixture（见 tests/test_android_ui_scale.py 的同名 fixture 定义）。
 
+2026-09-24 改版后的两条核心语义，各有一组用例守着：
+
+- **保存不再绑在"会变身的按钮"上**：左侧「保存并检查更新」恒为保存+检查，
+  右侧「下载更新」在下载前同样先保存（旧版只在检查那一支保存，检查完之后改的
+  代理/限速既不下发也不落盘）；
+- **包与选择必须对应**：检查后改分支/渠道 → 右侧按钮置灰并要求重查；
+  再点检查会作废上一轮下载的包（防误装旧版本）；MirrorChyan 缺 CDK 时只提示、
+  不发请求、不落盘。
+
 另有三条**布局**回归（都是实测踩到过的坑）：
 - 下拉框不响应滚轮（与设置页一致）；
 - 「代理」行的输入框左右边界、测试按钮右边界与其他行严格对齐；
@@ -24,7 +33,15 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from mangaproof.config.settings import SettingsManager, UpdateSettings  # noqa: E402
-from mangaproof.ui.update_dialog import CHANNEL_LABELS, UpdateDialog  # noqa: E402
+from mangaproof.ui.update_dialog import (  # noqa: E402
+    CHECK_BTN_TEXT,
+    DOWNLOAD_BTN_TEXT,
+    INSTALL_BTN_TEXT,
+    MIRRORCHYAN_NEEDS_CDK,
+    STALE_SELECTION_HINT,
+    CHANNEL_LABELS,
+    UpdateDialog,
+)
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +59,96 @@ def _no_keyring_and_temp_cache(monkeypatch, tmp_path):
     from mangaproof.update import cdk_store
 
     monkeypatch.setattr(cdk_store, "keyring_available", lambda: False)
+    # save_cdk() 走的是 _keyring_module()（不是 keyring_available），必须一起挡掉：
+    # 否则测试里填的假 CDK 会被真的写进开发机的系统凭据库
+    monkeypatch.setattr(cdk_store, "_keyring_module", lambda: None)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+
+
+class _SignalStub:
+    """QThread 信号桩：只要能 .connect() 就行。"""
+
+    def connect(self, *_args, **_kwargs) -> None:
+        pass
+
+
+class _FakeWorker:
+    """假后台线程：只记录构造参数，不起线程、不联网、不碰 Qt 事件循环。"""
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.progress = _SignalStub()
+        self.succeeded = _SignalStub()
+        self.failed = _SignalStub()
+        self.finished_with = _SignalStub()      # ProxyTestWorker 用
+
+    def start(self) -> None:
+        pass
+
+    def isRunning(self) -> bool:      # noqa: N802 - 模仿 QThread 接口
+        return False
+
+
+@pytest.fixture(autouse=True)
+def fake_workers(monkeypatch):
+    """三个后台 worker 一律换成假的（本模块绝不起真线程），并按类别记录构造参数。"""
+    import mangaproof.ui.update_dialog as ui
+
+    made: dict[str, list[_FakeWorker]] = {"check": [], "download": [], "proxy": []}
+
+    def _factory(kind: str):
+        def _make(**kwargs):
+            worker = _FakeWorker(**kwargs)
+            made[kind].append(worker)
+            return worker
+
+        return _make
+
+    monkeypatch.setattr(ui, "UpdateCheckWorker", _factory("check"))
+    monkeypatch.setattr(ui, "UpdateDownloadWorker", _factory("download"))
+    monkeypatch.setattr(ui, "ProxyTestWorker", _factory("proxy"))
+    # 平台判定与网络无关，固定住以免测试机架构影响结果
+    monkeypatch.setattr("mangaproof.update.detector.current_target", lambda: object())
+    return made
+
+
+def _check(
+    dlg,
+    *,
+    branch: str = "stable",
+    channel: str = "r2",
+    has_update: bool = True,
+    note: str = "新增更新功能",
+    start: bool = True,
+):
+    """走真实的「保存并检查更新」入口（worker 已换成假的），再喂回检查结果。
+
+    ``start=False`` 表示只喂结果、不再点一次检查（用于"已经处于 checking"的用例）。
+    """
+    from mangaproof.ui.update_worker import CheckOutcome
+    from mangaproof.update.models import CheckResult, ReleaseInfo
+    from mangaproof.update.version import AppVersion
+
+    dlg._select(dlg.branch_combo, branch)
+    dlg._select(dlg.channel_combo, channel)
+    if start:
+        dlg._on_check_clicked()
+
+    target = AppVersion.parse("v1.1.0") if has_update else AppVersion.parse("v1.0.0")
+    outcome = CheckOutcome(
+        kind="ok",
+        result=CheckResult(
+            current=AppVersion.parse("1.0.0"),
+            release=ReleaseInfo(
+                version=target, version_name=str(target), release_note=note
+            ),
+            branch=branch,
+        ),
+        filename="pkg.tar.gz",
+        filesize=1024,
+    )
+    dlg._on_check_ok(outcome)
+    return outcome
 
 
 @pytest.fixture
@@ -71,18 +177,25 @@ def test_form_has_all_controls_from_requirement(dialog):
 
 
 def test_buttons_are_primary_left_cancel_right(dialog):
-    """需求 §11.7：底部「检查更新」在左、「取消」在右。
+    """需求 §11.7：底部主按钮在左、「取消」在右。
 
     不用 QDialogButtonBox 就是为了这个 —— 它会按平台规范重排。
+    2026-09-24 起主按钮是**语义恒定**的「保存并检查更新」，右侧多一个常驻置灰的
+    「下载更新」（它按状态在下载/安装之间切换，见下面的用例）。
     """
     dlg, _ = dialog
-    assert dlg.primary_btn.text() == "检查更新"
+    assert dlg.check_btn.text() == CHECK_BTN_TEXT == "保存并检查更新"
     assert dlg.cancel_btn.text() == "取消"
     row = dlg.action_row
-    assert row.indexOf(dlg.primary_btn) == 0, "主按钮必须在最左"
+    assert row.indexOf(dlg.check_btn) == 0, "主按钮必须在最左"
     assert row.indexOf(dlg.cancel_btn) == row.count() - 1, "取消必须在最右"
     # 两者之间必须有 stretch（否则会被拉成等宽或贴在一起）
     assert row.itemAt(1).spacerItem() is not None
+    # 右侧按钮常驻占位（不是 show/hide）：避免状态切换时按钮左右位置抖动。
+    # 还没 show() 的窗口里 isVisible() 恒为 False，所以看"有没有被显式藏起来"
+    assert not dlg.download_btn.isHidden(), "下载按钮必须常驻占位"
+    assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+    assert not dlg.download_btn.isEnabled(), "还没有检查结果时应当置灰"
 
 
 def test_progress_is_hidden_initially(dialog):
@@ -153,7 +266,8 @@ def test_no_update_text_matches_requirement(qapp, tmp_path, monkeypatch):
         assert "当前已经是最新版本" in text
         assert "当前版本：v1.1.0.alpha" in text
         assert "更新分支：stable" in text
-        assert dlg.primary_btn.text() == "检查更新"
+        assert dlg.check_btn.text() == CHECK_BTN_TEXT, "主按钮文案永远不变"
+        assert not dlg.download_btn.isEnabled(), "没有更新可下载"
     finally:
         dlg.close()
 
@@ -176,7 +290,9 @@ def test_update_available_text_matches_requirement(qapp, tmp_path):
             ),
             branch="stable",
         )
-        dlg._commit()
+        # 走真实入口：_start_check 会记下"本轮用的分支/渠道"，右侧按钮据此判断
+        # 结果是否还有效（worker 已由 fake_workers 换成假的）
+        dlg._on_check_clicked()
         dlg._on_check_ok(
             CheckOutcome(
                 kind="ok", result=result,
@@ -191,7 +307,10 @@ def test_update_available_text_matches_requirement(qapp, tmp_path):
         assert "MangaProof-1.1.0-linux-x64.tar.gz" in text
         assert "95.2 MB" in text
         assert "新增更新功能" in text
-        assert dlg.primary_btn.text() == "立即更新", "不自动下载，等用户点"
+        # 不自动下载，等用户点右侧的「下载更新」；主按钮不参与变身
+        assert dlg.check_btn.text() == CHECK_BTN_TEXT
+        assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+        assert dlg.download_btn.isEnabled()
     finally:
         dlg.close()
 
@@ -213,6 +332,184 @@ def test_channel_labels_cover_all_values():
     from mangaproof.config.settings import UPDATE_CHANNELS
 
     assert set(CHANNEL_LABELS) == set(UPDATE_CHANNELS)
+
+
+# -- 两个固定动作按钮：保存时机 / 失效规则 / 安装（2026-09-24 改版的核心）--------
+
+
+def test_check_button_text_never_changes(dialog, fake_workers, tmp_path):
+    """左侧按钮永远叫「保存并检查更新」：它不再变身成下载/安装。
+
+    旧版三个动作挤在同一个按钮上（检查 → 立即更新 → 立即安装并重启），
+    而"保存"只挂在第一支上——检查完之后改的设置恰好落在缝里。
+    """
+    dlg, _ = dialog
+    package = tmp_path / "pkg.tar.gz"
+    package.write_bytes(b"fake package bytes")
+
+    labels = [dlg.check_btn.text()]
+    dlg._on_check_clicked()                     # checking
+    labels.append(dlg.check_btn.text())
+    _check(dlg)                                 # update_available
+    labels.append(dlg.check_btn.text())
+    dlg._on_download_ok(package)                # done
+    labels.append(dlg.check_btn.text())
+
+    assert labels == [CHECK_BTN_TEXT] * 4, labels
+    assert dlg.check_btn.isEnabled(), "非忙时左键必须可用（随时能重新检查）"
+
+
+def test_busy_states_disable_both_action_buttons(dialog, fake_workers):
+    """检查/下载进行中两个动作按钮都不可点（取消仍可用）。"""
+    dlg, _ = dialog
+
+    dlg._on_check_clicked()
+    assert dlg._state == "checking"
+    assert not dlg.check_btn.isEnabled() and not dlg.download_btn.isEnabled()
+    assert dlg.cancel_btn.isEnabled()
+
+    _check(dlg)
+    dlg._on_download_clicked()
+    assert dlg._state == "downloading"
+    assert not dlg.check_btn.isEnabled() and not dlg.download_btn.isEnabled()
+    assert dlg.cancel_btn.isEnabled()
+
+
+def test_download_picks_up_and_persists_settings_edited_after_check(dialog, fake_workers):
+    """检查完之后改的代理/限速/CDK：下载要用新值，并且必须落盘。
+
+    这就是本次改版要修的主症状——旧版只把"保存"挂在检查上，且下载线程读的是
+    检查时刻的 draft，于是检查后改的代理/限速既不下发也不保存，分支/渠道更是
+    被静默忽略。
+    """
+    dlg, manager = dialog
+    _check(dlg)
+
+    dlg.proxy_edit.setText("socks5://127.0.0.1:1080")
+    dlg.speed_combo.setCurrentIndex(dlg.speed_combo.findData(30))
+    dlg.cdk_edit.setText("NEW-CDK")
+
+    dlg._on_download_clicked()
+
+    assert len(fake_workers["download"]) == 1, "必须真的发起下载"
+    kwargs = fake_workers["download"][0].kwargs
+    assert kwargs["proxy"] == "socks5://127.0.0.1:1080"
+    assert kwargs["speed_limit_mbps"] == 30
+    assert kwargs["cdk"] == "NEW-CDK"
+    assert kwargs["branch"] == "stable" and kwargs["source"] == "r2"
+
+    # 同一份配置必须已经写进 settings（主窗口的 settings_committed → _save_settings）
+    assert manager.settings.update.proxy == "socks5://127.0.0.1:1080"
+    assert manager.settings.update.speed_limit == 30
+    assert manager.settings.update.cdk == "NEW-CDK"      # 测试环境没有 keyring
+
+
+def test_changing_branch_or_channel_invalidates_result(dialog, fake_workers):
+    """检查后改分支/渠道 → 右侧按钮置灰 + 提示重查；改回原值自动恢复。"""
+    dlg, _ = dialog
+    _laid_out(dlg)          # 断言 isVisible() 需要真正 show 过
+    _check(dlg, branch="stable", channel="r2")
+    assert dlg.download_btn.isEnabled()
+
+    dlg.branch_combo.setCurrentIndex(dlg.branch_combo.findData("beta"))
+    assert not dlg.download_btn.isEnabled(), "分支变了就不该还能下载"
+    assert dlg.detail_label.isVisible()
+    assert dlg.detail_label.text() == STALE_SELECTION_HINT
+    assert "发现新版本" in dlg.output_text(), "状态正文不许被提示顶掉"
+
+    dlg.branch_combo.setCurrentIndex(dlg.branch_combo.findData("stable"))
+    assert dlg.download_btn.isEnabled(), "改回原值应恢复"
+    assert not dlg.detail_label.isVisible()
+
+    dlg.channel_combo.setCurrentIndex(dlg.channel_combo.findData("github"))
+    assert not dlg.download_btn.isEnabled()
+    assert dlg.detail_label.text() == STALE_SELECTION_HINT
+
+    # 失效状态下即使硬点也不许发请求（防信号/时序绕过）
+    dlg._on_download_clicked()
+    assert fake_workers["download"] == []
+
+
+def test_mirrorchyan_without_cdk_shows_friendly_hint(dialog, fake_workers):
+    """MirrorChyan 渠道缺 CDK：给可读提示，不发请求、不落盘（需求 §11.8/§18）。"""
+    dlg, manager = dialog
+    _laid_out(dlg)
+    _check(dlg, channel="mirrorchyan")
+    dlg.proxy_edit.setText("http://127.0.0.1:7890")      # 故意留一处未保存的修改
+
+    dlg._on_download_clicked()
+
+    assert fake_workers["download"] == [], "CDK 为空时不得发起下载请求"
+    assert dlg.detail_label.text() == MIRRORCHYAN_NEEDS_CDK
+    assert "CDK 为空：不得发起" not in dlg.output_text(), "不许把内部措辞丢给用户"
+    assert "发现新版本" in dlg.status_label.text()
+    assert manager.settings.update.proxy == "", "被拒绝的动作不该有副作用"
+
+    dlg.cdk_edit.setText("REAL-CDK")
+    dlg._on_download_clicked()
+    assert len(fake_workers["download"]) == 1
+    assert fake_workers["download"][0].kwargs["cdk"] == "REAL-CDK"
+
+
+def test_download_button_switches_to_install_and_requests_install(
+    dialog, fake_workers, tmp_path
+):
+    """下载完成 → 右侧按钮变「安装更新」，点它才发安装请求（需求 §46 链路不变）。"""
+    dlg, _ = dialog
+    _check(dlg)
+    package = tmp_path / "MangaProof-1.1.8.alpha-linux-x64.tar.gz"
+    package.write_bytes(b"fake package bytes")
+
+    dlg._on_download_ok(package)
+    assert dlg.download_btn.text() == INSTALL_BTN_TEXT
+    assert dlg.download_btn.isEnabled()
+    assert dlg.cancel_btn.text() == "稍后"
+
+    seen: list[object] = []
+    dlg.install_requested.connect(seen.append)
+    dlg._on_download_clicked()
+    assert seen and Path(str(seen[0][0])) == package
+
+
+def test_recheck_clears_previous_package_and_install_state(dialog, fake_workers, tmp_path):
+    """再点「保存并检查更新」必须清掉上一轮的包：否则可能误装旧版本。"""
+    dlg, _ = dialog
+    _check(dlg)
+    package = tmp_path / "MangaProof-1.1.8.alpha-linux-x64.tar.gz"
+    package.write_bytes(b"fake package bytes")
+    dlg._on_download_ok(package)
+    assert dlg.take_package() == package
+
+    dlg._on_check_clicked()                     # 重新检查
+
+    assert dlg.take_package() is None, "上一轮的包必须作废"
+    assert dlg.take_package_sha256() == ""
+    assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+    assert not dlg.download_btn.isEnabled()
+
+    # 这一轮没查到更新 → 依然是"没有可下载/可安装的东西"
+    _check(dlg, has_update=False, start=False)
+    assert not dlg.download_btn.isEnabled()
+    assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+
+
+def test_download_button_geometry_is_stable(dialog, fake_workers, tmp_path):
+    """右侧按钮的常驻占位：文案/可用性变化都不许挪动按钮位置或撑大窗口。"""
+    from PySide6.QtWidgets import QApplication
+
+    dlg, _ = dialog
+    _laid_out(dlg)
+    before = (_box(dlg, dlg.download_btn), _box(dlg, dlg.check_btn)[0], dlg.width())
+
+    _check(dlg)
+    QApplication.processEvents()
+    assert (_box(dlg, dlg.download_btn), _box(dlg, dlg.check_btn)[0], dlg.width()) == before
+
+    package = tmp_path / "pkg.tar.gz"
+    package.write_bytes(b"fake package bytes")
+    dlg._on_download_ok(package)
+    QApplication.processEvents()
+    assert (_box(dlg, dlg.download_btn), _box(dlg, dlg.check_btn)[0], dlg.width()) == before
 
 
 # -- 布局回归 ---------------------------------------------------------------
@@ -398,7 +695,7 @@ def test_new_action_clears_previous_output(qapp, tmp_path):
         assert "发现新版本" in dlg.output_text()
         assert dlg.cancel_btn.text() == "取消"
 
-        # 点「立即更新」：旧结论先被清掉，再写本轮开头文案
+        # 点「下载更新」：旧结论先被清掉，再写本轮开头文案
         dlg._result = result
         dlg._clear_output()
         dlg.status_label.setText("正在准备下载……")
@@ -498,7 +795,7 @@ def test_install_request_carries_sha256(qapp, tmp_path):
 
         seen: list[object] = []
         dlg.install_requested.connect(seen.append)
-        dlg._on_primary()                      # done 状态 → 发安装请求
+        dlg._on_download_clicked()             # done 状态 → 发安装请求
         assert seen, "必须发出 install_requested"
         payload = seen[0]
         assert isinstance(payload, tuple) and len(payload) == 2
