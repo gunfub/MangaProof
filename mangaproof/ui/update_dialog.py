@@ -421,12 +421,12 @@ class UpdateDialog(QDialog):
 
         parts: list[str] = []
         if is_android_strict():
-            parts.append("CDK 保存在应用私有目录的 settings.json。")
+            parts.append("CDK 保存在应用私有目录的 settings.json。应用的私有目录受安卓沙箱保护。")
         elif cdk_store.keyring_available():
-            parts.append("CDK 保存在系统凭据库（keyring），不写入配置文件。")
+            parts.append("系统凭据库可用, CDK 将保存在系统凭据库（keyring），不写入配置文件。")
         else:
             parts.append("系统凭据库不可用，CDK 将明文保存在 settings.json。")
-        parts.append("代理与限速仅对 Cloudflare R2 / GitHub 生效；MirrorChyan 不使用它们。")
+        parts.append("\n代理与限速仅对 Cloudflare R2 / GitHub 生效；MirrorChyan 不使用它们。")
         self.hint_label.setText("　".join(parts))
 
     # -- 表单 ↔ draft ------------------------------------------------------
