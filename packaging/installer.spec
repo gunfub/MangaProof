@@ -74,9 +74,12 @@ _excludes = [
 
 # 随包许可文本（GPLv3 §6）：安装器与主程序一起分发，因此也要随附许可副本与
 # 第三方许可清单（与三份 main_*.spec 同一约定，tests/test_app_license.py 守卫）。
+# 另带内置字体 MiSans：安装器 GUI 与主程序用同一份字体（调研报告 §11.2），
+# 运行时由 updater/fonts.py 按平台注册**进本进程**（不写系统字体目录）。
 _datas = [
     (str(ROOT / "LICENSE"), "licenses"),
     (str(ROOT / "THIRD_PARTY_LICENSES.md"), "licenses"),
+    (str(ROOT / "font" / "MiSans-Medium.ttf"), "font"),
 ]
 
 a = Analysis(

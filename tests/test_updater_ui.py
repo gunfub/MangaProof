@@ -314,3 +314,40 @@ def test_native_message_creates_and_destroys_its_root(monkeypatch):
     assert shown and shown[0][0] == "标题" and shown[0][1] == "正文"
     assert shown[0][2] is root, "提示框必须挂在我们的 root 上（模态）"
     assert root.destroyed is True, "提示框关掉后必须销毁 root"
+
+
+def test_pick_font_family_prefers_the_builtin_font(monkeypatch):
+    """调研报告 §11.2：内置 MiSans 优先（随包 + 进程内注册）。"""
+    monkeypatch.setattr(ui.fonts, "pick_family", lambda root: "MiSans")
+
+    assert ui.pick_font_family(object()) == "MiSans"
+
+
+def _fake_tkinter_font(monkeypatch, families) -> None:
+    """把 ``tkinter.font`` 换成替身（单测不要求本机有 tkinter、也不开窗口）。"""
+    module = types.ModuleType("tkinter.font")
+    module.families = families
+    tkinter = types.ModuleType("tkinter")
+    tkinter.font = module
+    monkeypatch.setitem(sys.modules, "tkinter", tkinter)
+    monkeypatch.setitem(sys.modules, "tkinter.font", module)
+
+
+def test_pick_font_family_falls_back_to_the_system_chain(monkeypatch):
+    """内置拿不到时，仍按§11.2 的系统链挑（不能因为加了内置就把回退弄丢）。"""
+    monkeypatch.setattr(ui.fonts, "pick_family", lambda root: None)
+    _fake_tkinter_font(monkeypatch, lambda root=None: ("Microsoft YaHei UI",))
+
+    assert ui.pick_font_family(object()) == "Microsoft YaHei UI"
+
+
+def test_pick_font_family_survives_a_failing_system_lookup(monkeypatch):
+    """系统字体也读不到（无图形会话）→ None（用 Tk 默认字体），不得抛异常。"""
+    monkeypatch.setattr(ui.fonts, "pick_family", lambda root: None)
+
+    def boom(root=None):
+        raise RuntimeError("no display")
+
+    _fake_tkinter_font(monkeypatch, boom)
+
+    assert ui.pick_font_family(object()) is None

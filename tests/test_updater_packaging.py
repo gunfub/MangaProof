@@ -535,3 +535,18 @@ def test_allow_direct_launch_is_recorded_in_the_log(tmp_path: Path, monkeypatch)
     log_text = (tmp_path / "installer-tok-audit.log").read_text(encoding="utf-8")
     assert updater_main.ALLOW_DIRECT_FLAG in log_text
     assert "已放宽" in log_text
+
+
+def test_installer_spec_bundles_the_builtin_font():
+    """安装器必须随包 MiSans（调研报告 §11.2：与主程序同一份字体）。
+
+    少了这条 datas，安装器在没装 MiSans 的机器上就会用系统字体（Linux 极简环境
+    甚至可能出现吐司块），而"和主程序一样"这条规格是静默失效的。
+    """
+    text = SPEC.read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith("#")
+    )
+    assert 'ROOT / "font" / "MiSans-Medium.ttf"' in code
+    assert '"font"' in code, "字体要落到产物里的 font/ 目录（与 updater/fonts.py 约定一致）"
+    assert (ROOT / "font" / "MiSans-Medium.ttf").is_file()

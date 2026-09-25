@@ -38,6 +38,7 @@ import threading
 import traceback
 from typing import Callable
 
+from updater import fonts
 from updater.state import label_for
 
 log = logging.getLogger("mangaproof.updater.ui")
@@ -411,7 +412,21 @@ def _enable_dpi_awareness() -> None:
 
 
 def pick_font_family(root) -> str | None:
-    """按优先级挑字体；一个都没有时返回 ``None``（用 Tk 默认字体，不得崩溃）。"""
+    """按 §11.2 挑字体族：**内置 MiSans 优先** → 系统候选链 → ``None``（Tk 默认字体）。
+
+    内置那一份由 :mod:`updater.fonts` 注册进本进程（spec 随包 ``font/``）；注册不上
+    或没出现在 Tk 家族表里就照旧走系统链 —— 字体问题绝不能让安装器起不来。
+    一个都没有时返回 ``None``（用 Tk 默认字体，不得崩溃）。
+    """
+    try:
+        bundled = fonts.pick_family(root)
+    except Exception as exc:  # pragma: no cover - fonts 内部已逐条兜底
+        log.debug("内置字体不可用，改用系统字体：%s", exc)
+        bundled = None
+    if bundled:
+        log.info("使用内置字体：%s", bundled)
+        return bundled
+
     try:
         from tkinter import font as tkfont
 
