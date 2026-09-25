@@ -208,6 +208,30 @@ class ProxyTestWorker(_AbortableWorker):
         self.finished_with.emit(ok, message)
 
 
+class CacheClearWorker(_AbortableWorker):
+    """清理升级缓存（需求 §36/§37 的两个临时目录）。
+
+    走后台线程的原因：目录里可能有上百 MB 的更新包，Windows 上还会被杀毒软件
+    逐个文件扫描——同步删会让界面卡住，而"整个 GUI 必须保持响应"是这个更新页
+    一贯的要求（§31）。
+
+    删除逻辑全在 :mod:`mangaproof.update.cache`（**主程序侧**，与安装器无关），
+    本类只负责搬结果；取消请求在两个目录之间被检查，删到一半不做回滚。
+    """
+
+    finished_with = Signal(object)      # CacheClearReport
+
+    def run(self) -> None:
+        from mangaproof.update import cache
+
+        try:
+            report = cache.clear_update_cache(cancel=self._cancel_pending)
+        except Exception as exc:  # pragma: no cover - cache 模块已兜住 OSError
+            log.exception("清理升级缓存出现未预期异常")
+            report = cache.failed_report(str(exc))
+        self.finished_with.emit(report)
+
+
 class UpdateDownloadWorker(_AbortableWorker):
     """下载更新包（含 MirrorChyan 的"带 CDK 取下载信息"步骤）。
 
@@ -303,6 +327,7 @@ def _parse_current(raw: str):
 
 
 __all__ = [
+    "CacheClearWorker",
     "CheckOutcome",
     "ProxyTestWorker",
     "UpdateCheckWorker",

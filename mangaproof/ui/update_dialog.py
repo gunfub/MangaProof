@@ -3,7 +3,8 @@
 
 """更新页面（需求 §10、§11、§13、§29~§34）。
 
-界面结构按需求 §11（按钮行于 2026-09-24 改为"两个语义固定的动作按钮"）：
+界面结构按需求 §11（按钮行于 2026-09-24 改为"三个语义固定的动作按钮 +
+取消"，三个动作按钮**紧挨着排在最左**）：
 
 .. code-block:: text
 
@@ -14,12 +15,16 @@
     下载限速        [ 不限速 ▼ ]
     --------------------------------
     （状态/进度区）
-    [ 保存并检查更新 ]      [ 下载更新 ] [ 取消 ]
+    [ 保存并检查更新 ] [ 下载更新 ] [ 清理升级缓存 ]        [ 取消 ]
 
 三条容易做错的约束，这里刻意用代码固化：
 
-1. **按钮左右位置固定**（需求 §11.7：「保存并检查更新」在左、「取消」在右）。
-   因此**不用** ``QDialogButtonBox`` —— 它会按平台规范重排（macOS 会把主按钮放右侧）。
+1. **动作按钮在左、取消在右**（需求 §11.7）。因此**不用** ``QDialogButtonBox``
+   —— 它会按平台规范重排（macOS 会把主按钮放右侧）。三个动作按钮同属更新流程，
+   按"保存并检查 → 下载/安装 → 清理缓存"的顺序紧挨着；「取消」单独留在最右。
+   「清理升级缓存」只清 :mod:`mangaproof.update.platform_dirs` 里的两个临时目录
+   （逻辑在 :mod:`mangaproof.update.cache`，**主程序侧**、与安装器无关），
+   清完本轮检查结果作废、必须重新检查。
 2. **保存绑定在语义固定的按钮上**（需求 §13）：左侧按钮**永远是**"保存配置 +
    检查更新"，右侧按钮按状态在「下载更新 / 安装更新」之间切换，且**下载前同样
    先保存**。旧版把"检查 / 下载 / 安装"三个动作挤在同一个会改文案的按钮上、
@@ -76,6 +81,7 @@ from mangaproof.config.settings import (
     UpdateSettings,
 )
 from mangaproof.ui.update_worker import (
+    CacheClearWorker,
     CheckOutcome,
     ProxyTestWorker,
     UpdateCheckWorker,
@@ -124,6 +130,13 @@ CHECK_BTN_TEXT = "保存并检查更新"
 DOWNLOAD_BTN_TEXT = "下载更新"
 INSTALL_BTN_TEXT = "安装更新"
 
+#: 底部第三个按钮：清空两个升级缓存目录（需求 §36/§37）并重建。
+#: 逻辑在 :mod:`mangaproof.update.cache`（**主程序侧**，与安装器无关）。
+CACHE_BTN_TEXT = "清理升级缓存"
+
+#: 清理成功后追加在结果后面的一行（与分支/渠道失效同一个语义：必须重新检查）
+CACHE_CLEARED_HINT = "请重新点击「保存并检查更新」，再继续下载或安装。"
+
 #: 检查完成后又改了分支/渠道 → 已查到的包跟当前选择不再对应，必须重新检查。
 #: 写在输出区的详情行里（不动状态正文，用户仍能读到版本与更新说明）。
 STALE_SELECTION_HINT = (
@@ -168,6 +181,7 @@ class UpdateDialog(QDialog):
         self._check_worker: UpdateCheckWorker | None = None
         self._download_worker: UpdateDownloadWorker | None = None
         self._proxy_worker: ProxyTestWorker | None = None
+        self._cache_worker: CacheClearWorker | None = None
         self._result: CheckResult | None = None
         self._outcome: CheckOutcome | None = None
         self._package: Path | None = None
@@ -322,10 +336,17 @@ class UpdateDialog(QDialog):
 
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.clicked.connect(self._on_cancel)
-        # 需求 §11.7：主按钮在左、取消在右 —— 用 HBox 固定，不交给 QDialogButtonBox
+        # 需求 §11.7：动作按钮在左、取消在右 —— 用 HBox 固定，不交给 QDialogButtonBox。
+        # 三个动作按钮**紧挨着排在最左**（清理升级缓存属于更新流程的一部分，
+        # 不跟「取消」凑在一起），右侧留 stretch 把取消推到边上。
         buttons.addWidget(self.check_btn)
-        buttons.addStretch(1)
         buttons.addWidget(self.download_btn)
+
+        self.cache_btn = QPushButton(CACHE_BTN_TEXT)
+        self.cache_btn.clicked.connect(self._on_cache_clicked)
+        buttons.addWidget(self.cache_btn)
+
+        buttons.addStretch(1)
         buttons.addWidget(self.cancel_btn)
         root.addLayout(buttons)
         #: 按钮行的布局引用：位置是需求 §11.7 的硬要求，测试要能直接断言顺序
@@ -423,7 +444,7 @@ class UpdateDialog(QDialog):
         if is_android_strict():
             parts.append("CDK 保存在应用私有目录的 settings.json。应用的私有目录受安卓沙箱保护。")
         elif cdk_store.keyring_available():
-            parts.append("系统凭据库可用, CDK 将保存在系统凭据库（keyring），不写入配置文件。")
+            parts.append("系统凭据库可用，CDK 将保存在系统凭据库（keyring），不写入配置文件。")
         else:
             parts.append("系统凭据库不可用，CDK 将明文保存在 settings.json。")
         parts.append("\n代理与限速仅对 Cloudflare R2 / GitHub 生效；MirrorChyan 不使用它们。")
@@ -477,6 +498,72 @@ class UpdateDialog(QDialog):
         """分支/渠道被改动 → 重新判定右侧按钮（可能失效，也可能改回原值而恢复）。"""
         self._sync_actions()
 
+    # -- 清理升级缓存（主程序侧，需求 §36/§37） ----------------------------
+
+    def _on_cache_clicked(self) -> None:
+        """清空两个升级缓存目录（先确认，再交给后台线程）。
+
+        默认按钮是「取消」：这是唯一一个会删掉用户磁盘上东西的动作，
+        虽然都落在临时目录里，也不该一个回车就执行。
+        """
+        if self._state in ("checking", "downloading", "clearing"):
+            return
+        if not self._confirm_cache_clear():
+            return
+
+        self._state = "clearing"
+        self._clear_output()
+        self.status_label.setText("正在清理升级缓存……")
+        self.progress.setRange(0, 0)         # 不确定进度：目录里可能有上百 MB
+        self._show_progress()
+        self._sync_actions()
+
+        worker = CacheClearWorker(parent=self)
+        worker.finished_with.connect(self._on_cache_cleared)
+        self._cache_worker = worker
+        worker.start()
+
+    def _confirm_cache_clear(self) -> bool:
+        """弹窗确认（正文由 :func:`mangaproof.update.cache.confirm_text` 提供）。"""
+        from PySide6.QtWidgets import QMessageBox
+
+        from mangaproof.update.cache import confirm_text
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(CACHE_BTN_TEXT)
+        box.setText(confirm_text())
+        clear_btn = box.addButton("清理", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])       # 默认落在「取消」上
+        box.exec()
+        return box.clickedButton() is clear_btn
+
+    def _on_cache_cleared(self, report: object) -> None:
+        """清理结束：如实展示结果，并让本轮检查结果作废（必须重新检查）。"""
+        # 注意：此刻 _state 已经是 "clearing"，不能拿它判断"原本有没有结果"；
+        # 看 _result/_package 更准（两者都还在，直到下面被清掉）。
+        had_result = self._result is not None or self._package is not None
+        self._reset_progress()
+        self._state = "checked"          # 通用"当前没有可执行动作"状态
+        self._result = None              # 结果作废：缓存没了，包也随之没了
+        # 已下载的包就在被删掉的目录里，哈希与路径必须一起丢掉，
+        # 绝不能让「安装更新」还亮着指向一个已经不存在的文件。
+        self._package = None
+        self._package_sha256 = ""
+        self._set_form_enabled(True)
+        self._clear_output()
+        self.cancel_btn.setText("取消")
+
+        summary = getattr(report, "summary", None)
+        lines = [summary() if callable(summary) else "升级缓存清理结束"]
+        if had_result:
+            lines += ["", CACHE_CLEARED_HINT]
+        self.status_label.setText("\n".join(lines))
+        if not bool(getattr(report, "ok", False)):
+            log.warning("升级缓存未完全清理：%s", self.status_label.text())
+        self._sync_actions()
+
     # -- 按钮/提示的唯一推导出口 -------------------------------------------
 
     def _selection_matches_checked(self) -> bool:
@@ -516,10 +603,10 @@ class UpdateDialog(QDialog):
         集中在这里的原因：旧版散落 7 处 ``setText``（检查/立即更新/立即安装并重启），
         状态一多就出现"按钮停在上一个动作的文案上"这类漂移。
         """
-        busy = self._state in ("checking", "downloading")
+        busy = self._state in ("checking", "downloading", "clearing")
         done = self._state == "done" and self._package is not None
 
-        # 左键文案恒定；忙碌时两个动作按钮都不可点（取消仍可用）
+        # 三个动作按钮：忙碌时全部不可点（取消仍可用）
         self.check_btn.setText(CHECK_BTN_TEXT)
         self.check_btn.setEnabled(not busy)
         self.check_btn.setToolTip(
@@ -529,6 +616,13 @@ class UpdateDialog(QDialog):
         self.download_btn.setText(INSTALL_BTN_TEXT if done else DOWNLOAD_BTN_TEXT)
         self.download_btn.setEnabled(self._download_enabled())
         self.download_btn.setToolTip(self._download_tooltip())
+
+        self.cache_btn.setText(CACHE_BTN_TEXT)
+        self.cache_btn.setEnabled(not busy)
+        self.cache_btn.setToolTip(
+            "正在忙，请等待当前动作结束" if busy
+            else "清空两个升级缓存目录（更新包 / 安装器副本）并重建，之后需要重新检查更新"
+        )
 
         self._refresh_stale_hint()
 
@@ -578,7 +672,10 @@ class UpdateDialog(QDialog):
         信号已被 ``disown()`` 摘掉，不会再有回调去碰已析构的窗口。
         """
         pending: list[object] = []
-        for worker in (self._check_worker, self._download_worker, self._proxy_worker):
+        for worker in (
+            self._check_worker, self._download_worker,
+            self._proxy_worker, self._cache_worker,
+        ):
             if worker is None or not worker.isRunning():
                 continue
             worker.request_cancel()
@@ -852,6 +949,7 @@ class UpdateDialog(QDialog):
 
 
 __all__ = [
+    "CACHE_BTN_TEXT",
     "UpdateDialog",
     "CHANNEL_LABELS",
     "BRANCH_LABELS",

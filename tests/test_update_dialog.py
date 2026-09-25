@@ -34,6 +34,8 @@ sys.path.insert(0, str(ROOT))
 
 from mangaproof.config.settings import SettingsManager, UpdateSettings  # noqa: E402
 from mangaproof.ui.update_dialog import (  # noqa: E402
+    CACHE_BTN_TEXT,
+    CACHE_CLEARED_HINT,
     CHECK_BTN_TEXT,
     DOWNLOAD_BTN_TEXT,
     INSTALL_BTN_TEXT,
@@ -80,7 +82,7 @@ class _FakeWorker:
         self.progress = _SignalStub()
         self.succeeded = _SignalStub()
         self.failed = _SignalStub()
-        self.finished_with = _SignalStub()      # ProxyTestWorker 用
+        self.finished_with = _SignalStub()      # ProxyTestWorker / CacheClearWorker 用
 
     def start(self) -> None:
         pass
@@ -94,7 +96,9 @@ def fake_workers(monkeypatch):
     """三个后台 worker 一律换成假的（本模块绝不起真线程），并按类别记录构造参数。"""
     import mangaproof.ui.update_dialog as ui
 
-    made: dict[str, list[_FakeWorker]] = {"check": [], "download": [], "proxy": []}
+    made: dict[str, list[_FakeWorker]] = {
+        "check": [], "download": [], "proxy": [], "cache": [],
+    }
 
     def _factory(kind: str):
         def _make(**kwargs):
@@ -107,6 +111,7 @@ def fake_workers(monkeypatch):
     monkeypatch.setattr(ui, "UpdateCheckWorker", _factory("check"))
     monkeypatch.setattr(ui, "UpdateDownloadWorker", _factory("download"))
     monkeypatch.setattr(ui, "ProxyTestWorker", _factory("proxy"))
+    monkeypatch.setattr(ui, "CacheClearWorker", _factory("cache"))
     # 平台判定与网络无关，固定住以免测试机架构影响结果
     monkeypatch.setattr("mangaproof.update.detector.current_target", lambda: object())
     return made
@@ -156,6 +161,9 @@ def dialog(qapp, tmp_path):
     manager = SettingsManager(tmp_path / "settings.json")
     manager.save()
     dlg = UpdateDialog(manager.settings)
+    # 清理缓存会弹**模态**确认框：默认让它返回「取消」，免得用例里真的弹出窗口卡死。
+    # 需要走"确认通过"路径的用例自己覆盖成 lambda: True。
+    dlg._confirm_cache_clear = lambda: False
     yield dlg, manager
     dlg.close()
 
@@ -176,26 +184,36 @@ def test_form_has_all_controls_from_requirement(dialog):
     assert dlg.proxy_test_btn.text() == "测试代理"
 
 
-def test_buttons_are_primary_left_cancel_right(dialog):
-    """需求 §11.7：底部主按钮在左、「取消」在右。
+def test_action_buttons_sit_left_of_cancel(dialog):
+    """需求 §11.7：三个动作按钮紧挨着排在最左，「取消」在最右。
 
     不用 QDialogButtonBox 就是为了这个 —— 它会按平台规范重排。
-    2026-09-24 起主按钮是**语义恒定**的「保存并检查更新」，右侧多一个常驻置灰的
-    「下载更新」（它按状态在下载/安装之间切换，见下面的用例）。
+    2026-09-24 起：主按钮是**语义恒定**的「保存并检查更新」，右边紧挨着常驻置灰的
+    「下载更新」（按状态在下载/安装之间切换）与「清理升级缓存」；「取消」不跟它们
+    挤在一起，单独留在最右。
     """
     dlg, _ = dialog
     assert dlg.check_btn.text() == CHECK_BTN_TEXT == "保存并检查更新"
     assert dlg.cancel_btn.text() == "取消"
     row = dlg.action_row
-    assert row.indexOf(dlg.check_btn) == 0, "主按钮必须在最左"
-    assert row.indexOf(dlg.cancel_btn) == row.count() - 1, "取消必须在最右"
-    # 两者之间必须有 stretch（否则会被拉成等宽或贴在一起）
-    assert row.itemAt(1).spacerItem() is not None
-    # 右侧按钮常驻占位（不是 show/hide）：避免状态切换时按钮左右位置抖动。
+    order = [
+        row.itemAt(i).widget() for i in range(row.count())
+        if row.itemAt(i).widget() is not None
+    ]
+    assert order == [dlg.check_btn, dlg.download_btn, dlg.cache_btn, dlg.cancel_btn], \
+        "动作按钮必须紧挨在最左，取消在最右"
+    assert row.indexOf(dlg.cancel_btn) == row.count() - 1
+    # 动作按钮与「取消」之间必须有 stretch（否则会被拉成等宽或贴在一起）
+    spacer = [i for i in range(row.count()) if row.itemAt(i).spacerItem() is not None]
+    assert spacer == [3], f"stretch 必须在第三个动作按钮之后，实际 {spacer}"
+    # 两个按钮都常驻占位（不是 show/hide）：避免状态切换时按钮左右位置抖动。
     # 还没 show() 的窗口里 isVisible() 恒为 False，所以看"有没有被显式藏起来"
     assert not dlg.download_btn.isHidden(), "下载按钮必须常驻占位"
+    assert not dlg.cache_btn.isHidden(), "清理按钮必须常驻占位"
     assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
     assert not dlg.download_btn.isEnabled(), "还没有检查结果时应当置灰"
+    assert dlg.cache_btn.text() == CACHE_BTN_TEXT
+    assert dlg.cache_btn.isEnabled(), "清理缓存随时可用（没有结果时也能清）"
 
 
 def test_progress_is_hidden_initially(dialog):
@@ -363,15 +381,19 @@ def test_busy_states_disable_both_action_buttons(dialog, fake_workers):
     """检查/下载进行中两个动作按钮都不可点（取消仍可用）。"""
     dlg, _ = dialog
 
+    def _busy_buttons():
+        return [dlg.check_btn.isEnabled(), dlg.download_btn.isEnabled(),
+                dlg.cache_btn.isEnabled()]
+
     dlg._on_check_clicked()
     assert dlg._state == "checking"
-    assert not dlg.check_btn.isEnabled() and not dlg.download_btn.isEnabled()
+    assert _busy_buttons() == [False, False, False]
     assert dlg.cancel_btn.isEnabled()
 
     _check(dlg)
     dlg._on_download_clicked()
     assert dlg._state == "downloading"
-    assert not dlg.check_btn.isEnabled() and not dlg.download_btn.isEnabled()
+    assert _busy_buttons() == [False, False, False]
     assert dlg.cancel_btn.isEnabled()
 
 
@@ -494,22 +516,192 @@ def test_recheck_clears_previous_package_and_install_state(dialog, fake_workers,
 
 
 def test_download_button_geometry_is_stable(dialog, fake_workers, tmp_path):
-    """右侧按钮的常驻占位：文案/可用性变化都不许挪动按钮位置或撑大窗口。"""
+    """动作按钮的常驻占位：文案/可用性变化都不许挪动按钮位置或撑大窗口。"""
     from PySide6.QtWidgets import QApplication
 
     dlg, _ = dialog
     _laid_out(dlg)
-    before = (_box(dlg, dlg.download_btn), _box(dlg, dlg.check_btn)[0], dlg.width())
+
+    def geometry():
+        return (
+            _box(dlg, dlg.check_btn)[0],
+            _box(dlg, dlg.download_btn),
+            _box(dlg, dlg.cache_btn),
+            _box(dlg, dlg.cancel_btn)[1],
+            dlg.width(),
+        )
+
+    before = geometry()
 
     _check(dlg)
     QApplication.processEvents()
-    assert (_box(dlg, dlg.download_btn), _box(dlg, dlg.check_btn)[0], dlg.width()) == before
+    assert geometry() == before
 
     package = tmp_path / "pkg.tar.gz"
     package.write_bytes(b"fake package bytes")
     dlg._on_download_ok(package)
     QApplication.processEvents()
-    assert (_box(dlg, dlg.download_btn), _box(dlg, dlg.check_btn)[0], dlg.width()) == before
+    assert geometry() == before
+
+    dlg._confirm_cache_clear = lambda: True      # type: ignore[method-assign]
+    dlg._on_cache_clicked()                      # 进入清理态
+    QApplication.processEvents()
+    assert geometry() == before
+
+
+# -- 清理升级缓存（主程序侧；需求 §36/§37） ------------------------------------
+
+
+def test_cache_click_asks_for_confirmation_first(dialog, fake_workers):
+    """必须先弹窗确认；用户点「取消」时**什么都不做**。"""
+    dlg, _ = dialog
+    asked: list[int] = []
+
+    def deny() -> bool:
+        asked.append(1)
+        return False
+
+    dlg._confirm_cache_clear = deny              # type: ignore[method-assign]
+    dlg._on_cache_clicked()
+
+
+    assert asked == [1], "必须先征求确认"
+    assert fake_workers["cache"] == [], "用户取消后不许起清理线程"
+    assert dlg._state == "idle"
+    assert dlg.cache_btn.isEnabled()
+
+
+def test_cache_clear_runs_in_background_and_disables_actions(dialog, fake_workers):
+    """确认后交给后台线程；清理期间三个动作按钮都不可点（取消仍可用）。"""
+    dlg, _ = dialog
+    dlg._confirm_cache_clear = lambda: True      # type: ignore[method-assign]
+
+    dlg._on_cache_clicked()
+
+    assert len(fake_workers["cache"]) == 1
+    assert dlg._state == "clearing"
+    assert [dlg.check_btn.isEnabled(), dlg.download_btn.isEnabled(),
+            dlg.cache_btn.isEnabled()] == [False, False, False]
+    assert dlg.cancel_btn.isEnabled()
+    assert "正在清理升级缓存" in dlg.status_label.text()
+
+
+def test_cache_cleared_report_is_shown_and_result_invalidated(dialog, fake_workers):
+    """清理结束：结果如实展示；有检查结果时必须提示重新检查。"""
+    from mangaproof.update.cache import CacheClearReport, CacheDirResult, ACTION_REMOVED
+
+    dlg, _ = dialog
+    dlg._confirm_cache_clear = lambda: True      # type: ignore[method-assign]
+    _check(dlg)
+    dlg._on_cache_clicked()
+
+    report = CacheClearReport([
+        CacheDirResult(
+            "MangaProof-update-package", Path("/tmp/MangaProof-update-package"),
+            ACTION_REMOVED, freed_bytes=2048,
+        )
+    ])
+    dlg._on_cache_cleared(report)
+
+    text = dlg.output_text()
+    assert "升级缓存已清理" in text and "2.0 KB" in text
+    assert CACHE_CLEARED_HINT in text
+    assert dlg._state == "checked"
+    assert dlg._result is None, "检查结果必须作废"
+    assert not dlg.download_btn.isEnabled(), "清理后必须重新检查才能下载"
+    assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+    assert dlg.check_btn.isEnabled(), "左键随时能重新检查"
+
+
+def test_cache_clear_drops_downloaded_package(dialog, fake_workers, tmp_path):
+    """已下载更新包时清理缓存：包路径与 SHA-256 必须一起丢掉，安装按钮回退。"""
+    dlg, _ = dialog
+    dlg._confirm_cache_clear = lambda: True      # type: ignore[method-assign]
+    package = tmp_path / "MangaProof-1.1.10.alpha-linux-x64.tar.gz"
+    package.write_bytes(b"fake package bytes")
+    _check(dlg)
+    dlg._on_download_ok(package)
+    assert dlg.download_btn.text() == INSTALL_BTN_TEXT
+    assert dlg.take_package() == package
+
+    dlg._on_cache_clicked()
+    from mangaproof.update.cache import CacheClearReport
+
+    dlg._on_cache_cleared(CacheClearReport([]))
+
+    assert dlg.take_package() is None, "包已被删，绝不能还留着可安装的路径"
+    assert dlg.take_package_sha256() == ""
+    assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+    assert not dlg.download_btn.isEnabled()
+    assert CACHE_CLEARED_HINT in dlg.output_text()
+    assert dlg.branch_combo.isEnabled(), "清理后表单要恢复可编辑（可以改配置再检查）"
+
+
+def test_cache_clear_failure_is_reported_verbatim(dialog, fake_workers):
+    """清理失败（权限/占用）要原样报出来，而不是假装成功。"""
+    from mangaproof.update.cache import (
+        ACTION_FAILED, ACTION_REMOVED, CacheClearReport, CacheDirResult,
+    )
+
+    dlg, _ = dialog
+    report = CacheClearReport([
+        CacheDirResult("MangaProof-update-package", Path("/tmp/x"), ACTION_FAILED,
+                       detail="Permission denied"),
+        CacheDirResult("MangaProof-update-installer", Path("/tmp/y"), ACTION_REMOVED,
+                       freed_bytes=0),
+    ])
+
+    dlg._on_cache_cleared(report)
+
+    text = dlg.output_text()
+    assert "删除失败" in text and "Permission denied" in text
+    assert not dlg.download_btn.isEnabled()
+
+
+def test_confirm_prompt_is_the_shared_copy(dialog, fake_workers, monkeypatch):
+    """弹窗正文必须来自 cache.confirm_text()（内容由 test_update_cache.py 守）。"""
+    seen: list[str] = []
+
+    class _Box:
+        class Icon:      # noqa: N801 - 模仿 Qt 枚举
+            Question = 0
+
+        class ButtonRole:      # noqa: N801
+            AcceptRole = 0
+            RejectRole = 1
+
+        def __init__(self, *_a, **_k):
+            pass
+
+        def setIcon(self, *_a): pass
+        def setWindowTitle(self, *_a): pass
+
+        def setText(self, text):
+            seen.append(text)
+
+        def addButton(self, *_a):
+            return object()
+
+        def setDefaultButton(self, *_a): pass
+        def buttons(self):
+            return [object(), object()]
+
+        def exec(self): pass
+
+        def clickedButton(self):
+            return None
+
+    import PySide6.QtWidgets as qt
+
+    monkeypatch.setattr(qt, "QMessageBox", _Box)
+    import mangaproof.update.cache as cache_mod
+
+    dlg, _ = dialog
+    # fixture 给实例装的是"永远取消"的替身，这里直接调用真实方法
+    confirmed = UpdateDialog._confirm_cache_clear(dlg)
+    assert confirmed is False                         # clickedButton 为 None → 视为取消
+    assert seen == [cache_mod.confirm_text()]
+    assert "MangaProof-update-package" in seen[0]
 
 
 # -- 布局回归 ---------------------------------------------------------------
