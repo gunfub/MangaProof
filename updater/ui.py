@@ -294,7 +294,7 @@ LAUNCH_NOTICE_TITLE = "无法直接启动"
 LAUNCH_NOTICE_BODY = "此程序不能直接打开，只能由 MangaProof 主程序的「更新」功能自动调用。"
 
 #: 操作提示（说清"要更新该怎么做"）
-LAUNCH_NOTICE_HINT = "如需更新：打开 MangaProof →「更新」→「保存并检查更新」，按提示完成。"
+LAUNCH_NOTICE_HINT = "如需更新：打开 MangaProof →「关于」→「检查更新」→「保存并检查更新」，按提示完成。"
 
 #: 唯一的按钮（Esc / 回车 / 关窗同义）
 LAUNCH_NOTICE_BUTTON = "退出"
