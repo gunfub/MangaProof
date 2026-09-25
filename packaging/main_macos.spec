@@ -8,6 +8,13 @@
 Finder 双击启动无终端输出；从终端运行则输出保留在终端。
 图标：ico/ico.icns（App Bundle 图标，含 11 个尺寸块）；
 ico/ico.png 随包分发（运行时窗口图标）。
+
+`ico.icns` 由 `scripts/make_icns.py` 从 `ico/ico.png` 生成，并已适配 macOS 图标网格：
+1024 画布 / 824×824 实体居中 / 四边各 100px 透明环 / 圆角 184px（= 22.3% of 824）。
+实测 Apple 自家 Xcode、iMovie 与 macOS 26 原生应用的图标实体框都是 (100,100,924,924)，
+圆角按 184px 拟合 IoU ≈ 0.998 —— 直接用满幅源图切块会让 Dock 里的图标大出约 24%。
+生成时会同时落盘 `ico/ico-macos-1024.png`（那张网格主图，便于评审与回归）。
+回归测试见 tests/test_icon_assets.py（含"入库产物必须与脚本输出逐字节一致"）。
 """
 
 import os

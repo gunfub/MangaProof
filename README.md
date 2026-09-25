@@ -443,6 +443,8 @@ THIRD_PARTY_LICENSES.md  # 第三方组件与许可全文（由 scripts/build_th
   依据《MiSans 字体知识产权许可协议》使用：不改编、不单独分发；字体文件缺失时回退内置宋体，生成不受影响；
   Android 端额外附带 `NotoSansSymbols2` 作为符号回退（该平台无系统字体回退）；
 - 图标由 `ico/` 提供（Windows `.ico` / macOS `.icns` / Linux `.png` / Android 自适应图标）；
+  macOS 的 `.icns` 由 `scripts/make_icns.py` 生成，输出前会适配 Apple 的图标网格
+  （1024 画布 / 824 实体居中 / 四边 100px / 圆角 184px），因此不能拿 `ico.png` 直接转换；
 - 第三方组件（Python、psd-tools、NumPy、PySide6 / Qt、shiboken6、reportlab、Pillow、
   attrs、charset-normalizer、MiSans 字体等）的版本、许可证与版权信息有两种查看方式，
   内容同源：
