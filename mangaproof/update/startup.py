@@ -211,12 +211,21 @@ def recovery_message(report: RecoveryReport) -> str:
     if not report.needs_attention:
         return ""
     where = str(report.old_dir) if report.old_dir else "（未知位置）"
+    # 更新临时目录里的"数据备份"只是升级途中的中转副本（§49 复制出来、§56 恢复回去），
+    # 而且可以被「清理升级缓存」手动删掉 —— 所以这句话必须看它是否真的还在，
+    # 否则会把用户指到一个不存在的目录去。
+    backup_hint = (
+        "用户数据（settings.json / recent.json / logs）保存在更新临时目录的备份里。"
+        if platform_dirs.data_backup_dir(create=False).is_dir()
+        else "更新临时目录里的数据备份已不存在（可能已被手动清理），"
+             "无法再从那里恢复用户数据。"
+    )
     return (
         "上一次更新没有正常完成。\n\n"
         f"旧版本目录仍保留在：\n{where}\n\n"
         "当前运行的程序可以继续使用。若当前版本存在问题，"
         "可关闭程序后把上述目录改名为原来的名字，即可回到旧版本；"
-        "用户数据（settings.json / recent.json / logs）保存在更新临时目录的备份里。"
+        f"{backup_hint}"
     )
 
 

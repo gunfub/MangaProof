@@ -117,6 +117,9 @@ def test_recovery_flags_interrupted_update_without_deleting(monkeypatch, tmp_pat
     old_dir.mkdir()
     (old_dir / "MangaProof").write_text("old binary", encoding="utf-8")
     monkeypatch.setattr(startup, "_old_dir_candidates", lambda: [old_dir])
+    backup = tmp_path / "MangaProof-update-data"
+    backup.mkdir()
+    monkeypatch.setattr(startup.platform_dirs, "data_backup_dir", lambda **_kw: backup)
 
     report = startup.detect_interrupted_update()
     assert report.had_old_dir and report.old_dir == old_dir
@@ -126,6 +129,23 @@ def test_recovery_flags_interrupted_update_without_deleting(monkeypatch, tmp_pat
     message = startup.recovery_message(report)
     assert "上一次更新没有正常完成" in message
     assert str(old_dir) in message
+    assert "更新临时目录的备份里" in message, "备份还在时照旧告诉用户去哪找"
+
+
+def test_recovery_message_notices_a_cleared_backup(tmp_path, monkeypatch):
+    """「清理升级缓存」删掉备份之后，提示不许再说"备份在更新临时目录里"。"""
+    old_dir = tmp_path / "MangaProof.old"
+    old_dir.mkdir()
+    monkeypatch.setattr(startup, "_old_dir_candidates", lambda: [old_dir])
+    monkeypatch.setattr(
+        startup.platform_dirs, "data_backup_dir",
+        lambda **_kw: tmp_path / "不存在的备份目录",
+    )
+
+    message = startup.recovery_message(startup.detect_interrupted_update())
+
+    assert "数据备份已不存在" in message
+    assert "更新临时目录的备份里" not in message
 
 
 def test_recovery_ignores_marker_of_another_version(monkeypatch, tmp_path):
