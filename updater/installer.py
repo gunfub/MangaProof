@@ -15,6 +15,11 @@
    已经过了"包存在 + SHA-256 + 结构 + 主程序存在"。
 2. **等待成功标记最长 60 秒**（§59），并且新版**提前退出且没有标记时立即回滚**，
    不等满 60 秒（§60）。标记必须 token + version 双匹配（§59/§61）。
+   "新版提前退出"的判据是**按进程名找不到主程序**，而不是"跟踪的 pid 消失"：
+   macOS 用 ``open -n -a`` 启动 .app，``spawn`` 拿到的 pid 属于 ``open`` 自己，
+   它必然秒退（2026-09-24 实测的"更新后误报失败"根因）。pid 消失后先按名字
+   重定位（宽限 :data:`RELOCATE_TIMEOUT` 秒），找不到才判失败。等待期间不结束
+   主程序；仅超时才按既有语义结束它。安装前同理：pid 退出后要用进程名复核一次。
 3. **任何判为失败的分支都必须完成回滚**（§62/§63）：:meth:`Installer.run` 的
    异常出口统一走 :func:`updater.rollback.rollback`；没做过替换时回滚是无操作，
    因此"校验失败不触碰安装目录"是天然成立的。
@@ -53,6 +58,13 @@ SUCCESS_TIMEOUT = 60.0
 PARENT_EXIT_TIMEOUT = 30.0
 #: 轮询间隔
 POLL_INTERVAL = 0.25
+#: 跟踪的 pid 消失后，按**进程名**重新找到主程序的宽限期。
+#: macOS 用 ``open -n -a`` 启动 .app：spawn 拿到的 pid 是 ``open`` 自己的，
+#: 它必然秒退，而真正的 app 由 LaunchServices 稍后拉起（冷启动 / Gatekeeper
+#: 校验可能要几秒）。一退出就判失败就是 2026-09-24 实测的误报。
+RELOCATE_TIMEOUT = 20.0
+#: 按进程名查询的最小间隔（``ps -A`` 不便宜，不必每个 poll 都查一次）
+LOOKUP_INTERVAL = 0.5
 #: 安装器临时目录名前缀（需求 §40/§36/§37：TEMP|CACHE/MangaProof-update-installer）
 INSTALLER_TEMP_PREFIX = "MangaProof-update-installer"
 
@@ -125,10 +137,18 @@ class InstallerOptions:
 
 
 class ProcessOps:
-    """启动/探测新版进程（可注入：单测不真的起进程）。"""
+    """启动/探测新版进程（可注入：单测不真的起进程）。
+
+    除了"某个 pid 还在不在"，还必须能回答"**有没有叫这个名字的进程**"：
+    macOS 上新版 .app 是经 LaunchServices（``open -n -a``）拉起的，``spawn``
+    拿到的 pid 属于 ``open`` 自己、与真正的 app 没有父子关系，只能按名字找回来
+    （2026-09-24 实测的"更新后误报失败"根因）。
+    """
 
     def __init__(self) -> None:
         self._procs: dict[int, subprocess.Popen] = {}
+        #: 本机 ``ps`` 是否接受 ``state`` 列（只探测一次，失败就退回不带 state 的形式）
+        self._ps_with_state: bool | None = None
 
     def spawn(
         self,
@@ -199,6 +219,173 @@ class ProcessOps:
         except Exception:  # pragma: no cover - 尽力而为
             pass
 
+    # -- 按进程名查找（"启动器"型拉起 / pid 复核） ------------------------- #
+
+    def exe_matches(self, pid: int, name: str) -> bool | None:
+        """``pid`` 的可执行文件名是否等于 ``name``。
+
+        :returns: ``True``/``False``；``None`` = **查不了**（没有 ps / 调用失败），
+            调用方必须把它当成"无法确认"，不能当成"不匹配"。
+        """
+        if pid <= 0 or not name:
+            return None
+        if os.name == "nt":  # pragma: no cover - 平台分支
+            rows = _win_process_table()
+            if rows is None:
+                return None
+            for row_pid, exe in rows:
+                if row_pid == pid:
+                    return exe == name
+            return False
+        rows = self._ps_table(pid=pid)
+        if rows is None:
+            return None
+        for row_pid, _state, comm in rows:
+            if row_pid == pid:
+                return _basename(comm) == name
+        return False
+
+    def find_running(self, name: str, *, exclude: set[int] | None = None) -> list[int] | None:
+        """正在运行的、可执行文件名等于 ``name`` 的 pid 列表（升序）。
+
+        :returns: ``None`` = **查不了**（此时上层必须继续等，绝不能判失败——
+            否则"ps 不可用"会变成又一次误报失败）；``[]`` = 确实没有。
+        """
+        if not name:
+            return None
+        skip = set(exclude or ())
+        if os.name == "nt":  # pragma: no cover - 平台分支
+            rows = _win_process_table()
+            if rows is None:
+                return None
+            return sorted(pid for pid, exe in rows if exe == name and pid not in skip)
+        table = self._ps_table()
+        if table is None:
+            return None
+        found = [
+            pid for pid, state, comm in table
+            if pid not in skip and _basename(comm) == name and not _is_zombie(state)
+        ]
+        return sorted(found)
+
+    def _ps_table(self, pid: int | None = None) -> list[tuple[int, str, str]] | None:
+        """跑一次 ``ps`` 取 ``(pid, state, comm)`` 表；查不了返回 ``None``。
+
+        ``comm`` 在 macOS 上是可执行文件全路径、在 Linux 上是进程名（截断到 15
+        字符），统一取 basename 比对；带空格路径按"只切前两列"解析。
+        ``state`` 用来剔除僵尸进程（僵尸还占着名字，会把等待拖到超时）。
+        """
+        for with_state in self._ps_forms():
+            args = ["ps", "-A", "-o", "pid=,state=,comm="] if with_state else [
+                "ps", "-A", "-o", "pid=,comm="
+            ]
+            if pid is not None:
+                args[1] = "-p"
+                args.insert(2, str(pid))
+            try:
+                proc = subprocess.run(  # noqa: S603
+                    args, capture_output=True, text=True, timeout=5.0, check=False
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if proc.returncode != 0:
+                continue
+            if self._ps_with_state is None:
+                self._ps_with_state = with_state
+            return _parse_ps_table(proc.stdout, with_state=with_state)
+        return None
+
+    def _ps_forms(self) -> tuple[bool, ...]:
+        if self._ps_with_state is None:
+            return (True, False)
+        return (self._ps_with_state,)
+
+
+def _basename(comm: str) -> str:
+    """``ps`` 的 comm 列 → 可执行文件名（macOS 是全路径，Linux 是进程名）。"""
+    text = (comm or "").strip()
+    if not text:
+        return ""
+    return text.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _is_zombie(state: str) -> bool:
+    return (state or "").strip().upper().startswith("Z")
+
+
+def _parse_ps_table(text: str, *, with_state: bool) -> list[tuple[int, str, str]]:
+    """解析 ``ps -o pid=,state=,comm=`` 的输出（comm 可能带空格，只切前两列）。"""
+    rows: list[tuple[int, str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if with_state:
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            pid_text, state, comm = parts
+        else:
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            pid_text, comm = parts
+            state = ""
+        try:
+            rows.append((int(pid_text), state, comm))
+        except ValueError:      # pragma: no cover - ps 不按格式输出时跳过该行
+            continue
+    return rows
+
+
+def _win_process_table() -> list[tuple[int, str]] | None:
+    """Windows：Toolhelp32 快照取 ``(pid, exe 文件名)``；失败返回 ``None``。
+
+    与 :func:`_probe_pid` 一样是"尽力而为"：拿不到就返回 ``None``，让上层继续等，
+    绝不因为查不到而误判失败。
+    """
+    try:  # pragma: no cover - 平台分支（本机与 CI 都不跑 Windows 单测）
+        import ctypes
+        from ctypes import wintypes
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        MAX_PATH = 260
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),   # ULONG_PTR
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * MAX_PATH),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == INVALID_HANDLE_VALUE:
+            return None
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return None
+            rows: list[tuple[int, str]] = []
+            while True:
+                rows.append((int(entry.th32ProcessID), str(entry.szExeFile)))
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+            return rows
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return None
+
 
 def _probe_pid(pid: int) -> bool:
     """进程是否还在（默认实现：POSIX 用 ``kill(pid, 0)``）。"""
@@ -251,6 +438,10 @@ class Runtime:
     success_timeout: float = SUCCESS_TIMEOUT
     parent_timeout: float = PARENT_EXIT_TIMEOUT
     poll_interval: float = POLL_INTERVAL
+    #: pid 消失后按进程名重定位主程序的宽限期（见 :data:`RELOCATE_TIMEOUT`）
+    relocate_timeout: float = RELOCATE_TIMEOUT
+    #: 按进程名查询的最小间隔（见 :data:`LOOKUP_INTERVAL`）
+    lookup_interval: float = LOOKUP_INTERVAL
     retries: int = 5
     retry_delay: float = 0.2
     user_kwargs: dict[str, int] = field(default_factory=dict)
@@ -328,6 +519,8 @@ class Installer:
         self.store = self.rt.store or state_mod.StateStore(options.state_path)
         self._elevation_required = False
         self._last_marker_reason = ""
+        #: 下一次允许"按进程名查进程"的时刻（``ps -A`` 不便宜，按 lookup_interval 节流）
+        self._next_lookup_at = 0.0
 
     # ------------------------------------------------------------------ #
     # 状态推进
@@ -515,20 +708,74 @@ class Installer:
 
     # -- 等待主程序退出（§46） ------------------------------------------ #
     def _wait_parent(self) -> None:
+        """等待主程序退出：pid 确认 + **进程名复核**。
+
+        只看 pid 不够（2026-09-24 实测修正），两种反向情况都会出事：
+
+        - pid 被系统复用给别的进程 → ``alive(pid)`` 永远为真，只能干等到超时
+          （按名字查一次就能认出来：主程序确实不在了 → 放行）；
+        - pid 没了但主程序还在跑（换了 pid / 另有实例）→ 会**在程序运行时替换它的
+          文件**，所以 pid 退出后必须再确认"没有任何叫这个名字的进程"。
+        """
         pid = int(self.options.parent_pid)
         if pid <= 0:
             return
+        name = self._main_process_name()
         deadline = self.rt.now() + self.rt.parent_timeout
         self._item(f"主程序 pid={pid}", "等待退出")
         self.reporter.progress(0, -1)
+
         while self.rt.ops.alive(pid):
+            if name and self.rt.ops.exe_matches(pid, name) is False:
+                # 这个 pid 已经不属于主程序了。三种可能，都靠"按名字查一次"区分：
+                #   · 查得到 → 主程序换了 pid 还在跑（继续等它，别去动它的文件）；
+                #   · 查得到且为空 → pid 只是被系统复用，主程序确实已经退出；
+                #   · 查不了（None）→ 保守起见继续等这个 pid，直到超时。
+                found = self.rt.ops.find_running(name, exclude={os.getpid()})
+                if found:
+                    self.reporter.log(
+                        f"pid={pid} 已不是 {name}，但检测到 {name} 仍在运行"
+                        f"（pid={found[0]}），继续等待它退出"
+                    )
+                    break
+                if found is not None:
+                    self.reporter.log(
+                        f"pid={pid} 已被系统分配给其它进程（不是 {name}），"
+                        "视为主程序已退出"
+                    )
+                    break
             if self.rt.now() >= deadline:
                 raise InstallerFailure(
                     ExitCode.VALIDATION,
                     f"等待主程序退出超时（pid={pid}，{self.rt.parent_timeout:.0f} 秒）",
                 )
             self.rt.sleep(self.rt.poll_interval)
+
+        # pid 退出（或已确认换人）之后：**再按进程名确认一次**。只看 pid 会在
+        # "主程序换了 pid / 还有另一个实例"时带着运行中的程序去替换文件。
+        while name:
+            found = self.rt.ops.find_running(name, exclude={os.getpid()})
+            if found is None:
+                self.reporter.log(f"无法枚举进程（ps 不可用），跳过 {name} 的名称复核")
+                break
+            if not found:
+                break
+            if self.rt.now() >= deadline:
+                raise InstallerFailure(
+                    ExitCode.VALIDATION,
+                    f"仍有 {name} 进程在运行（pid={found[0]}）："
+                    "请先退出该程序，再重新发起更新",
+                )
+            self._item(f"{name}（pid={found[0]}）", "等待退出")
+            self.rt.sleep(self.rt.poll_interval)
         self.reporter.log(f"主程序（pid={pid}）已退出，开始安装")
+
+    def _main_process_name(self) -> str:
+        """主程序的可执行文件名（按平台取；取不到 = 空串，表示不做名称校验）。"""
+        try:
+            return Path(archive.install_main_rel(self.options.platform)).name
+        except archive.ArchiveError:      # pragma: no cover - VALIDATE 已挡住非法平台
+            return ""
 
     # -- BACKUP_DATA（§49） --------------------------------------------- #
     def _backup_data(self) -> None:
@@ -727,11 +974,33 @@ class Installer:
 
     # -- WAIT_SUCCESS（§59/§60/§61） ------------------------------------ #
     def _wait_success(self) -> None:
+        """等待新版写成功标记（§59/§60/§61）。
+
+        **"新版提前退出"的判据是"按进程名找不到主程序"，不是"跟踪的 pid 消失"**
+        （2026-09-24 实测修正）。macOS 上 ``_launch_argv`` 用 ``open -n -a`` 启动
+        .app，``spawn`` 返回的是 ``open`` 自己的 pid —— 它一定会立刻退出，而真正
+        的 app 由 LaunchServices 稍后拉起、pid 完全不同。旧实现看到 pid 消失就
+        立刻判"新版已退出但没写标记"并回滚，于是每次 macOS 更新都被误判失败、
+        而且在 app 正在启动时把它的目录删掉了。
+
+        现在的顺序（每次 pid 消失时走一遍）：
+
+        1. 退出前可能刚写完标记 → 最后再确认一次（§60 原有语义）；
+        2. 按进程名找主程序：找到 → 记下新 pid 继续等标记（**不判失败**）；
+        3. 找不到 → 进入 :data:`RELOCATE_TIMEOUT` 宽限期（``open`` 退出到 app
+           出现之间本来就有几百毫秒到几秒），宽限期内一直找不到才判失败；
+        4. 查不了（``ps`` 不可用）→ 当作"可能还活着"，等满 ``success_timeout``
+           再按超时处理，绝不因为查不到而早判失败。
+
+        等待期间**不结束主程序**；只有真到了超时（§59 的 60 秒）才按既有语义
+        结束它并回滚（需求方 2026-09-24 决策：超时维持现状）。
+        """
         self._phase("WAIT_SUCCESS")
         opts = self.options
         marker = Path(opts.success_marker)
-        pid = int(self.state.child_pid)
+        name = self._main_process_name()
         deadline = self.rt.now() + self.rt.success_timeout
+        relocate_deadline: float | None = None
         self._item(
             f"等待新版本写入成功标记（最长 {self.rt.success_timeout:.0f} 秒）", "等待"
         )
@@ -743,17 +1012,50 @@ class Installer:
             if check.exists and check.reason != self._last_marker_reason:
                 self._last_marker_reason = check.reason
                 self.reporter.log(f"暂不接受成功标记：{check.reason}")
-            if pid > 0 and not self.rt.ops.alive(pid):
+
+            pid = int(self.state.child_pid)
+            child_alive = pid > 0 and self.rt.ops.alive(pid)
+            if not child_alive and pid > 0:
                 # 新版已退出：退出前可能刚写完标记，最后再确认一次（§60）
                 final = state_mod.check_marker(marker, opts.token, opts.version)
                 if final.valid:
                     self.reporter.log(f"收到有效成功标记：{marker}")
                     return
-                self._item(f"新版本（pid={pid}）", "已退出但未写成功标记")
-                raise InstallerFailure(
-                    ExitCode.SUCCESS_TIMEOUT,
-                    "新版本已退出但没有写入成功标记，立即回滚（需求 §60）",
-                )
+
+            if child_alive:
+                relocate_deadline = None
+            else:
+                now = self.rt.now()
+                if now >= self._next_lookup_at:
+                    self._next_lookup_at = now + max(0.0, self.rt.lookup_interval)
+                    found = (
+                        self.rt.ops.find_running(name, exclude={os.getpid()})
+                        if name else None
+                    )
+                    if found:
+                        self._adopt_child(found[0])
+                        relocate_deadline = None
+                    elif found is None:
+                        if relocate_deadline is None:
+                            self.reporter.log(
+                                f"pid={pid} 已退出，且无法枚举进程（ps 不可用）："
+                                "只能等满超时再判定"
+                            )
+                        relocate_deadline = None
+                    elif relocate_deadline is None:
+                        relocate_deadline = now + self.rt.relocate_timeout
+                        self.reporter.log(
+                            f"跟踪的进程（pid={pid}）已退出，正在按名称查找主程序"
+                            f"（最多 {self.rt.relocate_timeout:.0f} 秒）"
+                        )
+                if relocate_deadline is not None and now >= relocate_deadline:
+                    self._item(f"新版本（{name or pid}）", "已退出且未写成功标记")
+                    raise InstallerFailure(
+                        ExitCode.SUCCESS_TIMEOUT,
+                        f"新版本进程已退出且没有写入成功标记（等待 {name or pid} "
+                        f"{self.rt.relocate_timeout:.0f} 秒未出现），立即回滚（需求 §60）",
+                    )
+
             if self.rt.now() >= deadline:
                 if pid > 0:
                     self.rt.ops.terminate(pid)  # 超时：尽力结束挂住的新版
@@ -763,6 +1065,18 @@ class Installer:
                     "更新失败（需求 §59/§62）",
                 )
             self.rt.sleep(self.rt.poll_interval)
+
+    def _adopt_child(self, pid: int) -> None:
+        """把跟踪目标换成"按进程名找到的"那个 pid（同步状态文件，便于事后排查）。"""
+        old = int(self.state.child_pid)
+        if pid == old:
+            return
+        self.reporter.log(
+            f"pid={old} 已退出，主程序以 pid={pid} 在运行，继续等待成功标记（§59）"
+        )
+        self._item(f"主程序（pid={pid}）", "继续等待")
+        self.state.child_pid = int(pid)
+        self.store.save(self.state)
 
     # -- CLEANUP（§61） ------------------------------------------------- #
     def _cleanup(self) -> None:
@@ -926,8 +1240,10 @@ def default_reporter() -> Reporter:
 
 __all__ = [
     "INSTALLER_TEMP_PREFIX",
+    "LOOKUP_INTERVAL",
     "PARENT_EXIT_TIMEOUT",
     "POLL_INTERVAL",
+    "RELOCATE_TIMEOUT",
     "SUCCESS_TIMEOUT",
     "ExitCode",
     "Installer",

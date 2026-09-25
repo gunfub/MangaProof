@@ -28,11 +28,65 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from updater.installer import ProcessOps  # noqa: E402
 from updater.ui import Reporter  # noqa: E402
 
 LINUX_ROOT = "MangaProof"
 MACOS_ROOT = "MangaProof.app"
 WINDOWS_ROOT = "MangaProof"
+
+
+class ScriptedLookupOps(ProcessOps):
+    """进程探测替身：**不扫描测试机上的真实进程表**。
+
+    "按进程名找主程序"（macOS 的 ``open -n -a`` 会让跟踪的 pid 秒退）必须能在单测里
+    被精确编排，否则结果会取决于开发机上有没有跑着 MangaProof：
+
+    - :meth:`find_running` 按 ``lookup`` 序列逐个返回（用完后重复最后一个元素）；
+      元素可以是 ``[pid, …]``（找到）、``[]``（确认没有）、``None``（查不了）；
+    - :meth:`exe_matches` 默认 ``True``（Linux/Windows 语义：spawn 出来的就是主程序），
+      用 ``exe_name=`` 可以模拟"pid 已被系统复用给别的进程"。
+
+    进程存活判定仍走真实的 :meth:`ProcessOps.alive`（持有 Popen 时用 ``poll()``）。
+    """
+
+    def __init__(
+        self,
+        lookup: list[list[int] | None] | None = None,
+        *,
+        exe_name: str | None = None,
+        launcher_style: bool = False,
+    ) -> None:
+        super().__init__()
+        self.lookup = list(lookup or [[]])
+        self.exe_name = exe_name
+        #: True = 模拟 macOS 的 ``open``：**spawn 出来的那个 pid 一律当已退出**，
+        #: 只有"按进程名查到"的 pid 才算活着（等价于"启动器秒退、app 换 pid"）。
+        self.launcher_style = launcher_style
+        self.live: set[int] = set()
+        self.lookup_calls = 0
+
+    def alive(self, pid: int) -> bool:
+        if self.launcher_style:
+            return pid in self.live
+        return super().alive(pid)
+
+    def find_running(self, name: str, *, exclude: set[int] | None = None):
+        self.lookup_calls += 1
+        index = min(self.lookup_calls, len(self.lookup)) - 1
+        value = self.lookup[index]
+        if callable(value):
+            value = value()          # 动态查（例如从 pid 文件里读真正的 app pid）
+        result = None if value is None else list(value)
+        if self.launcher_style and result:
+            self.live.update(result)
+        return result
+
+    def exe_matches(self, pid: int, name: str) -> bool | None:
+        if self.exe_name is None:
+            return True
+        return self.exe_name == name
+
 
 #: 记录所有 UI 事件的 reporter（断言"三层信息"都真的被上报过）
 class RecordingReporter(Reporter):
@@ -196,13 +250,32 @@ MAIN_SCRIPT_EXIT_EARLY = """#!/bin/sh
 exit 3
 """
 
+#: 一直活着但永远不写 marker（"超时"场景；安装器按 §59 结束它并回滚）
+MAIN_SCRIPT_HANG = """#!/bin/sh
+sleep 300
+"""
+
+#: macOS 型"启动器"假新版（等价于 ``/usr/bin/open -n -a``）：
+#: 把真正的主程序丢到后台就立刻退出 —— 于是安装器 ``spawn`` 拿到的那个 pid
+#: 秒退，而 app 以**另一个 pid** 在跑（2026-09-24 实测的误报失败根因）。
+MAIN_SCRIPT_LAUNCHER = """#!/bin/sh
+DIR=$(dirname "$0")
+"$DIR/_internal/real-main" "$@" >/dev/null 2>&1 &
+echo $! > "{pidfile}"
+exit 0
+"""
+
 
 def sh_script(body: str) -> bytes:
     return body.encode("utf-8")
 
 
-def main_script_ok(witness: Path | None = None) -> bytes:
-    return sh_script(MAIN_SCRIPT_OK.format(witness=witness or ""))
+def main_script_ok(witness: Path | None = None, *, delay: float = 0.0) -> bytes:
+    """正常新版：写 marker 后退出；``delay`` 用来让"标记还没出现"的那几轮可预期。"""
+    body = sh_script(MAIN_SCRIPT_OK.format(witness=witness or ""))
+    if delay > 0:
+        body = body.replace(b"#!/bin/sh\n", f"#!/bin/sh\nsleep {delay}\n".encode(), 1)
+    return body
 
 
 def main_script_bad_token() -> bytes:
@@ -215,6 +288,20 @@ def main_script_bad_version() -> bytes:
 
 def main_script_exit_early() -> bytes:
     return sh_script(MAIN_SCRIPT_EXIT_EARLY)
+
+
+def main_script_hang() -> bytes:
+    return sh_script(MAIN_SCRIPT_HANG)
+
+
+def main_script_launcher(pidfile: Path) -> bytes:
+    """启动器型新版：需要包内另有 ``_internal/real-main``（见 :func:`launcher_extra`）。"""
+    return sh_script(MAIN_SCRIPT_LAUNCHER.format(pidfile=pidfile))
+
+
+def launcher_extra(real_main: bytes) -> list["ArchiveEntry"]:
+    """启动器型新版所需的"真正主程序"条目（丢在 ``_internal/`` 里）。"""
+    return [ArchiveEntry("MangaProof/_internal/real-main", "file", 0o755, real_main)]
 
 
 # --------------------------------------------------------------------------- #

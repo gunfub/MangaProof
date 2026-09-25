@@ -34,7 +34,12 @@ pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="假新版程序是 POSIX sh 脚本（真实流程在 CI 的 Windows 上人工验证）"
 )
 
-FAST = dict(success_timeout=8.0, poll_interval=0.05, parent_timeout=1.0, retry_delay=0.05)
+#: 全部等待都压到亚秒级；relocate_timeout 是"pid 消失后按名字找主程序"的宽限期，
+#: 正常路径（test_updater_launcher.py 的 macOS 型场景）由用例自己调大。
+FAST = dict(
+    success_timeout=8.0, poll_interval=0.05, parent_timeout=1.0, retry_delay=0.05,
+    relocate_timeout=0.5, lookup_interval=0.05,
+)
 
 
 def build_env(tmp_path: Path, *, main_content: bytes | None = None,
@@ -76,7 +81,12 @@ def make_options(env: sup.FlowEnv, **overrides) -> InstallerOptions:
 
 
 def make_runtime(env: sup.FlowEnv, **overrides) -> Runtime:
-    kwargs = dict(reporter=env.reporter, allow_elevation=False, **FAST)
+    # ops 默认注入替身：**绝不扫描测试机上的真实进程表**（否则"有没有同名进程"
+    # 会取决于开发机上是否正跑着 MangaProof，用例就会随机失败）
+    kwargs = dict(
+        reporter=env.reporter, allow_elevation=False,
+        ops=sup.ScriptedLookupOps(), **FAST,
+    )
     kwargs.update(overrides)
     return Runtime(**kwargs)
 
