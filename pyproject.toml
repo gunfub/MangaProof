@@ -1,6 +1,6 @@
 [project]
 name = "mangaproof"
-version = "1.1.12.alpha"
+version = "1.1.12.beta"
 description = "MangaProof - 漫画翻译质量检查与返修标注工具（独立于 Photoshop 的 PSD QA 工作台）"
 readme = "README.md"
 requires-python = ">=3.12"
