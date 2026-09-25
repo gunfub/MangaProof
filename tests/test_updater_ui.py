@@ -373,7 +373,11 @@ def test_pick_font_family_survives_a_failing_system_lookup(monkeypatch):
 
 
 class _FakeWidget:
-    """假 Tk 控件：记录构造参数与 pack 参数，供"深色提示窗长什么样"的断言使用。"""
+    """假 Tk 控件：记录构造参数与 pack 参数，供"窗口长什么样"的断言使用。
+
+    `InstallerWindow` / 深色提示窗构建期会碰到一整套 Tk API；与断言无关的那些
+    一律 no-op（下面集中列出），需要断言的方法才记录状态。
+    """
 
     def __init__(self, master=None, **kwargs) -> None:
         self.master = master
@@ -400,11 +404,26 @@ class _FakeWidget:
     def title(self, text) -> None:
         self.title_text = text
 
+    # -- 与断言无关的 Tk API：no-op -------------------------------------- #
     def resizable(self, *_args) -> None: ...
+    def minsize(self, *_args) -> None: ...
+    def option_add(self, *_args) -> None: ...
+    def after(self, *_args) -> None: ...
+    def yview(self, *_args) -> None: ...
+    def insert(self, *_args) -> None: ...
+    def see(self, *_args) -> None: ...
+    def start(self, *_args) -> None: ...
+    def stop(self, *_args) -> None: ...
+    def set(self, *_args) -> None: ...
     def focus_set(self) -> None: ...
     def update_idletasks(self) -> None: ...
     def lift(self) -> None: ...
-    def attributes(self, *_args) -> None: ...
+
+    def index(self, *_args) -> str:      # tk.Text.index("end-1c") 只用于日志区裁剪
+        return "1.0"
+
+    def attributes(self, *args) -> None:
+        self.attributes_calls = getattr(self, "attributes_calls", []) + [args]
     def geometry(self, spec) -> None:
         self.geometry_spec = spec
 
@@ -431,6 +450,12 @@ WIDGETS: list[_FakeWidget] = []
 MAINLOOP: list[bool] = []
 
 
+class _FakeStyle:
+    def __init__(self, *_args, **_kwargs) -> None: ...
+    def theme_use(self, *_args) -> None: ...
+    def configure(self, *_args, **_kwargs) -> None: ...
+
+
 def _install_fake_tk(monkeypatch) -> None:
     WIDGETS.clear()
     MAINLOOP.clear()
@@ -439,7 +464,13 @@ def _install_fake_tk(monkeypatch) -> None:
     module.Frame = _FakeWidget
     module.Label = _FakeWidget
     module.Button = _FakeWidget
+    module.Text = _FakeWidget
+    module.Scrollbar = _FakeWidget
     monkeypatch.setitem(sys.modules, "tkinter", module)
+    ttk = types.ModuleType("tkinter.ttk")
+    ttk.Style = _FakeStyle
+    ttk.Progressbar = _FakeWidget
+    monkeypatch.setitem(sys.modules, "tkinter.ttk", ttk)
 
 
 def test_dark_notice_builds_a_styled_window(monkeypatch):
@@ -490,3 +521,51 @@ def test_dark_notice_omits_the_diagnostic_line_without_a_detail(monkeypatch):
         for w in WIDGETS
     )
     assert any(w.kwargs.get("text") == ui.LAUNCH_NOTICE_BUTTON for w in WIDGETS)
+
+
+# --------------------------------------------------------------------------- #
+# 窗口置顶（安装器是"必须被看见"的窗口）
+# --------------------------------------------------------------------------- #
+
+
+def test_set_topmost_is_best_effort():
+    """置顶成功返回 True；不支持该属性的 WM / Tk 只返回 False，绝不抛异常。"""
+    class Root:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def attributes(self, *args) -> None:
+            self.calls.append(args)
+
+    root = Root()
+    assert ui._set_topmost(root) is True
+    assert root.calls == [("-topmost", True)]
+
+    class Broken:
+        def attributes(self, *_args) -> None:
+            raise RuntimeError("wm attributes not supported")
+
+    assert ui._set_topmost(Broken()) is False      # 静默降级
+    assert ui._set_topmost(None) is False
+
+
+def test_installer_window_is_topmost(monkeypatch):
+    """主窗口全程置顶：更新期间切走也盖不住进度与失败原因。"""
+    _install_fake_tk(monkeypatch)
+    monkeypatch.setattr(ui, "pick_font_family", lambda root: "MiSans")
+
+    ui.InstallerWindow(title="MangaProof 更新安装器", subtitle="正在更新", version="1.1.11.alpha")
+
+    root = WIDGETS[0]
+    assert ("-topmost", True) in getattr(root, "attributes_calls", []), \
+        "安装器主窗口必须置顶"
+
+
+def test_dark_notice_uses_the_shared_topmost_helper(monkeypatch):
+    """提示窗与主窗口共用同一个置顶实现（行为一致，改一处即可）。"""
+    _install_fake_tk(monkeypatch)
+    monkeypatch.setattr(ui, "pick_font_family", lambda root: None)
+
+    ui._show_dark_notice("缺少启动参数：--package")
+
+    assert ("-topmost", True) in getattr(WIDGETS[0], "attributes_calls", [])

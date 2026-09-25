@@ -315,6 +315,23 @@ def launch_notice_text(detail: str = "") -> str:
     return text
 
 
+def _set_topmost(root) -> bool:
+    """把窗口置顶（best effort）：返回是否设置成功。
+
+    安装器是一个"必须被看见"的窗口：更新期间切走就会看不到进度 / 失败原因，
+    所以主窗口与两个提示窗都全程置顶。少数 WM / Tk 构建不支持这个属性时**静默跳过**
+    —— 置顶失败不算错误，绝不能因此影响窗口构建。
+    """
+    if root is None:
+        return False
+    try:
+        root.attributes("-topmost", True)
+        return True
+    except Exception as exc:
+        log.debug("窗口置顶失败（%s），按普通层级显示", exc)
+        return False
+
+
 def _write_stderr(text: str) -> None:
     """把提示写到 stderr（windowed onefile 下 stdout/stderr 可能是 ``None``）。"""
     stream = sys.stderr
@@ -400,10 +417,7 @@ def _show_dark_notice(detail: str = "") -> None:
         root.protocol("WM_DELETE_WINDOW", close)
         root.bind("<Escape>", close)
         root.bind("<Return>", close)
-        try:
-            root.attributes("-topmost", True)
-        except Exception:  # pragma: no cover - 少数 WM 不支持
-            pass
+        _set_topmost(root)
         root.update_idletasks()
         width = max(NOTICE_WIDTH, root.winfo_reqwidth())
         height = max(NOTICE_MIN_HEIGHT, root.winfo_reqheight())
@@ -429,10 +443,7 @@ def _show_native_message(title: str, text: str) -> None:
     root = tk.Tk()
     try:
         root.withdraw()                      # 只要提示框，不要那个空白主窗口
-        try:
-            root.attributes("-topmost", True)
-        except Exception:                    # pragma: no cover - 少数 WM 不支持
-            pass
+        _set_topmost(root)
         messagebox.showwarning(title, text, parent=root)
     finally:
         try:
@@ -595,6 +606,8 @@ class InstallerWindow:
         self.root = tk.Tk()
         self.root.title(title)
         self.root.configure(bg=COLOR_BG_MAIN)
+        # 全程置顶：更新期间用户切走就看不到进度与失败原因（best effort，失败静默）
+        _set_topmost(self.root)
         self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.minsize(520, 420)
         self.family = pick_font_family(self.root)
