@@ -118,6 +118,8 @@ class InstallerOptions:
     parent_pid: int = 0
     status_file: Path | None = None
     cli: bool = False
+    #: 调试逃生参数（§83）：跳过"只能由主程序调用"的提示与检查（默认严格）
+    allow_direct_launch: bool = False
     #: 重跑自身（提权）用的完整 argv；由 main.py 填入
     rerun_argv: tuple[str, ...] = ()
 
@@ -666,6 +668,8 @@ class Installer:
         if problems:
             raise InstallerFailure(ExitCode.VALIDATION, "；".join(problems))
 
+        self._check_manual_invocation_safety()
+
         main_rel = archive.install_main_rel(opts.platform)
         if not (opts.install_dir / main_rel).is_file():
             self.reporter.log(
@@ -681,6 +685,34 @@ class Installer:
             )
         self.store.save(self.state)
         self.reporter.log("参数校验通过")
+
+    def _check_manual_invocation_safety(self) -> None:
+        """§83：没给 ``--parent-pid`` 时，绝不能在主程序仍在运行时替换它的文件。
+
+        正常更新一定带 pid（主程序侧 ``prepare_invocation`` 固定传 ``os.getpid()``），
+        所以这条实际只会拦住"手工拼一条命令行直接跑安装器"——那正是最危险的用法：
+        Linux/macOS 上会把**正在运行**的程序目录改名再解压，Windows 上多半是
+        WinError 32 一堆失败。
+
+        查不了进程（``ps`` 不可用）时按 §46 的既有哲学**只记日志、不拦截**：
+        宁可漏拦一次手工调用，也不能把正常更新挡在"查不了进程"上。
+        """
+        if self.options.allow_direct_launch or int(self.options.parent_pid) > 0:
+            return
+        name = self._main_process_name()
+        if not name:
+            return
+        found = self.rt.ops.find_running(name, exclude={os.getpid()})
+        if found is None:
+            self.reporter.log(f"无法枚举进程（ps 不可用），跳过「{name} 是否在运行」检查")
+            return
+        if found:
+            raise InstallerFailure(
+                ExitCode.VALIDATION,
+                f"检测到 {name} 正在运行（pid={found[0]}），而本次调用没有提供主程序 pid："
+                "不能直接替换正在运行的程序。请从 MangaProof 的「更新」页面发起更新"
+                "（调试可用 --allow-direct-launch 跳过，需求 §83）",
+            )
 
     def _reexec_elevated(self) -> int:
         """需要提权时：用平台原生机制重跑自己（``--cli``），本进程不再动文件。"""

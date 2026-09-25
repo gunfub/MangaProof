@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 gunfub
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""安装器 CLI 入口（需求 §43/§45/§46）。
+"""安装器 CLI 入口（需求 §43/§45/§46/§83）。
 
 职责很窄：解析参数 → 规范化绝对路径 → 交给 :class:`updater.installer.Installer`
 → 返回退出码。**不依赖 ``cwd`` 推断任何路径**（§45 明令禁止）。
@@ -15,13 +15,16 @@
 2. 后台线程与主线程的未捕获异常都要有记录：装 ``sys.excepthook`` 与
    ``threading.excepthook``，并把失败写进状态文件（§64）。
 
+直接双击的防护见 §83：打包后的安装器缺参启动时**必须弹提示框并优雅退出**，
+而不是像以前那样只写一行日志、退出码 2、用户什么都看不到。
+
 命令行（与主程序侧的跨进程契约一致）::
 
     MangaProof-update-installer --install-dir <绝对路径> --package <绝对路径>
         --data-backup <绝对路径> --success-marker <绝对路径>
         --version <版本号> --sha256 <hex|""> --parent-pid <pid>
         --token <一次性 token> --platform windows|linux|macos
-        [--cli] [--status-file <路径>]
+        [--cli] [--status-file <路径>] [--allow-direct-launch]
 
 退出码见 :class:`updater.installer.ExitCode`：0 成功，其余非 0 且必已完成回滚。
 """
@@ -58,6 +61,20 @@ log = logging.getLogger("mangaproof.updater.main")
 PROGRAM = INSTALLER_NAME
 LOG_PREFIX = "installer-"
 
+#: 调试逃生参数（§83）：跳过"只能由主程序调用"的提示与检查
+ALLOW_DIRECT_FLAG = "--allow-direct-launch"
+
+#: 必填参数（§45 的接口契约；用于生成"缺少启动参数：…"诊断行）
+REQUIRED_FLAGS: tuple[str, ...] = (
+    "--install-dir",
+    "--package",
+    "--data-backup",
+    "--success-marker",
+    "--version",
+    "--token",
+    "--platform",
+)
+
 _LOGGER_READY = False
 _LOGGER_KEY: tuple | None = None
 _LOG_PATH: Path | None = None
@@ -90,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cli", action="store_true", help="无 GUI 模式（无 tkinter/无图形会话）")
     parser.add_argument("--status-file", default=None,
                         help=f"安装器状态文件（建议持久目录下的 {state_mod.STATE_FILE_NAME}）")
+    parser.add_argument(ALLOW_DIRECT_FLAG, action="store_true",
+                        help="调试用：允许直接启动（跳过「只能由主程序调用」的提示与检查，需求 §83）")
     return parser
 
 
@@ -120,6 +139,7 @@ def parse_options(argv: Sequence[str], parser: argparse.ArgumentParser | None = 
         parent_pid=int(ns.parent_pid or 0),
         status_file=normalize_path(ns.status_file) if ns.status_file else None,
         cli=bool(ns.cli),
+        allow_direct_launch=bool(ns.allow_direct_launch),
         rerun_argv=rerun_argv_from_process(),
     )
 
@@ -140,9 +160,32 @@ def _scan_value(argv: Sequence[str], flag: str) -> str | None:
     return None
 
 
+def _flag_present(argv: Sequence[str], flag: str) -> bool:
+    """命令行里是否出现了 ``--flag`` / ``--flag=…``（argparse 之前的粗判）。"""
+    prefix = flag + "="
+    return any(arg == flag or arg.startswith(prefix) for arg in argv)
+
+
 def _safe_token(token: str | None) -> str:
     text = re.sub(r"[^A-Za-z0-9._-]", "_", (token or "").strip())
     return (text[:24] or "notoken")
+
+
+def _direct_launch_log_dir() -> Path | None:
+    """主程序准备的安装器临时目录（存在才用）。
+
+    直接双击时没有 ``--status-file`` / ``--success-marker`` 可用，日志原本落在
+    系统临时根目录（永远是残渣）。放进安装器临时目录后，§82「清理升级缓存」
+    能一起清掉。**不存在就不创建**：不能让一次误双击凭空造出目录。
+    """
+    try:
+        from mangaproof.update import platform_dirs
+
+        candidate = platform_dirs.installer_dir(create=False)
+    except Exception as exc:  # pragma: no cover - 主程序模块缺失等异常情况
+        log.debug("无法解析安装器临时目录：%s", exc)
+        return None
+    return candidate if candidate.is_dir() else None
 
 
 def _log_directory(argv: Sequence[str]) -> Path:
@@ -161,6 +204,9 @@ def _log_directory(argv: Sequence[str]) -> Path:
                 return parent
             except OSError:
                 continue
+    fallback = _direct_launch_log_dir()
+    if fallback is not None:
+        return fallback
     return Path(tempfile.gettempdir())
 
 
@@ -254,6 +300,51 @@ def install_excepthooks() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 直接启动提示（§83）
+# --------------------------------------------------------------------------- #
+
+
+def _is_frozen() -> bool:
+    """是否是打包后的安装器（PyInstaller onefile）。
+
+    只有打包产物才拦：源码运行（``python updater/main.py``）必须保持命令行行为，
+    否则开发、排障、单测都会被一个弹窗挡住（§83）。
+    """
+    return bool(getattr(sys, "frozen", False))
+
+
+def _missing_args_detail(argv: Sequence[str]) -> str:
+    """缺参诊断行（§83）：列出命令行里没出现的必填参数。"""
+    missing = [flag for flag in REQUIRED_FLAGS if not _flag_present(argv, flag)]
+    if missing:
+        return "缺少启动参数：" + "、".join(missing)
+    return "启动参数不完整或非法"
+
+
+def notify_direct_launch(
+    detail: str = "",
+    *,
+    allow: bool = False,
+    cli: bool = False,
+) -> bool:
+    """§83：直接启动（缺参/参数非法）时的提示；返回是否真的弹了窗。
+
+    三种情况不弹窗，只留日志（命令行本来就有报错可看）：
+
+    - ``--allow-direct-launch``：调试逃生参数；
+    - ``--cli``：显式不要 GUI；
+    - 源码运行（非 frozen）。
+    """
+    if allow:
+        log.info("%s：已跳过「只能由主程序调用」提示（调试参数，§83）", ALLOW_DIRECT_FLAG)
+        return False
+    if not _is_frozen():
+        log.info("源码运行（非打包）：不做直接启动提示，按命令行报错处理（§83）")
+        return False
+    return ui.show_launch_notice(detail, gui=not cli)
+
+
+# --------------------------------------------------------------------------- #
 # 运行
 # --------------------------------------------------------------------------- #
 
@@ -284,6 +375,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """入口：返回退出码（0 = 成功）。"""
     global _STATUS_PATH
     args = list(sys.argv[1:] if argv is None else argv)
+    allow_direct = _flag_present(args, ALLOW_DIRECT_FLAG)
+    cli_requested = _flag_present(args, "--cli")
     log_path = setup_logging(args)
     install_excepthooks()
 
@@ -291,7 +384,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         options = parse_options(args, parser)
     except SystemExit as exc:  # argparse：--help（0）或用法错误（2）
-        return int(exc.code or 0)
+        code = int(exc.code or 0)
+        if code != 0:
+            # §83：打包后缺参/参数非法 = 十有八九是被人直接双击了 → 必须给出可见提示
+            notify_direct_launch(
+                _missing_args_detail(args), allow=allow_direct, cli=cli_requested
+            )
+        return code
     except ValueError as exc:
         message = f"安装器参数错误：{exc}"
         log.error("%s", message)

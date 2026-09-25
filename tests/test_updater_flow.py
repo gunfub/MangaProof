@@ -534,3 +534,69 @@ def test_package_dir_is_removed_at_the_end(tmp_path: Path, monkeypatch):
     assert code == int(ExitCode.OK), env.reporter.logs
     assert not canonical.exists(), "更新包目录收尾必须删掉（留日志是先复制再删）"
     assert (env.install / "MangaProof").is_file(), "程序本体不受影响"
+
+
+# --------------------------------------------------------------------------- #
+# §83：直接启动防护 —— 没给 --parent-pid 时不许替换"正在运行"的程序
+# --------------------------------------------------------------------------- #
+
+
+def test_manual_invocation_without_parent_pid_is_refused_while_app_runs(tmp_path: Path):
+    """手工拼参数跑安装器（没给 --parent-pid）且主程序在运行 → 拒绝且不碰文件（§83）。"""
+    env = build_env(tmp_path)
+    before = (env.install / "MangaProof").read_bytes()
+    ops = sup.ScriptedLookupOps(lookup=[[4242]])
+
+    code = Installer(make_options(env, parent_pid=0), make_runtime(env, ops=ops)).run()
+
+    assert code == int(ExitCode.VALIDATION)
+    error = read_state(env.status)["error"]
+    assert "正在运行" in error and "更新" in error
+    assert (env.install / "MangaProof").read_bytes() == before, "不许触碰安装目录"
+    assert not rollback.old_dir_for(env.install).exists(), "不许改名旧版本（§54）"
+    assert env.package.is_file(), "更新包也不许动"
+
+
+def test_manual_invocation_is_allowed_when_no_app_is_running(tmp_path: Path):
+    """主程序确实没在运行 → 手工调用照常执行（排障路径不能被这条检查堵死）。"""
+    env = build_env(tmp_path)
+    ops = sup.ScriptedLookupOps(lookup=[[]])
+
+    code = Installer(make_options(env, parent_pid=0), make_runtime(env, ops=ops)).run()
+
+    assert code == int(ExitCode.OK), env.reporter.logs
+
+
+def test_manual_invocation_is_allowed_when_the_process_table_is_unavailable(tmp_path: Path):
+    """``ps`` 查不了 → 只记日志、不拦截（与 §46 的保守哲学一致）。"""
+    env = build_env(tmp_path)
+    ops = sup.ScriptedLookupOps(lookup=[None])
+
+    code = Installer(make_options(env, parent_pid=0), make_runtime(env, ops=ops)).run()
+
+    assert code == int(ExitCode.OK), env.reporter.logs
+    assert any("跳过" in line and "检查" in line for line in env.reporter.logs)
+
+
+def test_allow_direct_launch_skips_the_running_process_check(tmp_path: Path):
+    """调试参数 --allow-direct-launch：主程序在运行也照跑（§45/§83）。"""
+    env = build_env(tmp_path)
+    ops = sup.ScriptedLookupOps(lookup=[[4242]])
+    options = make_options(env, parent_pid=0, allow_direct_launch=True)
+
+    code = Installer(options, make_runtime(env, ops=ops)).run()
+
+    assert code == int(ExitCode.OK), env.reporter.logs
+
+
+def test_parent_pid_present_never_scans_the_process_table(tmp_path: Path):
+    """主程序发起的更新（带 pid）不该因这条检查去扫进程表 —— 免得干扰 §46 的编排。"""
+    env = build_env(tmp_path)
+    ops = sup.ScriptedLookupOps(lookup=[[4242]])
+    installer = Installer(
+        make_options(env, parent_pid=os.getpid()), make_runtime(env, ops=ops)
+    )
+
+    installer._check_manual_invocation_safety()
+
+    assert ops.lookup_calls == 0

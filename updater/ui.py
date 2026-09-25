@@ -282,6 +282,93 @@ def _reset_tk_cache() -> None:  # 单测用
     _TK_REASON = None
 
 
+# --------------------------------------------------------------------------- #
+# 直接启动提示（需求 §83）
+# --------------------------------------------------------------------------- #
+
+#: 提示框标题（§83：直接双击 / 缺参启动的唯一提示出口）
+LAUNCH_NOTICE_TITLE = "无法直接启动"
+
+#: 提示正文（§83 固化的文案：说清"谁能调用"与"要更新该怎么做"）
+LAUNCH_NOTICE_TEXT = (
+    "此程序不能直接打开，只能由 MangaProof 主程序的「更新」功能自动调用。\n\n"
+    "如需更新：打开 MangaProof →「更新」→「保存并检查更新」，按提示完成。"
+)
+
+
+def launch_notice_text(detail: str = "") -> str:
+    """提示正文 + 可选诊断行（缺参清单等，方便反馈主程序侧的传参问题）。"""
+    text = LAUNCH_NOTICE_TEXT
+    if detail:
+        text = f"{text}\n\n{detail}"
+    return text
+
+
+def _write_stderr(text: str) -> None:
+    """把提示写到 stderr（windowed onefile 下 stdout/stderr 可能是 ``None``）。"""
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        print(text, file=stream)
+        stream.flush()
+    except Exception:  # pragma: no cover - 流已关闭等
+        pass
+
+
+def _show_native_message(title: str, text: str) -> None:
+    """弹一个系统原生提示框；单测用替换本函数的方式避免真的开窗口。
+
+    刻意**不**套 §11.2 的深色调色板：原生样式让人一眼看出"这不是更新进度窗口"，
+    这一点比视觉统一更重要（§83 明确记为规格例外）。
+    """
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    try:
+        root.withdraw()                      # 只要提示框，不要那个空白主窗口
+        try:
+            root.attributes("-topmost", True)
+        except Exception:                    # pragma: no cover - 少数 WM 不支持
+            pass
+        messagebox.showwarning(title, text, parent=root)
+    finally:
+        try:
+            root.destroy()
+        except Exception:                    # pragma: no cover - 窗口已销毁
+            pass
+
+
+def show_launch_notice(detail: str = "", *, gui: bool = True) -> bool:
+    """§83：安装器被直接打开时的提示；返回是否**真的弹了窗**。
+
+    - ``gui=True`` 且有图形会话 → 系统原生 ``messagebox``；
+    - ``gui=False``（``--cli``）或无图形会话 / tkinter 缺失 / 弹窗自身失败
+      → 只写 stderr + 日志。
+
+    任何情况下都**不抛异常、不阻塞**：宁可少一句提示，也不能让安装器卡在提示上。
+    """
+    text = launch_notice_text(detail)
+    if not gui:
+        log.info("--cli：直接启动提示降级为命令行输出")
+        _write_stderr(f"{LAUNCH_NOTICE_TITLE}：{text}")
+        return False
+    reason = tkinter_unavailable_reason()
+    if reason:
+        log.info("不弹提示框（%s），改为命令行提示", reason)
+        _write_stderr(f"{LAUNCH_NOTICE_TITLE}：{text}")
+        return False
+    try:
+        _show_native_message(LAUNCH_NOTICE_TITLE, text)
+    except Exception as exc:
+        log.warning("提示框显示失败（%s），改为命令行提示", exc)
+        _write_stderr(f"{LAUNCH_NOTICE_TITLE}：{text}")
+        return False
+    log.info("已提示用户：安装器不能直接启动（需求 §83）")
+    return True
+
+
 def make_reporter(
     *,
     cli: bool = False,
@@ -698,14 +785,18 @@ __all__ = [
     "ConsoleReporter",
     "FONT_CANDIDATES",
     "InstallerWindow",
+    "LAUNCH_NOTICE_TEXT",
+    "LAUNCH_NOTICE_TITLE",
     "LoggingReporter",
     "MultiReporter",
     "NullReporter",
     "Reporter",
     "TkReporter",
+    "launch_notice_text",
     "make_reporter",
     "pick_font_family",
     "run_with_ui",
+    "show_launch_notice",
     "tkinter_available",
     "tkinter_unavailable_reason",
 ]

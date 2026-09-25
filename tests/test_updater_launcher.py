@@ -126,7 +126,9 @@ def test_pid_exit_with_process_found_is_not_failure(tmp_path: Path):
     ops = sup.ScriptedLookupOps(lookup=[[extra_pid]], launcher_style=True)
     runtime = flow.make_runtime(env, ops=ops, relocate_timeout=5.0)
 
-    code = Installer(flow.make_options(env), runtime).run()
+    # 本例测的是 §60 的判据（pid 换来换去时不许早判失败），不是 §83 的防误启动：
+    # parent_pid=0 且"查得到主程序在运行"会被 §83 拒绝，所以显式走调试逃生参数。
+    code = Installer(flow.make_options(env, allow_direct_launch=True), runtime).run()
 
     assert code == int(ExitCode.OK), env.reporter.logs
     assert ops.lookup_calls >= 1, "pid 秒退后必须按进程名找一次"

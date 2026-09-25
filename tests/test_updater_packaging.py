@@ -59,7 +59,7 @@ def test_cli_flags_match_the_cross_process_contract():
     actions = {opt: action for action in parser._actions for opt in action.option_strings}
     for flag in ("--install-dir", "--package", "--data-backup", "--success-marker",
                  "--version", "--sha256", "--parent-pid", "--token", "--platform",
-                 "--cli", "--status-file"):
+                 "--cli", "--status-file", updater_main.ALLOW_DIRECT_FLAG):
         assert flag in actions, f"缺少参数 {flag}（需求 §45 / 接口契约）"
     for flag in ("--install-dir", "--package", "--data-backup", "--success-marker",
                  "--version", "--token", "--platform"):
@@ -68,6 +68,9 @@ def test_cli_flags_match_the_cross_process_contract():
     assert actions["--sha256"].default == ""
     assert actions["--parent-pid"].default == 0
     assert actions["--status-file"].default is None
+    # §83 的调试逃生参数：可选、默认关（默认必须严格）
+    assert actions[updater_main.ALLOW_DIRECT_FLAG].required is False
+    assert actions[updater_main.ALLOW_DIRECT_FLAG].default is False
 
 
 def test_marker_argv_contract_constants():
@@ -351,3 +354,153 @@ def test_prepare_invocation_passes_sha256_to_the_installer(tmp_path: Path, monke
         package=package, version="1.1.5.alpha", sha256=None
     )
     assert invocation2.args[invocation2.args.index("--sha256") + 1] == ""
+
+
+# --------------------------------------------------------------------------- #
+# §83：直接启动防护（弹窗 + 优雅退出；**不做**运行目录自检）
+# --------------------------------------------------------------------------- #
+
+
+class _NoticeSpy:
+    """替身：记录提示调用，绝不真的弹窗（CI 无图形会话，也不该被挡住）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    def __call__(self, detail: str = "", *, gui: bool = True) -> bool:
+        self.calls.append((detail, gui))
+        return True
+
+    @property
+    def called(self) -> bool:
+        return bool(self.calls)
+
+    @property
+    def detail(self) -> str:
+        return self.calls[-1][0] if self.calls else ""
+
+
+def _spy_notice(monkeypatch, tmp_path: Path) -> _NoticeSpy:
+    """把提示函数换成替身，并把日志固定写进 tmp_path（不污染真实临时目录）。"""
+    spy = _NoticeSpy()
+    monkeypatch.setattr(updater_main.ui, "show_launch_notice", spy)
+    monkeypatch.setattr(updater_main, "_LOGGER_READY", False)
+    monkeypatch.setattr(updater_main, "_LOG_PATH", None)
+    monkeypatch.setattr(updater_main, "_log_directory", lambda argv: tmp_path)
+    return spy
+
+
+def test_frozen_direct_launch_shows_notice_and_exits_usage(tmp_path: Path, monkeypatch):
+    """打包后的安装器被直接双击（零参数）→ 必须弹提示 + 退出码 2（§83）。"""
+    spy = _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: True)
+
+    assert updater_main.main([]) == int(ExitCode.USAGE)
+
+    assert spy.called, "打包后缺参启动必须给出可见提示（§83：不许静默退出）"
+    assert "--install-dir" in spy.detail and "--platform" in spy.detail
+
+
+def test_frozen_partial_arguments_also_show_the_notice(tmp_path: Path, monkeypatch):
+    """只给了一部分参数（或缺必填项）同样算直接启动 → 提示里列出缺的参数。"""
+    spy = _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: True)
+
+    code = updater_main.main(["--install-dir", str(tmp_path)])
+
+    assert code == int(ExitCode.USAGE)
+    assert spy.called and "--install-dir" not in spy.detail, "已给的参数不该出现在缺失清单里"
+    assert "--package" in spy.detail
+
+
+def test_source_run_never_shows_the_notice(tmp_path: Path, monkeypatch):
+    """源码运行（非打包）保持命令行行为：usage 文本 + 退出码 2，不弹窗（§83）。"""
+    spy = _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: False)
+
+    code = updater_main.main(["--status-file", str(tmp_path / "installer-state.json")])
+
+    assert code == int(ExitCode.USAGE)
+    assert not spy.called, "源码运行时弹窗会挡住开发、排障与单测"
+
+
+def test_allow_direct_launch_suppresses_the_notice(tmp_path: Path, monkeypatch):
+    """``--allow-direct-launch``（调试）不弹窗，退出码仍是用法错误（§45/§83）。"""
+    spy = _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: True)
+
+    code = updater_main.main([updater_main.ALLOW_DIRECT_FLAG])
+
+    assert code == int(ExitCode.USAGE)
+    assert not spy.called
+
+
+def test_cli_direct_launch_degrades_to_the_command_line(tmp_path: Path, monkeypatch):
+    """``--cli`` 是显式"不要 GUI"：提示降级为 stderr，不许弹窗（§83）。"""
+    spy = _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: True)
+
+    assert updater_main.main(["--cli"]) == int(ExitCode.USAGE)
+
+    assert spy.called and spy.calls[-1][1] is False, "必须以 gui=False 调用"
+
+
+def test_help_never_shows_the_notice(tmp_path: Path, monkeypatch, capsys):
+    spy = _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: True)
+
+    assert updater_main.main(["--help"]) == 0
+    assert not spy.called
+    assert "--install-dir" in capsys.readouterr().out
+
+
+def test_frozen_run_outside_the_installer_temp_dir_is_not_refused(tmp_path: Path, monkeypatch):
+    """**不做**运行目录（来源）自检：参数合法就照常进入安装器流程（§83）。
+
+    这条同时是回归护栏：若以后有人加上"必须在 MangaProof-update-installer 目录里"
+    的检查，这里会立刻失败（那会挡住单测、开发与排障）。
+    """
+    spy = _spy_notice(monkeypatch, tmp_path)
+    monkeypatch.setattr(updater_main, "_is_frozen", lambda: True)
+    package = tmp_path / "pkg.tar.gz"
+    package.write_bytes(b"not a real package")
+
+    code = updater_main.main([
+        "--install-dir", str(tmp_path / "missing-install"),
+        "--package", str(package),
+        "--data-backup", str(tmp_path / "backup"),
+        "--success-marker", str(tmp_path / "tmp" / "marker.json"),
+        "--version", "1.1.0.alpha",
+        "--token", "tok-direct-launch",
+        "--platform", "linux",
+        "--cli",
+        "--status-file", str(tmp_path / "installer-state.json"),
+    ])
+
+    assert code == int(ExitCode.VALIDATION), "参数合法 → 该进状态机（安装目录不存在 → 10）"
+    assert not spy.called, "不得因为运行目录不是临时目录就拒绝执行"
+
+
+def test_log_directory_prefers_the_installer_temp_dir(tmp_path: Path, monkeypatch):
+    """直接启动的日志落进安装器临时目录 → §82「清理升级缓存」能一起清掉（§83）。"""
+    from mangaproof.update import platform_dirs
+
+    installer_dir = tmp_path / "cache" / platform_dirs.INSTALLER_DIRNAME
+    installer_dir.mkdir(parents=True)
+    monkeypatch.setattr(platform_dirs, "installer_dir",
+                        lambda create=True: installer_dir)
+
+    assert updater_main._log_directory([]) == installer_dir
+
+
+def test_log_directory_falls_back_without_creating_anything(tmp_path: Path, monkeypatch):
+    """安装器临时目录不存在 → 退回系统临时目录，且**不创建**那个目录（§83）。"""
+    from mangaproof.update import platform_dirs
+
+    missing = tmp_path / "cache" / platform_dirs.INSTALLER_DIRNAME
+    monkeypatch.setattr(platform_dirs, "installer_dir", lambda create=True: missing)
+    monkeypatch.setattr(updater_main.tempfile, "gettempdir",
+                        lambda: str(tmp_path / "system-temp"))
+
+    assert updater_main._log_directory([]) == tmp_path / "system-temp"
+    assert not missing.exists(), "一次误双击不该凭空造出安装器临时目录"

@@ -18,6 +18,7 @@ import io
 import logging
 import re
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -214,3 +215,102 @@ def test_tkinter_availability_is_consistent():
 @pytest.mark.skipif(ui.tkinter_available(), reason="本机有 tkinter 时这一步没有意义")
 def test_missing_tkinter_reason_is_recorded():
     assert ui.tkinter_unavailable_reason() is not None
+
+
+# --------------------------------------------------------------------------- #
+# §83：直接启动提示（系统原生 messagebox + 三级降级）
+# --------------------------------------------------------------------------- #
+
+
+def test_launch_notice_text_keeps_the_fixed_wording():
+    assert ui.launch_notice_text() == ui.LAUNCH_NOTICE_TEXT
+    text = ui.launch_notice_text("缺少启动参数：--package")
+    assert text.startswith(ui.LAUNCH_NOTICE_TEXT), "固定文案必须原样保留"
+    assert text.endswith("缺少启动参数：--package"), "诊断行追加在末尾"
+
+
+def test_show_launch_notice_uses_the_native_messagebox(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: None)
+    monkeypatch.setattr(ui, "_show_native_message",
+                        lambda title, text: calls.append((title, text)))
+
+    assert ui.show_launch_notice("缺少启动参数：--token") is True
+    assert calls and calls[0][0] == ui.LAUNCH_NOTICE_TITLE
+    assert "只能由 MangaProof 主程序的「更新」功能自动调用" in calls[0][1]
+    assert "缺少启动参数：--token" in calls[0][1]
+
+
+def test_show_launch_notice_degrades_without_a_graphical_session(monkeypatch, capsys):
+    monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: "没有图形会话")
+    monkeypatch.setattr(ui, "_show_native_message", pytest.fail)  # 不许尝试开窗
+
+    assert ui.show_launch_notice() is False
+    err = capsys.readouterr().err
+    assert ui.LAUNCH_NOTICE_TITLE in err
+    assert "只能由 MangaProof 主程序" in err
+
+
+def test_show_launch_notice_survives_a_failing_dialog(monkeypatch, capsys):
+    """提示框自己炸了也不能把异常抛给调用方（宁可少一句提示，不能崩）。"""
+    def boom(title: str, text: str) -> None:
+        raise RuntimeError("no window manager")
+
+    monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: None)
+    monkeypatch.setattr(ui, "_show_native_message", boom)
+
+    assert ui.show_launch_notice("细节") is False
+    assert "细节" in capsys.readouterr().err
+
+
+def test_show_launch_notice_respects_cli(monkeypatch, capsys):
+    """``--cli`` = 显式不要 GUI：只写命令行，绝不弹窗。"""
+    monkeypatch.setattr(ui, "_show_native_message", pytest.fail)
+
+    assert ui.show_launch_notice("细节", gui=False) is False
+    assert "细节" in capsys.readouterr().err
+
+
+def test_show_launch_notice_tolerates_missing_stderr(monkeypatch):
+    """windowed onefile 下 stderr 可能是 None —— 降级路径也不得抛异常。"""
+    monkeypatch.setattr(ui, "tkinter_unavailable_reason", lambda: "没有图形会话")
+    monkeypatch.setattr(ui.sys, "stderr", None)
+
+    assert ui.show_launch_notice("细节") is False
+
+
+def test_native_message_creates_and_destroys_its_root(monkeypatch):
+    """必须用一次性 root 承载提示框，并在关闭后销毁（不留空白窗口）。"""
+    created: dict[str, object] = {}
+    shown: list[tuple[str, str, object]] = []
+
+    class FakeRoot:
+        def __init__(self) -> None:
+            self.destroyed = False
+            self.attributes_calls: list[tuple] = []
+            created["root"] = self
+
+        def withdraw(self) -> None:
+            created["withdrawn"] = True
+
+        def attributes(self, *args) -> None:
+            self.attributes_calls.append(args)
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+    fake_tk = types.ModuleType("tkinter")
+    fake_tk.Tk = FakeRoot
+    fake_mb = types.ModuleType("tkinter.messagebox")
+    fake_mb.showwarning = lambda title, text, parent=None: shown.append((title, text, parent))
+    fake_tk.messagebox = fake_mb                      # `from tkinter import messagebox`
+    monkeypatch.setitem(sys.modules, "tkinter", fake_tk)
+    monkeypatch.setitem(sys.modules, "tkinter.messagebox", fake_mb)
+
+    ui._show_native_message("标题", "正文")
+
+    root = created["root"]
+    assert created.get("withdrawn") is True, "装饰性的空白主窗口必须先隐藏"
+    assert shown and shown[0][0] == "标题" and shown[0][1] == "正文"
+    assert shown[0][2] is root, "提示框必须挂在我们的 root 上（模态）"
+    assert root.destroyed is True, "提示框关掉后必须销毁 root"
