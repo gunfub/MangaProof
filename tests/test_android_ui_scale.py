@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 gunfub
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Android 专有界面缩放 +「找回 文件/设置/帮助」的测试。
+"""Android 专有界面缩放 +「找回 文件/设置/关于」的测试。
 
 覆盖：
 - **桌面端永远不缩放**（这是本文件最重要的守门测试）：即使 settings.json 里写着
@@ -11,7 +11,8 @@
 - 环境里已有 QT_SCALE_FACTOR 时绝不被覆盖（setdefault 语义）；
 - 设置页「界面缩放」仅 Android 出现，21 档 50%…150%，apply_to 能写回；
 - 菜单栏属性（AA_DontUseNativeMenuBar）仅 Android 设置；
-- 主窗口的 文件/设置/帮助 三个菜单及其动作确实存在。
+- 主窗口的 文件/设置/关于 三个菜单及其动作确实存在；
+- 顶栏第三项叫「关于」且**不带 `&`**（2026-09-25 起解除 Alt+H 助记符，且不设新绑定）。
 
 运行：QT_QPA_PLATFORM=offscreen uv run python -m pytest tests/test_android_ui_scale.py -v
 """
@@ -387,8 +388,8 @@ def test_menu_bar_attribute_only_on_android(monkeypatch, qapp):
     assert calls == [Qt.ApplicationAttribute.AA_DontUseNativeMenuBar]
 
 
-def test_main_window_has_file_settings_help_menus(qapp, tmp_path):
-    """文件/设置/帮助 三个菜单及其动作必须存在（Android 上可见性靠上面的属性）。"""
+def test_main_window_has_file_settings_about_menus(qapp, tmp_path):
+    """文件/设置/关于 三个菜单及其动作必须存在（Android 上可见性靠上面的属性）。"""
     from mangaproof.ui.main_window import MainWindow
 
     manager = SettingsManager(tmp_path / "settings.json")
@@ -396,7 +397,10 @@ def test_main_window_has_file_settings_help_menus(qapp, tmp_path):
     window = MainWindow(manager)
     try:
         menubar = window.menuBar()
-        assert [a.text() for a in menubar.actions()] == ["文件(&F)", "设置(&S)", "帮助(&H)"]
+        titles = [a.text() for a in menubar.actions()]
+        assert titles == ["文件(&F)", "设置(&S)", "关于"]
+        assert not any("&" in title for title in titles[2:]), \
+            "顶栏第三项不许再带助记符（2026-09-25：解除 Alt+H 且不设新绑定）"
 
         file_menu = menubar.actions()[0].menu()
         file_actions = [a.text() for a in file_menu.actions()]
@@ -406,8 +410,9 @@ def test_main_window_has_file_settings_help_menus(qapp, tmp_path):
         settings_menu = menubar.actions()[1].menu()
         assert [a.text() for a in settings_menu.actions()] == ["设置…"]
 
-        help_menu = menubar.actions()[2].menu()
-        assert [a.text() for a in help_menu.actions()] == [
+        # 改名只动菜单标题：下辖四个动作一个不少、文案不变（功能不受影响）
+        about_menu = menubar.actions()[2].menu()
+        assert [a.text() for a in about_menu.actions()] == [
             "关于 MangaProof", "检查更新…", "许可证…", "第三方许可…",
         ]
     finally:

@@ -443,22 +443,24 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(lambda: self.open_settings_dialog())
         settings_menu.addAction(settings_action)
 
-        help_menu = menubar.addMenu("帮助(&H)")
+        # 顶栏第三项：2026-09-25 由「帮助(&H)」改名为「关于」——**不带 `&`**
+        # 即不设助记符（需求量方要求解除 Alt+H 且不设新绑定）；下辖动作一个不动。
+        about_menu = menubar.addMenu("关于")
         about_action = QAction("关于 MangaProof", self)
         about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
-        # 需求 §10：「关于 → 更新」——更新入口与"关于"同处帮助菜单，且**不自动触发**，
+        about_menu.addAction(about_action)
+        # 需求 §10：「关于 → 更新」——更新入口与"关于"同处这个菜单，且**不自动触发**，
         # 只有用户主动点开才检查（不做启动自动检查，需求 §1）。
         update_action = QAction("检查更新…", self)
         update_action.triggered.connect(self._show_update_dialog)
-        help_menu.addAction(update_action)
+        about_menu.addAction(update_action)
         # 本软件自身的许可（GPL-3.0-only）与第三方组件许可分开，两个入口都不占快捷键
         app_license_action = QAction("许可证…", self)
         app_license_action.triggered.connect(self._show_app_license)
-        help_menu.addAction(app_license_action)
+        about_menu.addAction(app_license_action)
         license_action = QAction("第三方许可…", self)
         license_action.triggered.connect(self._show_licenses)
-        help_menu.addAction(license_action)
+        about_menu.addAction(license_action)
 
     def _show_about(self) -> None:
         QMessageBox.about(
@@ -470,9 +472,9 @@ class MainWindow(QMainWindow):
             "Original 直接使用 PSD 自带 merged image。<br><br>"
             f"<b>许可证：</b>{__license__}（GNU GPL v3.0，仅此版本）<br>"
             f"{__copyright__}<br>"
-            "许可证全文见「帮助 → 许可证…」（随程序一同分发）。<br><br>"
+            "许可证全文见「关于 → 许可证…」（随程序一同分发）。<br><br>"
             "本软件使用小米 MiSans 字体，第三方组件与许可证信息<br>"
-            "见「帮助 → 第三方许可」。",
+            "见「关于 → 第三方许可」。",
         )
 
     def _show_app_license(self) -> None:
@@ -480,7 +482,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _show_update_dialog(self) -> None:
-        """「帮助 → 检查更新…」：打开更新页面（需求 §10/§11）。
+        """「关于 → 检查更新…」：打开更新页面（需求 §10/§11）。
 
         - 对话框内部在点「保存并检查更新」或「下载更新」时提交配置（需求 §13），
           这里负责在提交后落盘；
