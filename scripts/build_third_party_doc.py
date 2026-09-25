@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 gunfub
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""把「帮助 → 第三方许可」的数据导出为仓库根目录的 THIRD_PARTY_LICENSES.md。
+"""把「关于 → 第三方许可」的数据导出为仓库根目录的 THIRD_PARTY_LICENSES.md。
 
 为什么需要这个脚本
 ------------------
@@ -12,7 +12,7 @@
 单一数据源
 ----------
 数据来自 `mangaproof/third_party.py` 的 `build_third_party_items()`——程序内
-「帮助 → 第三方许可」用的是同一个函数，两边不会各写一份、各自过期。
+「关于 → 第三方许可」用的是同一个函数，两边不会各写一份、各自过期。
 
 用法：
     uv run python scripts/build_third_party_doc.py           # 写入 THIRD_PARTY_LICENSES.md
@@ -42,7 +42,7 @@ HEADER = """# 第三方组件与许可
 > 本文件由 [`scripts/build_third_party_doc.py`](scripts/build_third_party_doc.py) 依据
 > [`mangaproof/third_party.py`](mangaproof/third_party.py) **自动生成，请勿手工编辑**——
 > 需要改动请修改源文件后重新生成。
-> 程序内 **帮助 → 第三方许可** 展示的是同一份数据。
+> 程序内 **关于 → 第三方许可** 展示的是同一份数据。
 
 MangaProof 使用了下列第三方组件。每个条目给出组件名、版本、许可证标识（SPDX）、
 版权声明、主页与许可证全文（过长的 GPL / LGPL 给要点摘要与官方全文链接）。

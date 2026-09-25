@@ -27,7 +27,7 @@
 判定。当前使用者：
 
 - `config/settings.py`：Android 专有界面缩放（QT_SCALE_FACTOR）；
-- `main.py`：Android 上禁用 Qt 原生菜单栏路径（找回 文件/设置/帮助）。
+- `main.py`：Android 上禁用 Qt 原生菜单栏路径（找回 文件/设置/关于）。
 """
 
 from __future__ import annotations

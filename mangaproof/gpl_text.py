@@ -6,7 +6,7 @@
 由 `scripts/build_app_license_text.py` 从仓库根 `LICENSE` 生成；
 改了 LICENSE 请重新生成，`tests/test_app_license.py` 会守卫两者一致。
 
-程序内「帮助 → 许可证…」直接展示本常量，因此不需要在运行时读文件，
+程序内「关于 → 许可证…」直接展示本常量，因此不需要在运行时读文件，
 Android 等产物也不必专门把 LICENSE 打进包。
 """
 

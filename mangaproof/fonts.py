@@ -39,7 +39,7 @@ FONT_FILENAME = "MiSans-Medium.ttf"
 #: 为什么自带而不是用系统字体：Noto Sans Symbols 2 正是 Android 自己在
 #: `fonts.xml` 里给 `und-Zsym` 家族用的那支（NotoSansSymbols-Regular-Subsetted2.ttf），
 #: 但**部分 OEM ROM 会换掉/裁掉它**，且 Qt 本来也不会调用系统回退——自带一份才能
-#: 保证所有机型一致。OFL-1.1，随包分发（许可全文见「帮助 → 第三方许可」）。
+#: 保证所有机型一致。OFL-1.1，随包分发（许可全文见「关于 → 第三方许可」）。
 #: 详见 docs/Android端界面适配_缩放与菜单栏.md 第 8 节。
 FALLBACK_FONT_FILENAME = "NotoSansSymbols2-Regular.ttf"
 

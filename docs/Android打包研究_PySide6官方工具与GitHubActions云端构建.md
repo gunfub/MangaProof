@@ -388,7 +388,7 @@ if __name__ == "__main__":
 | G2 | 依赖需 p4a recipe，且 4 个包无官方 recipe | 运行期 `ImportError` | 自建本地 recipe：`attrs`、`typing-extensions`、`charset-normalizer`、`psd-tools`（`PyProjectRecipe`），并入 `<project>/deployment/recipes/` | P1 |
 | G3 | 依赖版本漂移：numpy 2.5.2→recipe 2.3.0；Pillow 12.3.0→11.3.0；reportlab 5.0.1→hg 旧修订 | 行为差异/隐性 bug | 自建 recipe 钉版本（numpy 2.5.2 / Pillow 12.3.0 / reportlab 5.0.1 sdist），或在 Android 侧放宽 `pyproject` 约束并实测 | P1/P2 |
 | G4 | 自研 C 扩展 `_psd_fast.so` 无 Android 版本 | 仅性能下降（有回退） | P0/P1 直接禁用（回退纯 Python）；P3 可选：写 p4a recipe 用 NDK 编译 arm64 版（务必加 `-Wl,-z,max-page-size=16384`） | P3 |
-| G5 | `QMenuBar` 在 Android 无原生菜单栏 | 文件/设置/帮助菜单不可达 | 改为 `QToolBar` + 抽屉/`QPushButton` 菜单，或 Android 专用布局分支 | P3 |
+| G5 | `QMenuBar` 在 Android 无原生菜单栏 | 文件/设置/关于菜单不可达 | 改为 `QToolBar` + 抽屉/`QPushButton` 菜单，或 Android 专用布局分支 | P3 |
 | G6 | `QShortcut` 依赖物理键盘；滚轮/右键/悬停交互 | 触屏无法操作 | 触屏手势（捏合缩放、长按菜单、点击标注）、按钮化常用操作；可保留键盘支持（外接键盘/Chromebook 可用） | P3 |
 | G7 | `QDockWidget` 停靠面板在窄屏不可用 | 布局崩坏 | 改为 Tab/抽屉/堆叠页面布局（`QStackedWidget` 或 `QTabWidget`） | P3 |
 | G8 | `QFileDialog.getOpenFileName/getExistingDirectory` 无法访问 Android 共享存储 | **核心流程（选漫画文件夹）不可用** | **已定方案**：改用 `getExistingDirectoryUrl()`（系统原生 SAF 选择器）→ 纯 Python 把 tree URI 映射为真实路径（`primary:`/`<UUID>:`/`raw:`，详见姊妹文档 §2.8）→ 之后全部走真实路径直读；配 `MANAGE_EXTERNAL_STORAGE` 权限 + 未授权弹窗（§2.7）。**不需要** JNI/`QJniObject`（PySide6 也没有） | P1 |

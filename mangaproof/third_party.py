@@ -179,7 +179,7 @@ https://github.com/pyinstaller/pyinstaller-hooks-contrib/blob/develop/LICENSE"""
 # Android 打包工具链（PySide6 官方 pyside6-android-deploy 及其依赖）
 # ---------------------------------------------------------------------------
 # 这些组件**只在构建 APK 时使用，不随应用分发**；但按"开源组件与许可透明"的原则，
-# 在「帮助 → 第三方许可」里对所有平台一致展示（不区分平台）。
+# 在「关于 → 第三方许可」里对所有平台一致展示（不区分平台）。
 
 APACHE20_NOTICE = """Apache License 2.0（Apache-2.0）
 
@@ -254,7 +254,7 @@ MISANS_LICENSE = """MiSans 字体知识产权许可协议
 
 
 # Noto Sans Symbols 2（符号回退字体，OFL-1.1）。
-# 许可全文内嵌在下方（NOTO_SYMBOLS2_LICENSE），展示于「帮助 → 第三方许可」；
+# 许可全文内嵌在下方（NOTO_SYMBOLS2_LICENSE），展示于「关于 → 第三方许可」；
 # 不再单独随包放一份 .txt（软件内即可查阅，避免同一份协议两处维护）。
 NOTO_SYMBOLS2_LICENSE = """Copyright 2022 The Noto Project Authors (https://github.com/notofonts/symbols)
 

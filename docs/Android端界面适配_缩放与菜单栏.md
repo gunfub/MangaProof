@@ -1,4 +1,4 @@
-# Android 端界面适配：界面缩放 + 找回「文件 / 设置 / 帮助」
+# Android 端界面适配：界面缩放 + 找回「文件 / 设置 / 关于」
 
 > 本文记录两项**Android 专有**适配的实现依据与取舍：
 > 1. 顶部菜单栏在 Android 上消失的根因与修复（`AA_DontUseNativeMenuBar`）；
@@ -8,7 +8,7 @@
 
 ---
 
-## 1. 为什么「文件 / 设置 / 帮助」在 Android 上看不到
+## 1. 为什么「文件 / 设置 / 关于」在 Android 上看不到
 
 Qt 并没有"降级成窗口内菜单栏"，而是**把 QMenuBar 隐藏并交给系统的 options menu**。完整链路（Qt 6.11 源码）：
 
@@ -21,7 +21,8 @@ Qt 并没有"降级成窗口内菜单栏"，而是**把 QMenuBar 隐藏并交给
 | 5 | 启动时 Qt 主动隐藏 ActionBar；若 `getActionBar() == null` 则直接放弃 | `QtActivityDelegate.java`：`initMembers()` / `setActionBarVisibility()` |
 | 6 | p4a 的 Qt 模板主题让第 5 条必然成立：application 主题 `Theme.NoTitleBar(.Fullscreen)`，activity 主题 `@style/KivySupportCutout`（`windowNoTitle=true`、`windowFullscreen=true`，本项目还传了 `--display-cutout shortEdges`）→ **根本没有 ActionBar** | `bootstraps/qt/build/templates/AndroidManifest.tmpl.xml`、`strings.tmpl.xml` |
 
-结论：窗口内没有菜单栏，系统侧也没有入口 → 用户完全看不到 文件 / 设置 / 帮助（工具栏不受影响，因为它是普通控件）。
+结论：窗口内没有菜单栏，系统侧也没有入口 → 用户完全看不到 文件 / 设置 / 关于（工具栏不受影响，因为它是普通控件）。
+（顶栏第三项 2026-09-25 由「帮助」改名「关于」，本文其余处的旧称呼按当时语境保留。）
 
 ### 修复方式与实现要点
 
@@ -219,7 +220,7 @@ adb exec-out screencap -p > shot.png
 
 每档核对 4 件事：
 
-1. 顶部出现 **文件 / 设置 / 帮助**，且点开有下拉菜单；
+1. 顶部出现 **文件 / 设置 / 关于**，且点开有下拉菜单；
 2. 顶部工具栏**整行完整**（无 "»" 折叠；折叠内屏与手机除外，见限制）；
 3. 与把设置改成 100% 重启后相比，界面明显更紧凑（对话框一起变小 → 说明覆盖到了 Qt 自身度量）；
 4. 启动日志（`adb logcat` 或程序目录 `logs/mangaproof.log`）里出现机型与默认值，例如
@@ -276,7 +277,7 @@ if (!request.fallBackFamilies.isEmpty()) {
 
 | 文件 | 内容 |
 |---|---|
-| `font/NotoSansSymbols2-Regular.ttf` | 回退字体（家族名 `Noto Sans Symbols2`，641 KB），随包分发；OFL-1.1 全文内嵌在 `third_party.py`，展示于「帮助 → 第三方许可」（不再单独放 .txt） |
+| `font/NotoSansSymbols2-Regular.ttf` | 回退字体（家族名 `Noto Sans Symbols2`，641 KB），随包分发；OFL-1.1 全文内嵌在 `third_party.py`，展示于「关于 → 第三方许可」（不再单独放 .txt） |
 | `mangaproof/fonts.py` | `fallback_font_candidates()` / `load_symbol_fallback_families()`：注册回退字体并返回家族名；**`is_android_strict()` 为假时直接返回空**（桌面不挂链） |
 | `mangaproof/ui/theme.py` | `apply_dark_theme(app, primary_family, fallback_families=())`：家族链 = 主字体 → 回退字体 → 桌面默认家族；`app.font()` 同步带上同一条链（QSS 覆盖不到的场合也能回退） |
 | `mangaproof/main.py` | 组合并打印启动日志 `字体家族链：[...]`（真机核对用） |

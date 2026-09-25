@@ -51,7 +51,7 @@ def apply_app_icon(app, icon_path: Path | None = None) -> Path | None:
 
 
 def configure_android_menu_bar() -> bool:
-    """Android 上禁用 Qt 的"原生菜单栏"路径，让 文件/设置/帮助 回到窗口内。
+    """Android 上禁用 Qt 的"原生菜单栏"路径，让 文件/设置/关于 回到窗口内。
 
     为什么需要（源码级）：Android 平台主题实现了
     `QAndroidPlatformTheme::createPlatformMenuBar()`，Qt 因此认为该平台"有原生
@@ -60,7 +60,7 @@ def configure_android_menu_bar() -> bool:
     p4a 的 `Theme.NoTitleBar.Fullscreen` + `@style/KivySupportCutout`
     （`windowNoTitle=true`、沉浸式全屏）→ `getActionBar()` 为 null，
     `QtActivityDelegate::setActionBarVisibility()` 直接返回 → 菜单既不在窗口内，
-    也没有系统入口，用户看不到 文件/设置/帮助。
+    也没有系统入口，用户看不到 文件/设置/关于。
 
     用法要点：
     - 必须在**任何 QMenuBar 创建之前**设置该属性（`QMenuBarPrivate::init()` 里判定）；
@@ -150,7 +150,7 @@ def main(argv=None) -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName("MangaProof")
 
-    # ---- 找回「文件 / 设置 / 帮助」（Android 专有）----
+    # ---- 找回「文件 / 设置 / 关于」（Android 专有）----
     # 必须在任何 QMenuBar 创建之前调用（QMenuBarPrivate::init() 里判定该属性）。
     configure_android_menu_bar()
 
