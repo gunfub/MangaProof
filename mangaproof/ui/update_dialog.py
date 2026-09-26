@@ -38,6 +38,16 @@
    那一行（内含按钮，行高最大）会被压到 12px。对策见
    :meth:`UpdateDialog._fit_status_height`：状态区固定高度并可滚动、进度条
    常驻占位、窗口最小高度一次算准，于是表单各行高度恒定。
+4. **源码运行只检查、不下载**（2026-09-26 补充）：更新包是打包好的二进制发行版
+   （.zip / .tar.gz / .apk，见 ``update/detector.py`` 的 ``_TARGETS``），对源码树
+   没有意义 —— 源码运行的正确更新方式是 ``git pull``。判定走
+   `utils.platform.is_source_run()`，**在构造时定一次**，只由
+   :meth:`UpdateDialog._download_enabled` / :meth:`UpdateDialog._download_tooltip`
+   读出，于是右侧按钮恒置灰（仍遵守第 2 条的"常驻置灰、不做 show/hide"）；
+   「该怎么更新」写进输出区（:data:`SOURCE_RUN_HINT`）且**插在版本行之后**——
+   输出区固定 180px、每个新动作又把滚动位置归零，提示只有落在首屏才读得到。
+   源码运行下永远拿不到已下载的包，所以「安装更新」分支天然不可达，
+   **不需要**再加一道安装守卫。
 
 另外两条纯 UI 约定（与设置页保持一致）：
 
@@ -91,6 +101,7 @@ from mangaproof.update import cdk_store
 from mangaproof.update.errors import UpdateError
 from mangaproof.update.humanize import human_size, human_speed
 from mangaproof.update.models import CheckResult
+from mangaproof.utils.platform import is_source_run
 from mangaproof.ui.widgets import NoWheelComboBox
 
 log = logging.getLogger("mangaproof.ui.update_dialog")
@@ -151,6 +162,21 @@ MIRRORCHYAN_NEEDS_CDK = (
     "或把更新渠道改为 Cloudflare R2 / GitHub。"
 )
 
+#: 源码运行时写进输出区的提示：**只检查、不下载**。
+#: 理由：更新包是打包好的二进制发行版（.zip / .tar.gz / .apk，见
+#: ``update/detector.py`` 的 `_TARGETS`），对源码树没有意义 —— 源码运行的
+#: 正确更新方式是 ``git pull``。判定见 `utils.platform.is_source_run()`。
+SOURCE_RUN_HINT = (
+    "当前以源码方式运行，不提供更新包下载。\n\n"
+    "请在项目目录执行：\n"
+    "    git pull\n"
+    "以拉取最新源代码。"
+)
+
+#: 源码运行时右侧按钮的 tooltip。输出区已写完整版 :data:`SOURCE_RUN_HINT`，
+#: 这里只留一句，避免长文把 tooltip 撑成一大块。
+SOURCE_RUN_TOOLTIP = "源码运行不提供更新包下载：请在项目目录执行 git pull"
+
 
 def _speed_label(value: int) -> str:
     return "不限速" if value == 0 else f"{value} M"
@@ -167,13 +193,28 @@ class UpdateDialog(QDialog):
     #: 安装器要拿这个值在替换文件前复核，缺失就只能跳过哈希校验）。
     install_requested = Signal(object)      # (Path, str)
 
-    def __init__(self, settings: Settings, *, parent: QWidget | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        source_run: bool | None = None,
+        parent: QWidget | None = None,
+    ):
+        """``source_run`` 仅供测试注入运行形态（照 `utils/platform.is_source_run`
+        的可注入做法）：默认 ``None`` 表示按真实环境判定。刻意**在构造时定一次**，
+        不在每次点击时重算 —— 运行形态在一次运行内不会变，而定下来之后
+        「按钮是否可用」「输出区写什么」才是同一个判据，不会互相漂移。
+        """
         super().__init__(parent)
         self.setWindowTitle(f"{APP_NAME} 更新")
         self.setModal(True)
         self.setMinimumWidth(560)
 
         self._settings = settings
+        #: 是否源码运行：源码运行只允许「检查更新」，不提供更新包下载
+        #: （见 SOURCE_RUN_HINT）。整个更新页只有这一处读它，其余判定都走
+        #: _download_enabled() / _download_tooltip()，避免判据散落。
+        self._source_run = bool(is_source_run() if source_run is None else source_run)
         # draft：点「取消」时丢弃，点「保存并检查更新」（或「下载更新」）时提交
         # （需求 §13）。**下载前也提交**：否则检查之后改的代理/限速只改界面，
         # 既不下发给下载线程也不写盘。
@@ -578,6 +619,10 @@ class UpdateDialog(QDialog):
         )
 
     def _download_enabled(self) -> bool:
+        # 源码运行：右侧按钮**恒置灰**（需求：只检查、不下载）。
+        # 这一条判在状态机之前 —— 它不依赖状态，源码运行下任何状态都不该可下载。
+        if self._source_run:
+            return False
         if self._state == "done":
             return self._package is not None
         if self._state != "update_available" or self._result is None:
@@ -585,6 +630,10 @@ class UpdateDialog(QDialog):
         return self._selection_matches_checked()
 
     def _download_tooltip(self) -> str:
+        # 同上：运行形态的解释优先于状态解释，否则用户会看到"下载并校验更新包"
+        # 这种与灰按钮自相矛盾的提示。
+        if self._source_run:
+            return SOURCE_RUN_TOOLTIP
         if self._state == "checking":
             return "正在检查更新，请稍候"
         if self._state == "downloading":
@@ -750,10 +799,16 @@ class UpdateDialog(QDialog):
             outcome.size_note or "—"
         )
         note = f"\n\n更新说明：\n{result.release.release_note}" if result.release.release_note else ""
+        # 源码运行：把"该怎么更新"插在版本行之后、分支/文件/大小之前。
+        # 位置不是随手放的 —— 输出区固定 180px（STATUS_AREA_HEIGHT）且每个新动作
+        # 都会把滚动位置归零（_clear_output），提示必须落在**首屏**，否则用户只看到
+        # 一个灰掉的「下载更新」而读不到原因。文件/大小仍按需求照旧显示，只是排在后面。
+        guidance = f"\n\n{SOURCE_RUN_HINT}" if self._source_run else ""
         self.status_label.setText(
             "发现新版本\n\n"
             f"当前版本：{result.current_display}\n"
-            f"最新版本：{result.latest_display}\n\n"
+            f"最新版本：{result.latest_display}"
+            f"{guidance}\n\n"
             f"分支：{result.branch}\n\n"
             f"文件：\n{outcome.filename or '—'}\n\n"
             f"大小：\n{size_text}{note}"
@@ -771,6 +826,12 @@ class UpdateDialog(QDialog):
     # -- 下载 --------------------------------------------------------------
 
     def _start_download(self) -> None:
+        # 守卫 0：源码运行不提供更新包下载（与 _download_enabled() 同一个判据）。
+        # 按钮此刻恒为灰的，这里再挡一次是为了防"信号/时序"绕过 —— 绝不发下载请求；
+        # 也**不落盘**（与守卫 2 同一个理由：被拒绝的操作不该产生副作用）。
+        if self._source_run:
+            self._show_hint(SOURCE_RUN_HINT)
+            return
         if self._result is None:
             return
         # 守卫 1：分支/渠道被改过 → 查到的包已不对应，要求重查（按钮此刻也是灰的，
@@ -958,4 +1019,6 @@ __all__ = [
     "INSTALL_BTN_TEXT",
     "STALE_SELECTION_HINT",
     "MIRRORCHYAN_NEEDS_CDK",
+    "SOURCE_RUN_HINT",
+    "SOURCE_RUN_TOOLTIP",
 ]

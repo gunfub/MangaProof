@@ -41,6 +41,8 @@ from mangaproof.ui.update_dialog import (  # noqa: E402
     INSTALL_BTN_TEXT,
     MIRRORCHYAN_NEEDS_CDK,
     STALE_SELECTION_HINT,
+    SOURCE_RUN_HINT,
+    SOURCE_RUN_TOOLTIP,
     CHANNEL_LABELS,
     UpdateDialog,
 )
@@ -115,6 +117,27 @@ def fake_workers(monkeypatch):
     # 平台判定与网络无关，固定住以免测试机架构影响结果
     monkeypatch.setattr("mangaproof.update.detector.current_target", lambda: object())
     return made
+
+
+@pytest.fixture(autouse=True)
+def packaged_mode(monkeypatch):
+    """把运行形态钉在**打包产物**上（本模块的默认前提）。
+
+    为什么必须显式钉：pytest 自己就是"源码运行"（没有 ``sys.frozen``），
+    所以不钉的话本模块**全部**用例都会落在源码运行分支上 —— 右侧按钮恒置灰、
+    输出区还多一段 git 提示。那样一来：
+
+    - 依赖下载路径的用例直接失败；
+    - 更糟的是「按钮置灰」类断言会**因为错误的原因通过**（永远是灰的），
+      静默失去鉴别力（例如 `test_changing_branch_or_channel_invalidates_result`
+      里"分支变了就不该还能下载"那两条）。
+
+    钉成打包态后，本模块其余用例恢复原语义（= 打包产物的行为）；
+    源码运行的行为由本文件末尾那组用例专门覆盖（构造时传 ``source_run=True``）。
+    """
+    import mangaproof.ui.update_dialog as ui
+
+    monkeypatch.setattr(ui, "is_source_run", lambda: False)
 
 
 def _check(
@@ -1102,3 +1125,108 @@ def test_worker_cancel_flag_is_shared_and_pending():
         assert issubclass(cls, __import__(
             "mangaproof.ui.update_worker", fromlist=["x"]
         )._AbortableWorker)
+
+
+# --------------------------------------------------------------------------- #
+# 源码运行：只检查、不下载（决策 A2 / B1 / C2 / D1）
+#
+# 本模块其余用例都跑在 packaged_mode 钉出的**打包态**上，源码运行单独在这一组里
+# 覆盖。构造时直接传 source_run=，不走 autouse 的 patch —— 显式参数不受 fixture
+# 影响，读用例时一眼能看出这台是什么形态。
+# --------------------------------------------------------------------------- #
+
+
+def _source_dialog(tmp_path, *, source_run: bool = True):
+    """构造一个指定运行形态的更新页。"""
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    dlg = UpdateDialog(manager.settings, source_run=source_run)
+    # 清理缓存会弹模态确认框：与 dialog fixture 同样先挡掉
+    dlg._confirm_cache_clear = lambda: False
+    return dlg
+
+
+def test_source_run_still_checks_but_disables_download(qapp, tmp_path):
+    """源码运行：检查照常（能查到新版本），右侧按钮恒置灰并给出 git 指引。"""
+    dlg = _source_dialog(tmp_path)
+    try:
+        _check(dlg)
+        assert dlg._state == "update_available", "源码运行必须照常完成检查"
+        assert dlg._result is not None
+
+        # 只置灰、**不改文案**（第 2 条硬约定：不做 show/hide、不散落 setText）
+        assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+        assert not dlg.download_btn.isEnabled()
+        assert dlg.download_btn.toolTip() == SOURCE_RUN_TOOLTIP
+
+        text = dlg.output_text()
+        assert SOURCE_RUN_HINT in text
+        assert "git pull" in text
+        # 决策 C2：文件与大小照旧显示
+        assert "pkg.tar.gz" in text
+        assert "1.0 KB" in text
+    finally:
+        dlg.close()
+
+
+def test_source_run_hint_sits_above_the_file_details(qapp, tmp_path):
+    """提示必须排在「文件：」**之前**。
+
+    输出区固定 180px（STATUS_AREA_HEIGHT），且每个新动作都会把滚动位置归零
+    （_clear_output）—— 提示排在文件/大小后面就会掉出首屏，用户只看到一个
+    灰掉的「下载更新」却读不到原因。
+    """
+    dlg = _source_dialog(tmp_path)
+    try:
+        _check(dlg)
+        text = dlg.status_label.text()
+        assert text.index(SOURCE_RUN_HINT) < text.index("文件：")
+    finally:
+        dlg.close()
+
+
+def test_source_run_never_starts_a_download(qapp, tmp_path, fake_workers):
+    """守卫 0：绕过按钮直调 _start_download 也不得发请求、不得提交配置。"""
+    dlg = _source_dialog(tmp_path)
+    try:
+        _check(dlg)
+        committed: list[int] = []
+        dlg.settings_committed.connect(lambda: committed.append(1))
+
+        dlg._start_download()
+
+        assert fake_workers["download"] == [], "源码运行绝不发起下载"
+        assert dlg._state == "update_available", "状态不得变成 downloading"
+        assert committed == [], "被拒绝的操作不得提交/落盘（与守卫 2 同理）"
+        assert SOURCE_RUN_HINT in dlg.output_text()
+    finally:
+        dlg.close()
+
+
+def test_source_run_keeps_the_no_update_message_unchanged(qapp, tmp_path):
+    """决策 D1：没有更新时不提源码模式，文案与打包态一致。"""
+    dlg = _source_dialog(tmp_path)
+    try:
+        _check(dlg, has_update=False)
+        text = dlg.output_text()
+        assert "当前已经是最新版本" in text
+        assert "源码" not in text
+        assert "git pull" not in text
+        assert not dlg.download_btn.isEnabled()
+    finally:
+        dlg.close()
+
+
+def test_packaged_run_keeps_downloading(qapp, tmp_path, fake_workers):
+    """反向守护：打包产物必须仍能下载 —— 闸门别写成恒真。"""
+    dlg = _source_dialog(tmp_path, source_run=False)
+    try:
+        _check(dlg)
+        assert dlg.download_btn.isEnabled()
+        assert dlg.download_btn.toolTip() == "下载并校验更新包"
+        assert "git pull" not in dlg.output_text()
+
+        dlg._on_download_clicked()
+        assert len(fake_workers["download"]) == 1, "打包产物必须真的发起下载"
+    finally:
+        dlg.close()
