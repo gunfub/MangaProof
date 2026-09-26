@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from mangaproof import APP_NAME, __copyright__, __license__, __version__
 from mangaproof.camera.centering import auto_box_rect, layer_visual_bounds
+from mangaproof.camera.zoom import resolve_display_ratio
 from mangaproof.compare.controller import BG_ONLY, ORIGINAL, CompareController, hz_to_interval_ms
 from mangaproof.config.recent import RecentManager
 from mangaproof.config.settings import (
@@ -1679,8 +1680,8 @@ class MainWindow(QMainWindow):
 
         self.viewer.set_issues(self._viewer_issues())
         self._refresh_viewer_outline()
-        # 自动定位 + 自动缩放（需求 §17、§20）
-        self.viewer.recenter_on_layer(info, self.settings.layer_display_ratio)
+        # 自动定位 + 自动缩放（需求 §17、§20；bg / bg 拷贝 可用独立比例，§20.2）
+        self.viewer.recenter_on_layer(info, self._effective_display_ratio(info))
         self._refresh_issue_panel()
         self.viewer.setFocus()
 
@@ -1731,14 +1732,34 @@ class MainWindow(QMainWindow):
             return
         self._request_layer_switch(self._current_index + 1)
 
+    def _effective_display_ratio(self, info) -> float:
+        """这次自动缩放该用哪个比例（需求 §20.2：bg / bg 拷贝 可用独立值）。
+
+        规则本身在 :func:`mangaproof.camera.zoom.resolve_display_ratio`（纯函数、
+        可单测）；这里只负责把当前文档的两个图层 id 查出来，并且**功能关闭时一次
+        查询都不做**——`bg_layer_id()` 在"文件里没有 bg 名"时会走内容探测（触发
+        图层像素提取），不该让默认关闭的用户承担这个代价。
+        """
+        settings = self.settings
+        doc = self.current_doc
+        enabled = bool(settings.bg_ratio_enabled) and doc is not None
+        return resolve_display_ratio(
+            global_ratio=settings.layer_display_ratio,
+            per_layer_enabled=enabled,
+            bg_ratio=settings.bg_display_ratio,
+            bg_copy_ratio=settings.bg_copy_display_ratio,
+            layer_id=getattr(info, "id", None),
+            bg_layer_id=doc.bg_layer_id() if enabled else None,
+            bg_copy_layer_id=doc.bg_copy_layer_id() if enabled else None,
+        )
+
     def recenter_current_layer(self) -> None:
         """显式重新定位（需求 §27）。"""
         doc = self.current_doc
         if doc is None or not (0 <= self._current_index < len(doc.layers)):
             return
-        self.viewer.recenter_on_layer(
-            doc.layers[self._current_index], self.settings.layer_display_ratio
-        )
+        info = doc.layers[self._current_index]
+        self.viewer.recenter_on_layer(info, self._effective_display_ratio(info))
 
     # ================================================================= 监制操作（需求 §14～§16）
 

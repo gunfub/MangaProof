@@ -177,8 +177,23 @@ def shortcut_conflicts(
         groups.setdefault(normalize_key(seq), []).append((kind, label))
     return {seq: names for seq, names in groups.items() if len(names) > 1}
 
-DISPLAY_RATIOS: list[float] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+DISPLAY_RATIOS: list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 DEFAULT_DISPLAY_RATIO = 0.6
+
+#: 显示比例的合法区间（越界即回默认；档位表之外的合法值只能来自手工编辑的设置文件）
+DISPLAY_RATIO_MIN = 0.01
+DISPLAY_RATIO_MAX = 4.0
+
+# bg / bg 拷贝 的独立自动显示比例（2026-09-25 追加）。
+#
+# 默认**关闭**：关闭后所有图层都用全局比例，行为与旧版完全一致。
+# 打开后：`bg`（含"没有 bg 名 → 最底部有可用像素内容图层"的既有兜底，需求 §24）用
+# DEFAULT_BG_DISPLAY_RATIO；`bg 拷贝`（中文版）/ `bg copy`（英文版，大小写不敏感）
+# 用 DEFAULT_BG_COPY_DISPLAY_RATIO，**没有这个图层就不套用、也不做兜底**；
+# 其余图层继续用全局比例。图层名的匹配规则见 `mangaproof/psd/document.py`。
+DEFAULT_BG_RATIO_ENABLED = False
+DEFAULT_BG_DISPLAY_RATIO = 1.0
+DEFAULT_BG_COPY_DISPLAY_RATIO = 1.0
 
 # 自动对比预设速度档位：(次/秒, 档位名)。默认"正常"= 4 次/秒，
 # 即每张停留 250ms，与原硬编码行为一致（需求 §22）。
@@ -682,6 +697,10 @@ class Settings:
     """运行时设置对象。"""
 
     layer_display_ratio: float = DEFAULT_DISPLAY_RATIO
+    # bg / bg 拷贝 的独立自动显示比例（默认关；见 DEFAULT_BG_RATIO_ENABLED 的说明）
+    bg_ratio_enabled: bool = DEFAULT_BG_RATIO_ENABLED
+    bg_display_ratio: float = DEFAULT_BG_DISPLAY_RATIO
+    bg_copy_display_ratio: float = DEFAULT_BG_COPY_DISPLAY_RATIO
     compare_mode: str = DEFAULT_COMPARE_MODE   # "auto" / "manual"
     compare_speed_hz: int = DEFAULT_COMPARE_SPEED_HZ
     wheel_mode: str = DEFAULT_WHEEL_MODE       # "pan" / "zoom"
@@ -790,6 +809,21 @@ class Settings:
         log.info("问题类型表已升级到 v%d（共 %d 类）", ISSUE_TYPES_VERSION, len(merged))
 
 
+def parse_display_ratio(value: Any, default: float) -> float:
+    """显示比例解析：非数字 / 越界一律回默认（档位表之外的合法值保留）。
+
+    档位表（:data:`DISPLAY_RATIOS`）只是 UI 给的选择项；设置文件里手工写进来的
+    合法值（0.01～4.0）一律尊重 —— 这是既有行为，加 bg 独立比例后继续沿用。
+    """
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not (DISPLAY_RATIO_MIN <= ratio <= DISPLAY_RATIO_MAX):
+        return default
+    return ratio
+
+
 class SettingsManager:
     """settings.json 的读写封装。"""
 
@@ -866,14 +900,17 @@ class SettingsManager:
     def _from_dict(self, raw: dict[str, Any]) -> Settings:
         s = Settings()
 
-        ratio = raw.get("layer_display_ratio", DEFAULT_DISPLAY_RATIO)
-        try:
-            ratio = float(ratio)
-        except (TypeError, ValueError):
-            ratio = DEFAULT_DISPLAY_RATIO
-        if not (0.01 <= ratio <= 4.0):
-            ratio = DEFAULT_DISPLAY_RATIO
-        s.layer_display_ratio = ratio
+        s.layer_display_ratio = parse_display_ratio(
+            raw.get("layer_display_ratio", DEFAULT_DISPLAY_RATIO), DEFAULT_DISPLAY_RATIO
+        )
+        s.bg_ratio_enabled = bool(raw.get("bg_ratio_enabled", DEFAULT_BG_RATIO_ENABLED))
+        s.bg_display_ratio = parse_display_ratio(
+            raw.get("bg_display_ratio", DEFAULT_BG_DISPLAY_RATIO), DEFAULT_BG_DISPLAY_RATIO
+        )
+        s.bg_copy_display_ratio = parse_display_ratio(
+            raw.get("bg_copy_display_ratio", DEFAULT_BG_COPY_DISPLAY_RATIO),
+            DEFAULT_BG_COPY_DISPLAY_RATIO,
+        )
 
         mode = raw.get("compare_mode", DEFAULT_COMPARE_MODE)
         s.compare_mode = mode if mode in ("auto", "manual") else DEFAULT_COMPARE_MODE
@@ -982,6 +1019,9 @@ class SettingsManager:
                 payload = {
                     "settings_version": SETTINGS_VERSION,
                     "layer_display_ratio": self.settings.layer_display_ratio,
+                    "bg_ratio_enabled": self.settings.bg_ratio_enabled,
+                    "bg_display_ratio": self.settings.bg_display_ratio,
+                    "bg_copy_display_ratio": self.settings.bg_copy_display_ratio,
                     "compare_mode": self.settings.compare_mode,
                     "compare_speed_hz": self.settings.compare_speed_hz,
                     "wheel_mode": self.settings.wheel_mode,

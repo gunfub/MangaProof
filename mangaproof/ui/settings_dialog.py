@@ -3,7 +3,7 @@
 
 """设置对话框（需求 §20、§30、§35、§46、§49）。
 
-- 图层显示比例（20%～90%）；
+- 图层显示比例（10%～100%）与 bg / bg 拷贝 的独立比例（默认关）；
 - 自动对比：模式（自动/手动切换）与预设切换速度档位；
 - 快捷键设置独立子对话框（KeybindingsDialog）：核心快捷键、
   问题类型快捷键、自定义批注键——主对话框只保留入口按钮，
@@ -43,26 +43,29 @@ from PySide6.QtWidgets import (
 
 from mangaproof.compare.controller import hz_to_interval_ms
 from mangaproof.config.settings import (
+    android_memory_policy_locked,
+    android_ui_scaling,
     COMPARE_SPEED_TIERS,
     CORE_SHORTCUT_LABELS,
+    DEFAULT_BG_COPY_DISPLAY_RATIO,
+    DEFAULT_BG_DISPLAY_RATIO,
+    DEFAULT_BG_RATIO_ENABLED,
     DEFAULT_COMPARE_MODE,
     DEFAULT_COMPARE_SPEED_HZ,
     DEFAULT_DISPLAY_RATIO,
+    DEFAULT_ISSUE_SCOPE,
     DEFAULT_ISSUE_TYPES,
     DEFAULT_JPEG_QUALITY,
     DEFAULT_KEYBINDINGS,
-    DEFAULT_ISSUE_SCOPE,
+    default_memory_policy,
     DEFAULT_REPORT_IMAGE_FORMAT,
     DEFAULT_SHOW_LAYER_OUTLINE,
+    default_ui_scale,
     DEFAULT_WHEEL_MODE,
     DISPLAY_RATIOS,
+    effective_memory_policy,
     JPEG_QUALITY_CHOICES,
     Settings,
-    android_memory_policy_locked,
-    android_ui_scaling,
-    default_memory_policy,
-    default_ui_scale,
-    effective_memory_policy,
     shortcut_conflicts,
     ui_scale_choices,
 )
@@ -294,7 +297,50 @@ class SettingsDialog(QDialog):
             self.ratio_combo.addItem(f"{int(current_ratio * 100)}%", current_ratio)
         idx = self.ratio_combo.findData(current_ratio)
         self.ratio_combo.setCurrentIndex(max(0, idx))
+        self.ratio_combo.setToolTip(
+            "自动缩放的目标比例：定位当前图层 / 切换图层 / 翻页时，把该图层最长边\n"
+            "缩放到视口对应尺寸的这个比例（100% = 正好铺满视口）。\n"
+            "它**不是像素缩放百分比**——状态栏那个「缩放：xx%」才是当前的实际像素缩放；\n"
+            "手动滚轮缩放不会被它覆盖，只影响下一次自动定位。"
+        )
         display_form.addRow("图层自动显示比例：", self.ratio_combo)
+
+        # bg / bg 拷贝 的独立比例（需求 §20.2，默认关）。
+        # 关闭时两个下拉置灰：值仍保留在设置里，只是不参与自动缩放。
+        self.bg_ratio_check = QCheckBox("bg / bg 拷贝 使用独立的自动显示比例")
+        self.bg_ratio_check.setChecked(settings.bg_ratio_enabled)
+        self.bg_ratio_check.setToolTip(
+            "开启后，只有下面这两类图层用自己的比例，其余图层仍用上面的全局比例：\n"
+            "· bg：PS 里名为 bg 的图层；没有 bg 名时按既有规则退回「最底部有内容的图层」；\n"
+            "· bg 拷贝：名为「bg 拷贝」（中文版）或「bg copy」（英文版）的图层，\n"
+            "  没有这一层就不套用独立比例、也不做兜底。\n"
+            "关闭（默认）时所有图层统一用全局比例，行为与旧版一致。"
+        )
+        display_form.addRow(self.bg_ratio_check)
+
+        self.bg_ratio_combo = NoWheelComboBox()
+        self.bg_copy_ratio_combo = NoWheelComboBox()
+        for combo, current in (
+            (self.bg_ratio_combo, settings.bg_display_ratio),
+            (self.bg_copy_ratio_combo, settings.bg_copy_display_ratio),
+        ):
+            for r in DISPLAY_RATIOS:
+                combo.addItem(f"{int(r * 100)}%", r)
+            if current not in DISPLAY_RATIOS:      # 兼容手工写入的非标准档位
+                combo.addItem(f"{int(current * 100)}%", current)
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+        self.bg_ratio_combo.setToolTip(
+            "bg 图层（含「没有 bg 名时退回最底部有内容图层」的兜底）的自动显示比例。\n"
+            "默认 100%：最长边正好铺满视口。"
+        )
+        self.bg_copy_ratio_combo.setToolTip(
+            "「bg 拷贝 / bg copy」图层的自动显示比例，默认 100%。\n"
+            "文件里没有这一层时这个值不生效（没有就不做兜底）。"
+        )
+        self.bg_ratio_check.toggled.connect(self._update_bg_ratio_enabled)
+        self._update_bg_ratio_enabled()
+        display_form.addRow("bg 自动显示比例：", self.bg_ratio_combo)
+        display_form.addRow("bg 拷贝自动显示比例：", self.bg_copy_ratio_combo)
 
         self.issue_scope_combo = NoWheelComboBox()
         self.issue_scope_combo.addItem("当前页全部问题（默认，跨图层显示红框）", "page")
@@ -527,6 +573,12 @@ class SettingsDialog(QDialog):
         manual = self.compare_mode_combo.currentData() == "manual"
         self.compare_speed_combo.setEnabled(not manual)
 
+    def _update_bg_ratio_enabled(self) -> None:
+        """bg 独立比例仅在开关打开时可用（关闭时置灰，值保留）。"""
+        enabled = self.bg_ratio_check.isChecked()
+        self.bg_ratio_combo.setEnabled(enabled)
+        self.bg_copy_ratio_combo.setEnabled(enabled)
+
     def _update_report_quality_enabled(self) -> None:
         """JPEG 质量仅在选择 JPEG 压缩时可用。"""
         self.report_quality_combo.setEnabled(
@@ -538,6 +590,11 @@ class SettingsDialog(QDialog):
     def _reset_defaults(self) -> None:
         idx = self.ratio_combo.findData(DEFAULT_DISPLAY_RATIO)
         self.ratio_combo.setCurrentIndex(max(0, idx))
+        self.bg_ratio_check.setChecked(DEFAULT_BG_RATIO_ENABLED)
+        idx = self.bg_ratio_combo.findData(DEFAULT_BG_DISPLAY_RATIO)
+        self.bg_ratio_combo.setCurrentIndex(max(0, idx))
+        idx = self.bg_copy_ratio_combo.findData(DEFAULT_BG_COPY_DISPLAY_RATIO)
+        self.bg_copy_ratio_combo.setCurrentIndex(max(0, idx))
         idx = self.compare_mode_combo.findData(DEFAULT_COMPARE_MODE)
         self.compare_mode_combo.setCurrentIndex(max(0, idx))
         idx = self.compare_speed_combo.findData(DEFAULT_COMPARE_SPEED_HZ)
@@ -571,6 +628,9 @@ class SettingsDialog(QDialog):
 
     def apply_to(self, settings: Settings) -> None:
         settings.layer_display_ratio = float(self.ratio_combo.currentData())
+        settings.bg_ratio_enabled = self.bg_ratio_check.isChecked()
+        settings.bg_display_ratio = float(self.bg_ratio_combo.currentData())
+        settings.bg_copy_display_ratio = float(self.bg_copy_ratio_combo.currentData())
         settings.compare_mode = str(self.compare_mode_combo.currentData())
         settings.compare_speed_hz = int(self.compare_speed_combo.currentData())
         settings.wheel_mode = str(self.wheel_mode_combo.currentData())

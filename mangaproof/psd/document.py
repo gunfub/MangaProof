@@ -42,6 +42,14 @@ _LOADER_COMPOSITE = "composite"      # 其余图层：composite（蒙版/剪贴/
 _LOADER_TOPIL = "topil"              # bg/最底层：topil 优先，失败退化 composite
 _LOADER_TOPIL_ONLY = "topil_only"    # type 图层：仅 topil，失败直接放弃
 
+#: 「bg 拷贝」的图层名（Photoshop 复制图层的命名：中文版 `bg 拷贝`、英文版 `bg copy`）。
+#:
+#: 注意与需求 §24 的 **BG 图源**规则分开：那里 `bg copy` 明确不认（❌），只认严格
+#: 小写的 `bg`；这里是「独立自动显示比例」（需求方 2026-09-25）要识别的图层名，
+#: 两种写法都认、比较时大小写不敏感，而且**不做任何兜底**：没有这一层就当作没有，
+#: 该图层继续用全局显示比例。
+BG_COPY_LAYER_NAMES: tuple[str, ...] = ("bg 拷贝", "bg copy")
+
 
 def _layer_visible(node) -> bool:
     """图层在 PSD 中是否可见（计入所属组/文件夹的可见性）。
@@ -405,6 +413,22 @@ class PSDDocument:
         避免在 UI 线程触发背景探测提取。
         """
         return self._bg_layer_id
+
+    def bg_copy_layer_id(self) -> Optional[str]:
+        """「bg 拷贝 / bg copy」图层 id（没有则 None）。
+
+        与 :meth:`bg_layer_id` 的三点不同（需求方 2026-09-25 决策）：
+
+        - 只按**名字**匹配（:data:`BG_COPY_LAYER_NAMES`，大小写不敏感），
+          不做内容探测 —— 这个图层只服务于"独立自动显示比例"，没有它就用全局
+          比例，没必要为它触发像素提取；
+        - **没有兜底**：找不到就是 None，不退回"最底部图层"；
+        - 不缓存（层数通常 <100，一次线性比较可忽略；也就不存在缓存过期问题）。
+        """
+        for info in self.layers:
+            if str(info.name or "").lower() in BG_COPY_LAYER_NAMES:
+                return info.id
+        return None
 
     def _select_bg_layer(self) -> Optional[str]:
         layers = self.layers
