@@ -100,6 +100,9 @@ RESOURCE_ENTRIES = ",".join([
     "packaging/android/res/drawable/mangaproof_splash.xml:drawable/mangaproof_splash.xml",
     "packaging/android/res/values/colors.xml:values/colors.xml",
     "packaging/android/res/values/themes.xml:values/themes.xml",
+    # 交给系统安装器的 APK 的可共享目录（需求 §65）。清单里那个 FileProvider 的
+    # meta-data 指向 @xml/qtprovider_paths，缺了它构建期就会报资源找不到。
+    "packaging/android/res/xml/qtprovider_paths.xml:xml/qtprovider_paths.xml",
 ])
 
 
@@ -342,9 +345,13 @@ def patch_buildozer_config(*, requirements: list[str], icons: dict[str, str],
             #    自适应图标改由自带资源投放（见 RESOURCE_ENTRIES）。
             put("app", "android.add_resources", RESOURCE_ENTRIES)
 
-            # 5) 权限叠加（全文件访问：Android 11+ 直接路径读写的关键）
+            # 5) 权限叠加
+            #    · MANAGE_EXTERNAL_STORAGE：全文件访问，Android 11+ 直接路径读写的关键；
+            #    · REQUEST_INSTALL_PACKAGES：Android 8+ 调起系统安装器所必需（需求 §65）。
+            #      缺它则 Intent 被系统拒绝；用户侧还要授予"安装未知应用"。
             perms = [p for p in (self.get_value("app", "android.permissions") or "").split(",") if p]
             perms.append("android.permission.MANAGE_EXTERNAL_STORAGE")
+            perms.append("android.permission.REQUEST_INSTALL_PACKAGES")
             put("app", "android.permissions", ",".join(dict.fromkeys(perms)))
 
             # 6) p4a 参数：刘海/挖孔区域可绘制（buildozer 无对应键）

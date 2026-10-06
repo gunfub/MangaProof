@@ -48,6 +48,16 @@
    输出区固定 180px、每个新动作又把滚动位置归零，提示只有落在首屏才读得到。
    源码运行下永远拿不到已下载的包，所以「安装更新」分支天然不可达，
    **不需要**再加一道安装守卫。
+5. **Android 的差异**（2026-09-26 补充，需求 §65）：检查与下载与桌面**完全一致**，
+   只有两处不同 ——
+   ① 更新包落到**系统 Download**（`platform/android.py::download_dir()`，决策 A1），
+      因为 APK 要交给系统包管理器；
+   ② 「清理升级缓存」**恒置灰**：那两个目录是桌面安装器体系的东西，安卓既没有
+      独立安装器，更新包也不在里面，清它无事可做（需求方决策）。
+   安装本身不在本页面：由主窗口把 APK 交给系统安装器（见
+   `MainWindow._install_apk_via_system`）。
+   注意 `utils.platform.is_source_run()` 已把 Android 排除在"源码运行"之外 ——
+   APK 是打包发行版，若被误判成源码运行，这一页会连下载都禁掉。
 
 另外两条纯 UI 约定（与设置页保持一致）：
 
@@ -101,7 +111,7 @@ from mangaproof.update import cdk_store
 from mangaproof.update.errors import UpdateError
 from mangaproof.update.humanize import human_size, human_speed
 from mangaproof.update.models import CheckResult
-from mangaproof.utils.platform import is_source_run
+from mangaproof.utils.platform import is_android_strict, is_source_run
 from mangaproof.ui.widgets import NoWheelComboBox
 
 log = logging.getLogger("mangaproof.ui.update_dialog")
@@ -198,12 +208,14 @@ class UpdateDialog(QDialog):
         settings: Settings,
         *,
         source_run: bool | None = None,
+        android: bool | None = None,
         parent: QWidget | None = None,
     ):
-        """``source_run`` 仅供测试注入运行形态（照 `utils/platform.is_source_run`
-        的可注入做法）：默认 ``None`` 表示按真实环境判定。刻意**在构造时定一次**，
-        不在每次点击时重算 —— 运行形态在一次运行内不会变，而定下来之后
-        「按钮是否可用」「输出区写什么」才是同一个判据，不会互相漂移。
+        """``source_run`` / ``android`` 仅供测试注入运行形态（照
+        `utils/platform.is_source_run` 的可注入做法）：默认 ``None`` 表示按真实
+        环境判定。刻意**在构造时定一次**，不在每次点击时重算 —— 运行形态在一次
+        运行内不会变，而定下来之后「按钮是否可用」「输出区写什么」才是同一个判据，
+        不会互相漂移。
         """
         super().__init__(parent)
         self.setWindowTitle(f"{APP_NAME} 更新")
@@ -215,6 +227,10 @@ class UpdateDialog(QDialog):
         #: （见 SOURCE_RUN_HINT）。整个更新页只有这一处读它，其余判定都走
         #: _download_enabled() / _download_tooltip()，避免判据散落。
         self._source_run = bool(is_source_run() if source_run is None else source_run)
+        #: 是否 Android（需求 §65）：安装由**系统包管理器**完成，因此
+        #: ①「清理升级缓存」置灰（那两个目录是桌面安装器体系的东西）；
+        #: ②完成态文案不说"启动安装器/程序会退出重启"。
+        self._android = bool(is_android_strict() if android is None else android)
         # draft：点「取消」时丢弃，点「保存并检查更新」（或「下载更新」）时提交
         # （需求 §13）。**下载前也提交**：否则检查之后改的代理/限速只改界面，
         # 既不下发给下载线程也不写盘。
@@ -479,10 +495,10 @@ class UpdateDialog(QDialog):
 
     def _update_hint(self) -> None:
         """提示 CDK 存哪、代理/限速对哪些渠道生效（需求 §14/§29/§30）。"""
-        from mangaproof.utils.platform import is_android_strict
-
         parts: list[str] = []
-        if is_android_strict():
+        # 用构造时定下的 self._android，而不是再调一次 is_android_strict()：
+        # 同一页里的运行形态判据只应有一个来源（也便于测试注入）。
+        if self._android:
             parts.append("CDK 保存在应用私有目录的 settings.json。应用的私有目录受安卓沙箱保护。")
         elif cdk_store.keyring_available():
             parts.append("系统凭据库可用，CDK 将保存在系统凭据库（keyring），不写入配置文件。")
@@ -548,6 +564,10 @@ class UpdateDialog(QDialog):
         虽然都落在临时目录里，也不该一个回车就执行。
         """
         if self._state in ("checking", "downloading", "clearing"):
+            return
+        # Android：按钮恒置灰，这里再挡一次（防"信号/时序"绕过）。被拒绝的操作
+        # 不产生副作用 —— 与下载守卫 0 同一个原则。
+        if self._android:
             return
         if not self._confirm_cache_clear():
             return
@@ -667,11 +687,18 @@ class UpdateDialog(QDialog):
         self.download_btn.setToolTip(self._download_tooltip())
 
         self.cache_btn.setText(CACHE_BTN_TEXT)
-        self.cache_btn.setEnabled(not busy)
-        self.cache_btn.setToolTip(
-            "正在忙，请等待当前动作结束" if busy
-            else "清空两个升级缓存目录（更新包 / 安装器副本）并重建，之后需要重新检查更新"
-        )
+        # Android：**恒置灰**（需求方决策）。那两个目录（更新包 / 安装器副本）是
+        # 桌面安装器体系的东西：安卓没有独立安装器，更新包也已落到系统 Download
+        # （不在那两个目录里），清它既无事可做、又会让人以为能清掉已下载的 APK。
+        # 沿用"常驻置灰、不做 show/hide"的既有约定。
+        self.cache_btn.setEnabled(not busy and not self._android)
+        if self._android:
+            tooltip = "Android 的更新包由系统包管理器管理，无需在此清理"
+        elif busy:
+            tooltip = "正在忙，请等待当前动作结束"
+        else:
+            tooltip = "清空两个升级缓存目录（更新包 / 安装器副本）并重建，之后需要重新检查更新"
+        self.cache_btn.setToolTip(tooltip)
 
         self._refresh_stale_hint()
 
@@ -887,7 +914,25 @@ class UpdateDialog(QDialog):
         worker.start()
 
     def _download_dir(self) -> Path:
-        """下载目录（需求 §36/§37）：Windows 用 TEMP，Linux/macOS 用 CACHE。"""
+        """更新包下载目录。
+
+        - 桌面（需求 §36/§37）：Windows 用 TEMP，Linux/macOS 用 CACHE；
+        - **Android（需求 §65）**：落到**系统 Download**（`/storage/emulated/0/Download`）
+          而不是应用私有目录 —— 因为 APK 要交给系统包管理器安装，放在 Download
+          既符合需求原文，也让用户能在文件管理器里看到/重试这个安装包
+          （决策 A1；不自动清理，见决策 B2）。
+
+          ⚠️ 该目录需要用户已授予「所有文件访问」（清单已声明
+          `MANAGE_EXTERNAL_STORAGE`，见 scripts/android/build_android.py）；
+          未授予时这里会在下载阶段如实报错，不会静默失败。
+        """
+        if self._android:
+            # 直接取 android 模块，不走 platform.current()：后者按**真实**平台分发，
+            # 而这个分支由构造时定下的 self._android 决定（测试可注入）。生产环境里
+            # 两者一致，但显式取模块才能让"安卓分支"在桌面单测里也跑得起来。
+            from mangaproof.update.platform import android as android_platform
+
+            return android_platform.download_dir()
         from mangaproof.update.platform_dirs import update_package_dir
 
         return update_package_dir()
@@ -919,15 +964,21 @@ class UpdateDialog(QDialog):
         self.progress.setValue(100)
         self._state = "done"
         self._package = Path(str(path))
-        # 这里算出的 SHA-256 不只是给界面看：点「安装更新」时会作为
-        # --sha256 传给安装器，让它在替换文件前再校验一次（需求 §53）。
+        # 这里算出的 SHA-256 在桌面端会作为 --sha256 传给安装器，让它在替换文件前
+        # 再校验一次（需求 §53）。**Android 不需要**：安装由系统包管理器完成，
+        # 它自己做签名校验，主程序只负责"下载时校验"这一层（决策 D）。
         digest = checksum.sha256_of(self._package)
         self._package_sha256 = digest
+        tail = (
+            "点击「安装更新」将调起系统安装器完成安装。"
+            if self._android
+            else "点击「安装更新」将启动安装器：程序会退出并在安装完成后重启。"
+        )
         self.status_label.setText(
             "更新包已下载并通过校验\n\n"
             f"文件：{self._package.name}\n"
             f"SHA-256：{digest}\n\n"
-            "点击「安装更新」将启动安装器：程序会退出并在安装完成后重启。"
+            f"{tail}"
         )
         self.detail_label.setText(str(self._package))
         self.detail_label.setVisible(True)

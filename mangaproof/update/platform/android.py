@@ -1,20 +1,22 @@
 # SPDX-FileCopyrightText: 2026 gunfub
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Android 专有更新逻辑（需求 §65、§66）。
+"""Android 专有更新逻辑（需求 §65、§66、§85）。
 
 Android **不使用独立安装器**，也不做 ``.old`` 替换（需求 §65）：
 
 .. code-block:: text
 
-    检查更新 → 立即更新 → 获取下载信息 → 下载 APK → SHA-256
-        → 写入系统 Download → 调用系统安装器
+    检查更新 → 下载更新 → 校验（下载时）→ 写系统 Download → 交给系统包管理器
 
-因此本模块只提供"安装目录"等最小信息；任何"替换/提权/启动安装器"的调用
-都会抛 :class:`UnsupportedPlatformError`，避免上层误以为 Android 也能走桌面那套流程。
+因此本模块只提供"下载目录/安装目录"等最小信息；
+:func:`launch_installer` 直接抛 :class:`NotImplementedError`，避免上层误以为
+Android 也能走桌面那套"启动安装器替换文件"的流程。
 
-注意：第一版**隐藏 Android 的更新入口**（需求方决策），
-所以本模块当前只被"取程序目录/用户数据目录"这类通用调用触达。
+真正调起系统安装器的动作在**主程序侧**（`MainWindow._install_apk_via_system`
+→ `QDesktopServices.openUrl`）：Qt 的 Android 平台层会用清单里的 FileProvider
+把 ``file://`` 换成可共享的 ``content://`` 再发 ``ACTION_VIEW``，
+所以这里**不需要**任何 JNI / pyjnius（详见 §85.2）。
 """
 
 from __future__ import annotations
@@ -48,9 +50,13 @@ def launch_installer(exe: Path, args: list[str], *, elevate: bool) -> int:
 
 
 def download_dir() -> Path:
-    """系统 Download 目录（需求 §65：APK 落到这里再交给系统安装器）。
+    """系统 Download 目录（需求 §65/§85：APK 落到这里再交给系统安装器）。
+
+    调用方是更新页的 `UpdateDialog._download_dir()`（2026-09-26 起真正接线；
+    在此之前本函数一直没有调用者）。
 
     Android 11+ 上 ``/storage/emulated/0/Download`` 需要
-    ``MANAGE_EXTERNAL_STORAGE``（清单已声明，见 scripts/android/build_android.py）。
+    ``MANAGE_EXTERNAL_STORAGE``（清单已声明，见 scripts/android/build_android.py）；
+    未授予时下载会在建目录/写文件处失败，`downloader` 会给出带权限指引的提示。
     """
     return Path("/storage/emulated/0/Download")

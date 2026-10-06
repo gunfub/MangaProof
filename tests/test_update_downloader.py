@@ -218,3 +218,23 @@ def test_bps_conversion():
     assert downloader._bps_from_mbps(0) == 0.0
     assert downloader._bps_from_mbps(None) == 0.0
     assert downloader._bps_from_mbps(10) == 10 * 1024 * 1024
+
+
+def test_unwritable_dest_dir_is_reported_actionably(tmp_path: Path, monkeypatch):
+    """目标目录建不出来 → 给出能照着做的提示，而不是裸 errno（需求 §65）。
+
+    Android 上这是**新引入的**失败模式：更新包写系统 Download，未授予
+    「所有文件访问」时就会走这里。裸 errno 用户看不懂，也不提示该去授权。
+    """
+    def _deny(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "mkdir", _deny)
+
+    with pytest.raises(DownloadError) as excinfo:
+        download_and_verify(make_plan(), tmp_path, transport=body_transport())
+
+    text = str(excinfo.value)
+    assert "无法写入更新包目录" in text
+    assert "所有文件访问" in text, "要点明该去哪里授权"
+    assert str(tmp_path) in text, "要带上具体目录，便于排查"

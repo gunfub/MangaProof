@@ -1230,3 +1230,101 @@ def test_packaged_run_keeps_downloading(qapp, tmp_path, fake_workers):
         assert len(fake_workers["download"]) == 1, "打包产物必须真的发起下载"
     finally:
         dlg.close()
+
+
+# --------------------------------------------------------------------------- #
+# Android（需求 §65 / §66，决策 A1 / B2 / E）
+#
+# 检查与下载**与桌面一致**，只有两处不同：更新包落到系统 Download；「清理升级缓存」
+# 置灰。安装本身不在这里 —— 见 MainWindow._install_apk_via_system。
+# --------------------------------------------------------------------------- #
+
+
+def _android_dialog(tmp_path, *, source_run: bool = False):
+    """构造一个"运行在 Android 上"的更新页（source_run 默认 False：APK 是发行版）。"""
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    dlg = UpdateDialog(manager.settings, source_run=source_run, android=True)
+    dlg._confirm_cache_clear = lambda: False
+    return dlg
+
+
+def test_android_still_allows_check_and_download(qapp, tmp_path, fake_workers):
+    """安卓必须能检查**并**下载（需求："检查与下载保持现状"）。
+
+    这是回归守卫：`is_source_run()` 一旦漏判 Android，p4a APK 会被当成源码运行，
+    下载按钮恒灰、还提示"请 git pull"——而下载 APK 是安卓端唯一的更新方式。
+    """
+    dlg = _android_dialog(tmp_path)
+    try:
+        _check(dlg)
+        assert dlg._state == "update_available"
+        assert dlg.download_btn.text() == DOWNLOAD_BTN_TEXT
+        assert dlg.download_btn.isEnabled(), "安卓不许被当成源码运行"
+        assert dlg.download_btn.toolTip() == "下载并校验更新包"
+        assert "git pull" not in dlg.output_text()
+
+        dlg._on_download_clicked()
+        assert len(fake_workers["download"]) == 1, "安卓必须真的发起下载"
+    finally:
+        dlg.close()
+
+
+def test_android_downloads_to_the_system_download_dir(qapp, tmp_path):
+    """决策 A1：APK 落到系统 Download，而不是应用私有缓存目录。"""
+    dlg = _android_dialog(tmp_path)
+    try:
+        assert dlg._download_dir() == Path("/storage/emulated/0/Download")
+    finally:
+        dlg.close()
+
+
+def test_android_done_text_points_at_the_system_installer(qapp, tmp_path):
+    """完成态文案不许再提"启动安装器 / 程序会退出重启"（安卓没有独立安装器）。"""
+    dlg = _android_dialog(tmp_path)
+    try:
+        _check(dlg)
+        package = tmp_path / "MangaProof-1.1.14.alpha-android-aarch64.apk"
+        package.write_bytes(b"fake apk bytes")
+
+        dlg._on_download_ok(package)
+        text = dlg.status_label.text()
+        assert "系统安装器" in text
+        assert "程序会退出" not in text
+        assert "启动安装器" not in text
+        # 下载时的哈希仍然展示（决策 D：主程序只保证下载这一层）
+        assert dlg.take_package() == package
+    finally:
+        dlg.close()
+
+
+def test_android_greys_out_the_cache_button(qapp, tmp_path, fake_workers):
+    """决策 E：「清理升级缓存」在安卓恒置灰，且点了也不产生任何副作用。"""
+    dlg = _android_dialog(tmp_path)
+    try:
+        assert dlg.cache_btn.text() == CACHE_BTN_TEXT, "只置灰，不改文案"
+        assert not dlg.cache_btn.isEnabled()
+        assert "系统包管理器" in dlg.cache_btn.toolTip()
+
+        # 绕过按钮直调：不许弹确认框、不许起 worker、不许改状态
+        dlg._on_cache_clicked()
+        assert fake_workers["cache"] == [], "安卓不许真的去清缓存"
+        assert dlg._state == "idle"
+
+        # 忙碌态也仍然是灰的（两个条件都指向"不可用"）
+        dlg._state = "checking"
+        dlg._sync_actions()
+        assert not dlg.cache_btn.isEnabled()
+    finally:
+        dlg.close()
+
+
+def test_desktop_keeps_the_cache_button(qapp, tmp_path):
+    """反向守护：桌面端「清理升级缓存」必须仍然可用。"""
+    dlg = _source_dialog(tmp_path, source_run=False)
+    try:
+        assert dlg.cache_btn.isEnabled()
+        assert "系统包管理器" not in dlg.cache_btn.toolTip()
+        assert dlg._download_dir() != Path("/storage/emulated/0/Download")
+    finally:
+        dlg.close()

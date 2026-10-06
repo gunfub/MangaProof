@@ -223,6 +223,69 @@ def test_splash_resources_exist_and_are_wired():
     assert 'put("app", "android.apptheme", "@style/MangaProofSplash")' in build_script
 
 
+def test_injects_file_provider_for_the_system_installer(hook, fake_dist, monkeypatch):
+    """需求 §65：注入 androidx FileProvider，供 QDesktopServices.openUrl 把 APK 交出去。
+
+    类名**必须**是 `androidx.core.content.FileProvider` 本身 —— Qt 的
+    getFileProviderAuthorities() 是按清单里的类名做子串匹配的，自建子类会被忽略
+    （症状：openUrl 返回 false，日志 "No file provider found"）。
+    """
+    text = _run(hook, fake_dist, monkeypatch).read_text(encoding="utf-8")
+    assert 'android:name="androidx.core.content.FileProvider"' in text
+    assert 'android:authorities="com.priloba.mangaproof.qtprovider"' in text
+    assert 'android:grantUriPermissions="true"' in text, "不给授权则系统安装器读不到 APK"
+    assert 'android:resource="@xml/qtprovider_paths"' in text
+    # 与既有的 A11yEnvProvider 并存，两个都在
+    assert "com.mangaproof.a11y.A11yEnvProvider" in text
+    assert text.count("<provider") == 2
+    # 仍然只有一份 application / activity
+    assert text.count("<application") == 1 and text.count("</application>") == 1
+    assert text.count("<activity") == 1 and text.count("</activity>") == 1
+
+
+def test_file_provider_injection_is_idempotent(hook, fake_dist, monkeypatch):
+    """before_apk_build / after_apk_build / before_apk_assemble 会各跑一次，不许叠加。"""
+    first = _run(hook, fake_dist, monkeypatch).read_text(encoding="utf-8")
+    second = _run(hook, fake_dist, monkeypatch).read_text(encoding="utf-8")
+    assert first == second
+    assert second.count("androidx.core.content.FileProvider") == 1
+
+
+def test_injection_refuses_ambiguous_manifest(hook, tmp_path, monkeypatch):
+    """</application> 出现多次 → 直接失败，绝不"改错地方"。"""
+    dist = tmp_path / "dist"
+    (dist / "src" / "main").mkdir(parents=True)
+    (dist / "src" / "main" / "AndroidManifest.xml").write_text(
+        "<manifest></application></application></manifest>", encoding="utf-8"
+    )
+    monkeypatch.chdir(dist)
+    with pytest.raises(RuntimeError, match="无法安全注入"):
+        hook._apply(require_manifest=True)
+
+
+def test_file_provider_resource_exists_and_is_wired():
+    """资源本体、投放参数、清单引用三者必须对齐（只改一半会在构建期才炸）。"""
+    paths_xml = (PACKAGING_DIR / "res" / "xml" / "qtprovider_paths.xml").read_text(encoding="utf-8")
+    root = ET.fromstring(paths_xml)
+    entries = [(child.tag, child.get("name"), child.get("path")) for child in root]
+    assert entries == [("external-path", "download", "Download/")], (
+        "只开放系统 Download；不要照抄 Qt 模板的 path=\"/\"（会放开整个外部存储）"
+    )
+
+    build_script = (REPO_ROOT / "scripts" / "android" / "build_android.py").read_text(encoding="utf-8")
+    assert "packaging/android/res/xml/qtprovider_paths.xml:xml/qtprovider_paths.xml" in build_script
+
+    hook_src = HOOK_PATH.read_text(encoding="utf-8")
+    assert '@xml/qtprovider_paths' in hook_src
+
+
+def test_request_install_packages_permission_is_declared():
+    """Android 8+ 调起系统安装器必须有 REQUEST_INSTALL_PACKAGES（需求 §65）。"""
+    build_script = (REPO_ROOT / "scripts" / "android" / "build_android.py").read_text(encoding="utf-8")
+    assert "android.permission.REQUEST_INSTALL_PACKAGES" in build_script
+    assert "android.permission.MANAGE_EXTERNAL_STORAGE" in build_script
+
+
 # --------------------------------------------------- Android 资源文件的合法性（防再犯）
 
 def _illegal_double_hyphens(raw: bytes) -> list[int]:

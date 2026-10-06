@@ -41,7 +41,8 @@ hook 被调用的时机：p4a `toolchain.py` 在 `with current_directory(dist.di
 → Gradle 组装。因此本模块：before_apk_build 只拷 Java（清单还没生成），
 after_apk_build / before_apk_assemble 注入 provider 并**断言**成功。
 
-本 hook 现在做两件事：① 注入 A11yEnvProvider；② 给 Activity 主题挂首屏背景
+本 hook 现在做三件事：① 注入 A11yEnvProvider；② 注入 FileProvider（把已下载的
+APK 交给系统安装器，需求 §65）；③ 给 Activity 主题挂首屏背景
 （底色 + Logo，解决首次启动解包 Python 期间的白屏/黑屏）。
 此前还做过两件清单改造（入口 Activity 替换、extractNativeLibs 注入），均已移除，
 原因见下文 `【已移除的两个清单改造】` 注释块。
@@ -76,6 +77,39 @@ _PROVIDER_XML = (
     f'        <provider android:name="{PROVIDER_CLASS}"\n'
     f'                  android:authorities="{PROVIDER_AUTHORITY}"\n'
     '                  android:exported="false" />\n    '
+)
+
+#: Android 交给系统安装器用的 FileProvider（需求 §65）。
+#:
+#: **必须是 `androidx.core.content.FileProvider` 这个类本身，不能自建子类**：
+#: Qt 的 Android 平台层是这样挑 authority 的（qandroidplatformservices.cpp，
+#: getFileProviderAuthorities()）——
+#:
+#:     providerName.replace(".", "/").contains("androidx/core/content/FileProvider")
+#:
+#: 即按**清单里声明的类名**做子串匹配。子类名（如 com.mangaproof.*）不含该子串，
+#: 会被 Qt 直接忽略，表现为 openUrl() 返回 false、日志里一句
+#: "No file provider found in the AndroidManifest.xml."。
+FILE_PROVIDER_CLASS = "androidx.core.content.FileProvider"
+
+#: 与 PROVIDER_AUTHORITY 同理：授权名跟随应用 ID，避免与同设备的旧包冲突。
+#: 后缀沿用 Qt 自己的命名习惯（Qt 自带模板用的是 `${applicationId}.qtprovider`），
+#: 便于日后对照。
+FILE_PROVIDER_AUTHORITY = "com.priloba.mangaproof.qtprovider"
+
+_FILE_PROVIDER_XML = (
+    "\n        <!-- MangaProof: 把已下载的 APK 交给系统安装器（需求 §65）。"
+    "主程序调 QDesktopServices.openUrl() 时，Qt 会枚举本清单里的"
+    " androidx FileProvider，用它把 file:// 换成可共享的 content:// URI"
+    "（并带 FLAG_GRANT_READ_URI_PERMISSION）。可共享目录见"
+    " res/xml/qtprovider_paths.xml（只开放系统 Download）。 -->\n"
+    f'        <provider android:name="{FILE_PROVIDER_CLASS}"\n'
+    f'                  android:authorities="{FILE_PROVIDER_AUTHORITY}"\n'
+    '                  android:exported="false"\n'
+    '                  android:grantUriPermissions="true">\n'
+    '            <meta-data android:name="android.support.FILE_PROVIDER_PATHS"\n'
+    '                       android:resource="@xml/qtprovider_paths" />\n'
+    '        </provider>\n    '
 )
 
 #: before_apk_assemble 时必须已经注入成功
@@ -131,7 +165,8 @@ def _install_java(dist_dir: Path) -> None:
 #    直接用 Qt 控件版文件对话框（`QFileDialog` + `DontUseNativeDialog`，见
 #    mangaproof/storage/picker.py），既不碰 Activity，也不需要换入口。
 #
-# 本 hook 现在只做一件事：注入 A11yEnvProvider（无障碍开关 + 机型 dp）。
+# 本 hook 现在做三件事：注入 A11yEnvProvider（无障碍开关 + 机型 dp）、注入
+# FileProvider（系统安装器，需求 §65）、挂首屏背景。
 
 
 def _patch_splash_background(dist_dir: Path) -> bool:
@@ -201,8 +236,29 @@ def _patch_splash_background(dist_dir: Path) -> bool:
     return False
 
 
+def _inject_into_application(text: str, *, marker: str, snippet: str, label: str) -> str:
+    """把一个片段注入 `</application>` 之前；已存在则原样返回。
+
+    `</application>` 必须唯一 —— 出现多次就说明清单结构不是我们预期的样子，
+    此时宁可直接失败，也不要"改错地方"（这份清单是构建期生成的，症状会推迟到
+    真机才暴露，代价很高）。
+    """
+    if marker in text:
+        _log(f"清单中已包含 {label}，跳过注入")
+        return text
+    count = text.count("</application>")
+    if count != 1:
+        raise RuntimeError(
+            f"[mangaproof-hook] 清单里 </application> 出现 {count} 次，无法安全注入 {label}"
+        )
+    text = text.replace("</application>", snippet + "</application>", 1)
+    if marker not in text:
+        raise RuntimeError(f"[mangaproof-hook] {label} 注入后校验失败")
+    return text
+
+
 def _patch_manifest(dist_dir: Path, *, required: bool) -> None:
-    """在 <application> 内注入 provider 声明，并挂上首屏背景。"""
+    """在 <application> 内注入两个 provider 声明，并挂上首屏背景。"""
     manifest = dist_dir / "src" / "main" / "AndroidManifest.xml"
     if not manifest.is_file():
         if required:
@@ -214,24 +270,23 @@ def _patch_manifest(dist_dir: Path, *, required: bool) -> None:
     original = text
 
     # 1) provider（无障碍开关 + 机型 dp）
-    if PROVIDER_CLASS in text:
-        _log("清单中已包含 A11yEnvProvider，跳过注入")
-    else:
-        if text.count("</application>") != 1:
-            raise RuntimeError(
-                f"[mangaproof-hook] 清单里 </application> 出现 {text.count('</application>')} 次，"
-                "无法安全注入 provider"
-            )
-        text = text.replace("</application>", _PROVIDER_XML + "</application>", 1)
-        if PROVIDER_CLASS not in text:
-            raise RuntimeError("[mangaproof-hook] provider 注入后校验失败")
+    text = _inject_into_application(
+        text, marker=PROVIDER_CLASS, snippet=_PROVIDER_XML, label="A11yEnvProvider"
+    )
+    # 2) FileProvider（把 APK 交给系统安装器，需求 §65）
+    text = _inject_into_application(
+        text,
+        marker=FILE_PROVIDER_CLASS,
+        snippet=_FILE_PROVIDER_XML,
+        label="FileProvider（系统安装器）",
+    )
 
     if text != original:
         manifest.write_text(text, encoding="utf-8")
     _state["manifest_patched"] = True
-    _log("清单已注入 A11yEnvProvider")
+    _log("清单已注入 A11yEnvProvider 与 FileProvider")
 
-    # 2) 首屏背景（底色 + Logo）→ 挂到 Activity 实际使用的主题上
+    # 3) 首屏背景（底色 + Logo）→ 挂到 Activity 实际使用的主题上
     _state["splash_patched"] = _patch_splash_background(dist_dir)
 
 
@@ -254,7 +309,7 @@ def after_apk_build(toolchain=None) -> None:       # noqa: ARG001
 def before_apk_assemble(toolchain=None) -> None:   # noqa: ARG001
     _apply(require_manifest=True)
     if not _state["manifest_patched"]:
-        raise RuntimeError("[mangaproof-hook] 无障碍开关注入未完成，拒绝继续组装 APK")
+        raise RuntimeError("[mangaproof-hook] 清单 provider 注入未完成，拒绝继续组装 APK")
     if not _state["java_copied"]:
         raise RuntimeError("[mangaproof-hook] Java 源未安装，拒绝继续组装 APK")
     if not _state["splash_patched"]:

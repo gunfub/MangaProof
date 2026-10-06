@@ -1247,21 +1247,28 @@ def test_console_visibility_rules():
 
 
 def test_source_run_predicate():
-    """回归：源码运行判定只看 ``sys.frozen``，且运行事实可注入。
+    """回归：源码运行判定 = ``sys.frozen`` 与 Android **都为假**，且运行事实可注入。
 
     与 :func:`test_console_visibility_rules` 同一个形状 —— 把运行事实当参数传进去
     枚举真值表，不去 patch 全局 ``sys``（照 `console.decide_console_hidden` 的做法）。
 
-    这条判定是更新页「源码运行只检查、不下载」的唯一依据，改错会让**打包产物**
-    也下载不了更新，或让源码运行继续去下二进制发行版。
+    这条判定是更新页「源码运行只检查、不下载」的唯一依据：
+    · 漏判 frozen → 打包发行版也下载不了更新；
+    · **漏判 Android → 安卓端被当成源码运行，更新包下载被禁、还提示"请 git pull"**
+      （p4a 打的 APK 不是 PyInstaller，不设 sys.frozen，但它同样是打包发行版；
+      下载 APK 正是安卓端唯一的更新方式）。这一条是 2026-09-26 真机上要防的回归。
     """
     import sys
 
     from mangaproof.utils.platform import is_source_run
 
-    assert is_source_run(frozen=True) is False      # PyInstaller 冻结态 = 打包产物
-    assert is_source_run(frozen=False) is True      # 直接跑 python = 源码运行
-    # 不传参数时读真实环境，且与 sys.frozen 严格互为反面
+    # 真值表：只有「非冻结 且 非 Android」才是源码运行
+    assert is_source_run(frozen=True, android=False) is False   # PyInstaller 打包产物
+    assert is_source_run(frozen=True, android=True) is False    # 冻结 + Android
+    assert is_source_run(frozen=False, android=True) is False   # p4a APK ← 关键一格
+    assert is_source_run(frozen=False, android=False) is True   # 直接跑 python
+
+    # 不传参数时读真实环境：桌面开发机（pytest）就是源码运行，二者严格互为反面
     assert is_source_run() is (not bool(getattr(sys, "frozen", False)))
 
 

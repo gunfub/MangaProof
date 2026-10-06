@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MangaProof：交给系统安装器的 APK 的可共享目录（需求 §65）。
+  XML 注释内不得出现连续连字符，本文件刻意不使用横线分隔。
+
+  为什么需要这个文件：
+  Android 7+ 禁止把 file:// URI 跨应用传递（FileUriExposedException），
+  正确做法是 ContentProvider 的 content:// URI。主程序用
+  QDesktopServices.openUrl() 把本地 APK 交给系统安装器时，Qt 的 Android
+  平台层会自动用 FileProvider 完成这次转换（qandroidplatformservices.cpp：
+  对 file:// URL 在 SDK 24+ 走 openUrlWithFileProvider；QtNative.java 里
+  已经带上 FLAG_GRANT_READ_URI_PERMISSION）。
+
+  但 Qt 是在清单里枚举 FileProvider 来选 authority 的
+  （getFileProviderAuthorities()：扫 android:name 含
+  "androidx/core/content/FileProvider" 的 provider 节点），而本项目的清单来自
+  p4a 的 qt 模板，那里面没有任何 FileProvider（Qt 自带模板里那个
+  qtprovider 只在 androiddeployqt 流程生效，本项目不经过它）。
+  所以这个 provider 必须由我们自己声明，见 packaging/android/p4a_hook.py。
+
+  目录范围：只开放系统 Download
+  （Environment.getExternalStorageDirectory() 下的 Download，
+  即 /storage/emulated/0/Download），正是需求 §65 让 APK 落地的目录。
+  刻意不照抄 Qt 自带模板的 path="/"（那会把整个外部存储纳入可共享范围）：
+  这里只声明实际要用的那一个目录，授权也只按 URI 逐个发放。
+-->
+<paths>
+    <external-path name="download" path="Download/" />
+</paths>

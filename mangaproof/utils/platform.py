@@ -84,27 +84,28 @@ def is_android_strict() -> bool:
         return False
 
 
-def is_source_run(*, frozen: bool | None = None) -> bool:
-    """是否以**源码方式**运行（而非 PyInstaller 打包产物）。
+def is_source_run(*, frozen: bool | None = None, android: bool | None = None) -> bool:
+    """是否以**源码方式**运行（而非打包好的发行版）。
 
-    判据只有一条，与 `config/paths.py` 的 `get_app_dir()`、
-    `console.py` 的 `apply_console_visibility()` **同源**：PyInstaller 冻结态会
-    设置 `sys.frozen`，直接跑 `python main.py` 不会。
+    两条判据都为假，才算源码运行：
 
-    为什么把 ``frozen`` 做成可传入而不是直接读 `sys`：照
+    1. `sys.frozen`（PyInstaller 冻结态）—— 与 `config/paths.py` 的
+       `get_app_dir()`、`console.py` 的控制台可见性判定**同源**；
+    2. Android —— p4a 打的 APK **不是** PyInstaller、**不设** `sys.frozen`，
+       但它和桌面三端的发行包一样是"打包好的发行版"（由系统包管理器管理）。
+       不排掉它，安卓端就会被误当成源码运行：更新页会禁用更新包下载、并提示
+       "请 git pull"——而下载 APK 恰恰是安卓端唯一的更新方式。
+
+    为什么两个事实都做成可传入而不是直接读 `sys`：照
     `console.decide_console_hidden()` 的做法，把运行事实当参数传进来，单测就能
     直接枚举真值表，不必去 patch 全局 `sys`（见 tests/test_smoke.py 的同名用例）。
 
     用途约束（重要）：本判定只用于**与打包形态强相关**的策略分支。当前唯一
-    使用者是更新页的「源码运行不提供更新包下载」——更新包是打包好的二进制
-    发行版（.zip / .tar.gz / .apk），对源码树没有意义，正确的更新方式是 git pull。
-
-    与 Android 的关系（**刻意不特判**，勿当疏漏）：p4a 打的 APK 不是 PyInstaller，
-    不设 `sys.frozen`，因此本函数在 Android 上会返回 True。Android 的更新流程是
-    **尚未完成的独立工作流**（`update/platform/android.py`：第一版隐藏入口、
-    没有独立安装器，`launch_installer()` 直接抛 NotImplementedError），
-    按需求方决策留待 Android 分支统一处理，本函数不在这里替它做特判。
+    使用者是更新页的「源码运行不提供更新包下载」——源码树该用 `git pull`，
+    打包发行版（含 Android APK）才该下载对应的更新包。
     """
     if frozen is None:
         frozen = bool(getattr(sys, "frozen", False))
-    return not frozen
+    if android is None:
+        android = is_android_strict()
+    return (not frozen) and (not android)

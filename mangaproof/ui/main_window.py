@@ -534,20 +534,27 @@ class MainWindow(QMainWindow):
         self._adopted_update_workers = adopted
 
     def _start_update_installer(self, payload: object) -> None:
-        """启动更新安装器，成功则退出主程序（需求 §40~§46）。
+        """安装更新：桌面启动独立安装器；**Android 交给系统安装器**（需求 §65）。
 
-        顺序不能颠倒：**先确认安装器进程创建成功，再退出主程序**（需求 §46）。
+        桌面顺序不能颠倒：**先确认安装器进程创建成功，再退出主程序**（需求 §46）。
         启动失败时保持运行并报告错误 —— 否则用户会既没更新、程序也没了。
 
         ``payload`` 是对话框递过来的 ``(包路径, SHA-256)``：哈希必须一路带到安装器
         （``--sha256``），否则安装器只能打一句"未提供 --sha256，本次不做哈希校验"
         就跳过复核（需求 §53）。
+
+        Android 走另一条路：**不使用独立安装器**，也**不退出主程序** —— 见
+        :meth:`_install_apk_via_system`。
         """
+        package, sha256 = payload if isinstance(payload, tuple) else (payload, "")
+        if is_android_strict():
+            self._install_apk_via_system(Path(str(package)))
+            return
+
         from mangaproof.update import installer as installer_module
         from mangaproof.update.errors import InstallerError
         from mangaproof.update.version import AppVersion
 
-        package, sha256 = payload if isinstance(payload, tuple) else (payload, "")
         version = str(AppVersion.parse(__version__))
         try:
             invocation = installer_module.prepare_invocation(
@@ -570,6 +577,43 @@ class MainWindow(QMainWindow):
         log.info("安装器已启动，主程序即将退出以完成更新")
         # 让对话框先关闭、再走正常的关闭流程（closeEvent 会保存设置并收敛后台线程）
         QTimer.singleShot(0, self.close)
+
+    def _install_apk_via_system(self, package: Path) -> None:
+        """把已下载的 APK 交给 Android 系统安装器（需求 §65）。
+
+        为什么走 ``QDesktopServices.openUrl()`` 而**不是** JNI / pyjnius：
+        Qt 的 Android 平台层自己就把这件事做完了 —— 对 ``file://`` URL（SDK 24+）
+        它会用清单里的 ``FileProvider`` 换成可共享的 ``content://`` URI，再以
+        ``ACTION_VIEW`` + ``FLAG_GRANT_READ_URI_PERMISSION`` 调起 Activity
+        （`qandroidplatformservices.cpp` / `QtNative.java`）。因此本仓库**不需要**
+        引入任何 Java 桥 —— 这也符合 `storage/picker.py` 里"自建 Java 原生桥
+        勿再引入"的既有决定。清单里那个 ``androidx.core.content.FileProvider``
+        由 `packaging/android/p4a_hook.py` 注入。
+
+        **不退出主程序**（与桌面不同，需求方 2026-09-26 决策）：系统安装界面会覆盖
+        在本程序之上，安装时由系统结束本进程；`openUrl` 只能回报"是否成功发起"，
+        拿不到安装结果，所以这里既不等结果、也不显示"安装成功"。
+        """
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        if not package.is_file():
+            log.error("安装失败：更新包不存在：%s", package)
+            QMessageBox.critical(self, "更新失败", f"更新包不存在：\n{package}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(package))):
+            log.error("调起系统安装器失败：%s", package)
+            QMessageBox.critical(
+                self,
+                "更新失败",
+                "无法调起系统安装器。\n\n"
+                "请确认已为本应用授予「安装未知应用」权限后重试；"
+                f"也可以在文件管理器中手动安装：\n{package}",
+            )
+            return
+        # 成功发起：不做任何额外提示 —— 系统安装界面马上会覆盖上来
+        # （需求方决策："交给系统安装器就行"），再弹一个确认框只是多一次点击。
+        log.info("已把 APK 交给系统安装器：%s", package)
 
     def _show_licenses(self) -> None:
         dialog = LicenseDialog(self)

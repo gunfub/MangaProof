@@ -109,7 +109,16 @@ def download_and_verify(
     - 任一环节失败/取消都会删掉 ``.part``（需求 §35）。
     """
     dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # 需求 §65 新增的失败模式：Android 的更新包写**系统 Download**，
+        # 未授予「所有文件访问」时就会在这里失败。给一句能照着做的提示，
+        # 而不是把裸 errno 丢给用户（桌面端同样受益：磁盘只读/无权限）。
+        raise DownloadError(
+            f"无法写入更新包目录：{dest_dir}\n{exc}\n"
+            "（Android 请确认已授予「所有文件访问」权限；桌面端请检查磁盘空间与目录权限）"
+        ) from exc
     part_path = dest_dir / f"{plan.filename}.part"
     final_path = dest_dir / plan.filename
 
