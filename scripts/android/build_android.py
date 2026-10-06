@@ -105,6 +105,18 @@ RESOURCE_ENTRIES = ",".join([
     "packaging/android/res/xml/qtprovider_paths.xml:xml/qtprovider_paths.xml",
 ])
 
+#: Gradle 依赖（需求 §65）：`androidx.core.content.FileProvider` 所在的构件。
+#:
+#: 为什么**必须**显式依赖：清单里声明了这个 provider，Android 会在进程启动时
+#: 立刻实例化它（先于任何 Activity）。类不在 APK 内 → ClassNotFoundException →
+#: **启动即崩**；而这件事**构建期不会报错**（清单合并器不检查 provider 类是否存在），
+#: 只会在真机上炸。2026-10-06 实测 v1.1.14.alpha 的 APK：6 个 dex 里
+#: `Landroidx/` 一次都没出现（Qt/p4a 都不带 androidx）。
+#:
+#: 版本选择：1.13.1 的 minCompileSdk 是 34，本项目 compileSdk 35（见 ANDROID_API），
+#: minSdk 30 ≥ 其要求，因此兼容；再高的版本要求 compileSdk 35，也能用，但没有必要。
+ANDROIDX_CORE_DEP = "androidx.core:core:1.13.1"
+
 
 def log(msg: str) -> None:
     print(f"[mangaproof-android] {msg}", flush=True)
@@ -353,6 +365,25 @@ def patch_buildozer_config(*, requirements: list[str], icons: dict[str, str],
             perms.append("android.permission.MANAGE_EXTERNAL_STORAGE")
             perms.append("android.permission.REQUEST_INSTALL_PACKAGES")
             put("app", "android.permissions", ",".join(dict.fromkeys(perms)))
+
+            # 5b) Gradle 依赖：androidx.core（**必填，缺了会崩**）
+            #     需求 §65 的安装流程要在清单里声明 `androidx.core.content.FileProvider`
+            #     （Qt 枚举清单里的该 provider 来把 file:// 换成 content://）。
+            #     ⚠️ 清单里写了 provider，Android 会在**进程启动时**
+            #     （ActivityThread.installContentProviders）就把它实例化 —— 类不在包内
+            #     就是 ClassNotFoundException **启动即崩**，而且**构建期完全不报错**
+            #     （清单合并器不校验 provider 类是否存在）。
+            #     2026-10-06 实测：v1.1.14.alpha 的 APK 里 **一个 androidx 类都没有**
+            #     （6 个 dex 全无 `Landroidx/`），所以这一步不是"预防"而是必需。
+            #     buildozer 的 `android.gradle_dependencies` → p4a `--depend`
+            #     → 模板里 `implementation '<dep>'`；模板已配 google()/mavenCentral()。
+            gradle_deps = [
+                d for d in (self.get_value("app", "android.gradle_dependencies") or "").split(",")
+                if d
+            ]
+            gradle_deps.append(ANDROIDX_CORE_DEP)
+            put("app", "android.gradle_dependencies",
+                ",".join(dict.fromkeys(gradle_deps)))
 
             # 6) p4a 参数：刘海/挖孔区域可绘制（buildozer 无对应键）
             extra_args = (self.get_value("app", "p4a.extra_args") or "").strip()

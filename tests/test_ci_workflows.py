@@ -246,3 +246,25 @@ def test_bash_run_blocks_are_syntactically_valid():
             assert result.returncode == 0, f"{path.name} 第 {i + 1} 行的 bash 块语法错误：{result.stderr[:200]}"
             checked += 1
     assert checked >= 10, f"只检查到 {checked} 个 bash 块，提取逻辑可能失效"
+
+
+def test_android_workflow_gates_the_file_provider():
+    """需求 §65：APK 必须**既声明** FileProvider、**又**带上它的类。
+
+    这两条都只能在打包后查，而漏掉的后果不对称：
+    · 少声明 provider → openUrl 返回 false（功能失效，用户看得见）；
+    · 声明了但没有类 → Android 在**进程启动时**实例化该 provider →
+      ClassNotFoundException，**启动即崩**，且构建期不报错。
+
+    真机踩过第二类：v1.1.14.alpha 的 APK 6 个 dex 里没有任何 androidx 类。
+    所以这两个卡口要一起守住（只留一个都会漏掉另一类）。
+    """
+    text = (WF / "android.yml").read_text(encoding="utf-8")
+    assert 'unzip -p "$APK" AndroidManifest.xml' in text, \
+        "缺「清单里有 FileProvider」的校验"
+    assert "androidx.core.content.FileProvider" in text
+    assert "classes*.dex" in text and "grep -qa" in text, \
+        "缺「dex 里有 FileProvider 类」的校验（这条才是防启动崩溃的）"
+    assert 'echo "::error::dex 里没有 androidx.core.content.FileProvider' in text
+    assert "aapt2\" dump xmltree" not in text, \
+        "清单校验不要依赖 aapt2 的参数顺序（参数不被接受时会变成假失败）"

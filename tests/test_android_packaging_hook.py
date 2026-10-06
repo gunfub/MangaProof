@@ -286,6 +286,24 @@ def test_request_install_packages_permission_is_declared():
     assert "android.permission.MANAGE_EXTERNAL_STORAGE" in build_script
 
 
+def test_androidx_core_gradle_dependency_is_declared():
+    """声明了 `androidx.core.content.FileProvider` 就必须把它所在的构件也打进去。
+
+    Android 会在**进程启动时**实例化清单里声明的每个 provider —— 清单引用了一个
+    不在包内的类 = ClassNotFoundException = **启动即崩**；而清单合并器不校验类是否
+    存在，**构建期完全不报错**。实测 v1.1.14.alpha 的 APK 里没有任何 androidx 类，
+    所以这条依赖是必需的，不是"预防性"的。
+
+    传递路径：buildozer `android.gradle_dependencies` → p4a `--depend`
+    → build.tmpl.gradle 的 `implementation '<dep>'`。
+    """
+    build_script = (REPO_ROOT / "scripts" / "android" / "build_android.py").read_text(encoding="utf-8")
+    assert 'ANDROIDX_CORE_DEP = "androidx.core:core:' in build_script
+    assert '"android.gradle_dependencies"' in build_script, "要写进 buildozer.spec，否则不会进 Gradle"
+    # 版本必须带显式版本号：androidx 构件不带版本无法解析
+    assert "androidx.core:core:1." in build_script
+
+
 # --------------------------------------------------- Android 资源文件的合法性（防再犯）
 
 def _illegal_double_hyphens(raw: bytes) -> list[int]:

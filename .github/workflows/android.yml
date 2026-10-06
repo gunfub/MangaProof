@@ -360,6 +360,36 @@ jobs:
           grep -qE "^lib/$ABI/lib(crypto|ssl)[^/]*\.so$" "$LIST" \
             || echo "::warning::未见 openssl 系列库（本应用不依赖，仅提示）"
 
+          # 交给系统安装器用的 FileProvider（需求 §65）：**两条都要查，缺一条就是
+          # 真机启动即崩**，而且构建期完全不报错：
+          #   · 清单里没声明 provider → openUrl 返回 false，Qt 日志
+          #     "No file provider found"（功能失效）；
+          #   · 声明了但类不在包里 → 进程启动时 ActivityThread.installContentProviders
+          #     实例化它 → ClassNotFoundException（**崩在启动**）。
+          # 后者实测踩过：v1.1.14.alpha 的 APK 6 个 dex 里没有任何 androidx 类，
+          # 所以构建脚本必须显式加 androidx.core 的 Gradle 依赖。
+          # 清单直接用二进制 XML 的字符串池判断（不依赖 aapt2 的参数顺序，避免误报：
+          # 若改成 aapt2 dump xmltree 而参数顺序不被接受，这里会变成"假失败"卡住构建）。
+          MAN="$RUNNER_TEMP/apk_manifest.bin"
+          unzip -p "$APK" AndroidManifest.xml > "$MAN" 2>/dev/null || true
+          if grep -qa "androidx.core.content.FileProvider" "$MAN" \
+             && grep -qa "com.priloba.mangaproof.qtprovider" "$MAN"; then
+            echo "✅ 清单已声明 FileProvider（authority com.priloba.mangaproof.qtprovider）"
+          else
+            echo "::error::清单缺少 androidx.core.content.FileProvider / qtprovider 授权名 —— 需求 §65 的安装会失效（p4a_hook 没注入？）"
+            exit 1
+          fi
+
+          # 类必须真的在 dex 里（构建期唯一能查出"启动即崩"的地方）
+          DEX="$RUNNER_TEMP/apk_dex.bin"
+          unzip -p "$APK" 'classes*.dex' > "$DEX" 2>/dev/null || true
+          if grep -qa "androidx/core/content/FileProvider" "$DEX"; then
+            echo "✅ dex 内含 androidx.core.content.FileProvider（共 $(stat -c%s "$DEX") 字节 dex）"
+          else
+            echo "::error::dex 里没有 androidx.core.content.FileProvider —— 该 provider 会被系统在启动时实例化，真机将 ClassNotFoundException 崩溃。请确认 build_android.py 的 ANDROIDX_CORE_DEP 已生效（android.gradle_dependencies）。"
+            exit 1
+          fi
+
 
       # 16 KB page size（Android 15+ / Play 要求）：先只告警，不阻断
       - name: Check 16 KB page alignment (advisory)
