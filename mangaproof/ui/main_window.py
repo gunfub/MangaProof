@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mangaproof import APP_NAME, __copyright__, __license__, __version__
+from mangaproof import APP_NAME, __version__
 from mangaproof.camera.centering import auto_box_rect, layer_visual_bounds
 from mangaproof.camera.zoom import resolve_display_ratio
 from mangaproof.compare.controller import BG_ONLY, ORIGINAL, CompareController, hz_to_interval_ms
@@ -73,6 +73,7 @@ from mangaproof.review.state import (
     TaskState,
 )
 from mangaproof.storage import picker
+from mangaproof.ui.about_dialog import AboutDialog
 from mangaproof.ui.dialogs import IssueDialog, ReportDialog
 from mangaproof.ui.file_panel import FilePanel
 from mangaproof.ui.issue_panel import IssuePanel
@@ -464,19 +465,14 @@ class MainWindow(QMainWindow):
         about_menu.addAction(license_action)
 
     def _show_about(self) -> None:
-        QMessageBox.about(
-            self,
-            f"关于 {APP_NAME}",
-            f"<b>{APP_NAME} v{__version__}</b><br><br>"
-            "漫画翻译质量检查与返修标注工具。<br><br>"
-            "独立于 Photoshop：不调用 Photoshop API、不修改 PSD、<br>"
-            "Original 直接使用 PSD 自带 merged image。<br><br>"
-            f"<b>许可证：</b>{__license__}（GNU GPL v3.0，仅此版本）<br>"
-            f"{__copyright__}<br>"
-            "许可证全文见「关于 → 许可证…」（随程序一同分发）。<br><br>"
-            "本软件使用小米 MiSans 字体，第三方组件与许可证信息<br>"
-            "见「关于 → 第三方许可」。",
-        )
+        """「关于 → 关于 MangaProof」：打开关于页（需求：开源地址 / 官网 / 意见与反馈）。
+
+        2026-10-07 由 `QMessageBox.about()` 改为 `AboutDialog`：四条网址需要
+        "说明 + 链接 + 复制"的层级，消息框塞不下（长网址还会顶住框宽）。
+        更新与两个许可入口**仍在「关于」菜单里**，页面底部只有「关闭」。
+        """
+        dialog = AboutDialog(self)
+        dialog.exec()
 
     def _show_app_license(self) -> None:
         dialog = AppLicenseDialog(self)

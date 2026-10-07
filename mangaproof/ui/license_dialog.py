@@ -58,6 +58,8 @@ class LicenseDialog(QDialog):
         layout.addWidget(splitter, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        # 与「关于」页一致：没装 Qt 翻译时标准按钮默认英文 "Close"，显式改中文
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
@@ -113,6 +115,8 @@ class AppLicenseDialog(QDialog):
         layout.addWidget(self.text_view, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        # 与「关于」页一致：没装 Qt 翻译时标准按钮默认英文 "Close"，显式改中文
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
