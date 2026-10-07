@@ -313,3 +313,26 @@ def test_nul_stripping_is_what_makes_utf16_manifests_matchable(tmp_path):
         ["bash", "-c", f"tr -d '\\0' < '{raw}' | grep -qa '{marker}'"]
     ).returncode
     assert stripped == 0, "去掉 NUL 之后必须命中"
+
+
+def test_android_workflow_caches_the_gnu_sourced_recipe():
+    """回归：freetype 是**唯一**来自 GNU/Savannah 的 recipe，必须把它缓存起来。
+
+    2026-10-06 savannah 不可达让整条安卓构建挂了两次（社区同款：buildozer#1932，
+    维护者答"GNU's website and servers are down"，约 18 小时自愈）。缓存命中时构建
+    **完全不碰 GNU** —— 靠 p4a 的 `P4A_FREETYPE_DIR`：
+    `download_if_necessary()` 见到它就跳过下载（recipe.py:382-392），
+    `unpack()` 只 `cp -a` 到 build 目录（recipe.py:459-473），所以缓存不会被弄脏。
+    """
+    text = (WF / "android.yml").read_text(encoding="utf-8")
+    assert "path: ${{ runner.temp }}/p4a-freetype" in text, "缺 freetype 缓存路径"
+    assert "key: p4a-freetype-src-${{ env.FREETYPE_VERSION }}" in text, \
+        "缓存 key 必须带 freetype 版本，否则 p4a 升版本后会静默用旧源码"
+    assert "FREETYPE_VERSION:" in text
+    assert "P4A_FREETYPE_DIR=$SRC" in text and "$GITHUB_ENV" in text, \
+        "必须导出给后续的 Build APK 步骤，否则缓存了也不会被 p4a 使用"
+    # 缓存有效性判据：只有发布 tarball 才带 configure（recipe 直接跑 ./configure）
+    assert '"$SRC/configure"' in text, "缺「缓存里必须有 configure」的有效性校验"
+    # 冷缓存仍要下这一次，且要能明确报出"上游不可达"
+    assert "download-mirror.savannah.gnu.org" in text
+    assert "拿不到 freetype 源码" in text

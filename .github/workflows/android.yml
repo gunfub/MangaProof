@@ -46,6 +46,11 @@ env:
   ANDROID_API: "35"                      # targetSdk：35 才能保住平板上的强制横屏
   ANDROID_MIN_API: "30"                  # minSdk：MANAGE_EXTERNAL_STORAGE（全文件访问）下限
   QT_WHEEL_BASE: "https://download.qt.io/official_releases/QtForPython"
+  # freetype 的版本：**必须与 p4a 的 freetype recipe 一致**（p4a develop 分支现在是 2.14.1）。
+  # 这个值同时是缓存的 key 的一部分，所以它实际把 freetype **钉**在了这个版本上 ——
+  # 这是刻意的：GNU/Savannah 是慢性不稳定的上游，宁可钉住，也不让构建随时依赖它。
+  # p4a 若升级 freetype，这里要同步改（届时缓存 key 变化、重新下载一次即可）。
+  FREETYPE_VERSION: "2.14.1"
   # UTF-8 强制：生成 buildozer.spec 时会写入中文目录名（source.exclude_dirs），
   # 而 PySide6 的 deploy_lib 用 open(path, "w") 写文件（依赖 locale）；runner 的
   # locale 若为 C/POSIX，默认编码可能是 ASCII → UnicodeEncodeError。强制 UTF-8 后无此风险。
@@ -220,6 +225,68 @@ jobs:
           [ -f "$PS" ] || curl -fL -o "$PS" "${QT_WHEEL_BASE}/pyside6/${PS}"
           [ -f "$SH" ] || curl -fL -o "$SH" "${QT_WHEEL_BASE}/shiboken6/${SH}"
           ls -la
+
+      # ---------- p4a 的 GNU 源依赖：freetype ----------
+      # 我们的 recipe 集合里**只有 freetype 一个**来自 GNU/Savannah，其余全在
+      # GitHub / openssl.org / PyPI（见 scripts/android/build_android.py 的依赖分析）。
+      # 而 savannah 是慢性不稳定的上游：2026-10-06 让整条安卓构建挂了两次
+      # （`[Errno 101] Network is unreachable` 下载 freetype-2.14.1.tar.gz），
+      # 社区同款见 kivy/buildozer#1932（维护者："GNU's website and servers are down"，
+      # 约 18 小时后自愈）；GNU 服务长期被 LLM 爬虫压、FSF 又拒绝部署反爬工具。
+      #
+      # 这里把 freetype 的**解包后源码树**缓存起来，并交给 p4a 的 P4A_FREETYPE_DIR：
+      #   · download_if_necessary() 见到该变量就**完全跳过下载**（p4a recipe.py:382-392）；
+      #   · unpack() 会 `cp -a` 到真正的 build 目录（recipe.py:459-473）——
+      #     所以**缓存目录不会被构建弄脏**（recipe 里还有 make distclean）。
+      #   · freetype recipe 没有 patches，因此跳过 patch 是安全的。
+      # 于是**命中缓存时构建完全不碰 GNU**。冷缓存仍需下这一次，是唯一残余风险。
+      - name: Cache p4a freetype source (GNU/Savannah)
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/p4a-freetype
+          key: p4a-freetype-src-${{ env.FREETYPE_VERSION }}
+
+      - name: Prepare p4a freetype source (cache miss → download once)
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/p4a-freetype"
+          # 缓存有效性判据：发布 tarball 自带 configure（recipe 直接跑 ./configure，
+          # git 快照没有它 → 不能拿快照凑）
+          if [ -f "$SRC/configure" ]; then
+            echo "✅ freetype 源码来自缓存（${FREETYPE_VERSION}），构建不会访问 GNU"
+          else
+            URL="https://download-mirror.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VERSION}.tar.gz"
+            echo "缓存未命中：从 GNU/Savannah 下载一次 —— $URL"
+            TARBALL="$RUNNER_TEMP/freetype-${FREETYPE_VERSION}.tar.gz"
+            rm -f "$TARBALL"
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              if curl -fL --connect-timeout 20 --retry 3 --retry-delay 5 \
+                      -o "$TARBALL" "$URL"; then ok=1; break; fi
+              echo "::warning::第 ${attempt} 次下载失败，10s 后重试"
+              sleep 10
+            done
+            if [ "$ok" != 1 ]; then
+              echo "::error::拿不到 freetype 源码（GNU/Savannah 不可达）。构建不碰 GNU 的前提是缓存命中；缓存冷 + 上游挂 = 必然失败，这是已知残余风险。"
+              exit 1
+            fi
+            rm -rf "$RUNNER_TEMP/ft-extract" "$SRC"
+            mkdir -p "$RUNNER_TEMP/ft-extract" "$SRC"
+            tar -xzf "$TARBALL" -C "$RUNNER_TEMP/ft-extract"
+            # `-print -quit`：find 自己退出，**不要**用 `| head -1` ——
+            # 在 `set -o pipefail` 下，head 提前关闭管道会让 find 收到 SIGPIPE(141)，
+            # 于是整个步骤被 set -e 干掉（只有多顶层条目时才触发，属于潜伏的坑）。
+            INNER="$(find "$RUNNER_TEMP/ft-extract" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            [ -n "$INNER" ] || { echo "::error::tarball 里没有顶层目录，解包异常"; exit 1; }
+            cp -a "$INNER"/. "$SRC"/
+            [ -f "$SRC/configure" ] || { echo "::error::源码树里没有 configure —— 拿到的不是发布 tarball？"; exit 1; }
+            echo "✅ 已下载并解包 freetype ${FREETYPE_VERSION}（本次之后由缓存接管）"
+          fi
+          # 保险：actions/cache 用 tar 保存、正常会保留权限位；这里再兜一次，
+          # 免得哪天权限位丢了 → `./configure: Permission denied`（且只在命中缓存时炸）
+          chmod +x "$SRC/configure" 2>/dev/null || true
+          echo "P4A_FREETYPE_DIR=$SRC" >> "$GITHUB_ENV"
 
       # ---------- 构建 ----------
       - name: Build APK
