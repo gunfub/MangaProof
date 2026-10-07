@@ -368,12 +368,22 @@ jobs:
           #     实例化它 → ClassNotFoundException（**崩在启动**）。
           # 后者实测踩过：v1.1.14.alpha 的 APK 6 个 dex 里没有任何 androidx 类，
           # 所以构建脚本必须显式加 androidx.core 的 Gradle 依赖。
-          # 清单直接用二进制 XML 的字符串池判断（不依赖 aapt2 的参数顺序，避免误报：
+          # 清单用二进制 XML 的字符串池判断（不依赖 aapt2 的参数顺序，避免误报：
           # 若改成 aapt2 dump xmltree 而参数顺序不被接受，这里会变成"假失败"卡住构建）。
+          #
+          # ⚠️ **必须先 tr -d '\0'**：AXML 的字符串池是 **UTF-16LE**（每个 ASCII 字符
+          # 后面跟一个 \0），直接 grep ASCII 永远匹配不到 —— 2026-10-06 就是这么假失败
+          # 了一次：明明 hook 注入成功，却报"清单缺少 FileProvider"卡住了整个构建。
+          # 去掉 NUL 之后，UTF-16LE 会退化成 ASCII；若将来 AAPT 改用 UTF-8，
+          # 这一步是无操作，同样成立。判据用真实的 v1.1.14 APK 验证过：
+          # 既有的 com.priloba.mangaproof.a11y.env 命中（正控制），
+          # 而新增的两个字符串不命中（负控制，该 APK 早于本次改动）。
           MAN="$RUNNER_TEMP/apk_manifest.bin"
           unzip -p "$APK" AndroidManifest.xml > "$MAN" 2>/dev/null || true
-          if grep -qa "androidx.core.content.FileProvider" "$MAN" \
-             && grep -qa "com.priloba.mangaproof.qtprovider" "$MAN"; then
+          MAN_TXT="$RUNNER_TEMP/apk_manifest.txt"
+          tr -d '\0' < "$MAN" > "$MAN_TXT"
+          if grep -qa "androidx.core.content.FileProvider" "$MAN_TXT" \
+             && grep -qa "com.priloba.mangaproof.qtprovider" "$MAN_TXT"; then
             echo "✅ 清单已声明 FileProvider（authority com.priloba.mangaproof.qtprovider）"
           else
             echo "::error::清单缺少 androidx.core.content.FileProvider / qtprovider 授权名 —— 需求 §65 的安装会失效（p4a_hook 没注入？）"

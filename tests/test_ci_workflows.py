@@ -268,3 +268,48 @@ def test_android_workflow_gates_the_file_provider():
     assert 'echo "::error::dex 里没有 androidx.core.content.FileProvider' in text
     assert "aapt2\" dump xmltree" not in text, \
         "清单校验不要依赖 aapt2 的参数顺序（参数不被接受时会变成假失败）"
+
+
+def test_android_workflow_strips_nul_before_grepping_the_manifest():
+    """回归：二进制 AXML 的字符串池是 **UTF-16LE**，直接 grep ASCII 必然假失败。
+
+    2026-10-06 真实踩过：hook 其实注入成功了（同一个 hook 注入的既有
+    `com.priloba.mangaproof.a11y.env` 就在清单里、UTF-16LE 下可命中），
+    但校验 grep 的是 ASCII 字节 → 报"清单缺少 FileProvider" →
+    **APK 都编好了，却卡在最后一道校验上**。
+    """
+    text = (WF / "android.yml").read_text(encoding="utf-8")
+    assert "tr -d '\\0'" in text, "清单校验必须先去掉 NUL 字节（AXML 是 UTF-16LE）"
+    assert 'tr -d \'\\0\' < "$MAN" > "$MAN_TXT"' in text, \
+        "要先转存成去 NUL 的文本，再对**它**做判断"
+    for needle in ("androidx.core.content.FileProvider",
+                   "com.priloba.mangaproof.qtprovider"):
+        assert f'grep -qa "{needle}" "$MAN_TXT"' in text, \
+            f"{needle} 必须针对去 NUL 后的文本判断"
+
+
+def test_nul_stripping_is_what_makes_utf16_manifests_matchable(tmp_path):
+    """技术验证：UTF-16LE 下直接 grep 失败、去掉 NUL 之后成功。
+
+    上一条只断言"workflow 里有 tr -d"（形式化）；这条真的构造一份 UTF-16LE
+    清单跑同样的管道，把"为什么必须这么做"钉住 —— 否则后人很容易"顺手简化"
+    掉那个看似多余的 tr。
+    """
+    import shutil
+    import subprocess
+
+    tr, grep = shutil.which("tr"), shutil.which("grep")
+    if not (tr and grep):
+        pytest.skip("缺少 tr/grep（非 POSIX 环境）")
+
+    marker = "com.priloba.mangaproof.qtprovider"
+    raw = tmp_path / "AndroidManifest.bin"
+    raw.write_bytes(f"AXML{marker}END".encode("utf-16-le"))
+
+    plain = subprocess.run([grep, "-qa", marker, str(raw)]).returncode
+    assert plain != 0, "UTF-16LE 下直接 grep 本就该失败 —— 这正是当初的坑"
+
+    stripped = subprocess.run(
+        ["bash", "-c", f"tr -d '\\0' < '{raw}' | grep -qa '{marker}'"]
+    ).returncode
+    assert stripped == 0, "去掉 NUL 之后必须命中"
