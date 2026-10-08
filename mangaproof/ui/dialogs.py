@@ -206,7 +206,7 @@ class ReportDialog(QDialog):
     JPEG 质量与总览表是否隐藏无问题 PSD，选择结果由主窗口记回设置，下次沿用。
 
     手动（Ctrl+R）与「全部图层完成」后的自动生成共用这一个窗口，是否弹出
-    由设置 `report_show_options` 控制（需求方 2026-10-08）。
+    由设置 `report_show_options` 控制（需求 §86）。
     """
 
     def __init__(
@@ -264,7 +264,7 @@ class ReportDialog(QDialog):
 
         # 顶部状态行。completed：本次是「全部图层已检查完成」触发的生成——
         # 这个窗口要替代原先单独的「监制完成」提示框（能弹选项窗口时不再连弹
-        # 两个框，需求方 2026-10-08 决策），所以完成态必须在这里明说一句。
+        # 两个框，需求 §86.3），所以完成态必须在这里明说一句。
         if completed:
             note, color = "✓ 所有图层已检查完成，将生成最终返修单。", COLOR_PASS
         elif incomplete:

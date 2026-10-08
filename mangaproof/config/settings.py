@@ -717,8 +717,8 @@ class Settings:
     report_jpeg_quality: int = DEFAULT_JPEG_QUALITY
     # 返修单 PSD 总览表是否隐藏「全部通过且无问题」的页（默认隐藏）
     report_hide_clean_files: bool = True
-    # 生成返修单前是否弹选项窗口（默认开）：手动 Ctrl+R 与完成后自动生成
-    # 都受它控制，关掉后一律按上面这些设置值直接生成
+    # 生成返修单前是否弹选项窗口（默认开，需求 §86）：手动 Ctrl+R 与完成后
+    # 自动生成都受它控制，关掉后一律按上面这些设置值直接生成
     report_show_options: bool = True
     hide_console: bool = True   # 打包产物隐藏控制台（直接运行 py 时始终显示）
     keybindings: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_KEYBINDINGS))
