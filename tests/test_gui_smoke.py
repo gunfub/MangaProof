@@ -7,6 +7,10 @@
 ←→↑↓ 导航 → Space 自动对比 → 自动保存 → 重启恢复 → 返修单生成。
 
 运行：QT_QPA_PLATFORM=offscreen uv run python tests/test_gui_smoke.py
+
+**写用例前必读**：未 patch 的模态框（`QMessageBox.information/warning/...`）会把
+offscreen 测试永久卡死——被测代码弹框、测试没 patch，两边都没错，合起来就是
+"没有任何输出地挂着"。症状与定位手法见 `docs/开发踩坑记录.md` 第 1 条。
 """
 
 from __future__ import annotations
@@ -1474,7 +1478,7 @@ def test_completion_auto_report_once() -> None:
     """全部监制完成后按设置自动生成返修单：默认开、只触发一次、改动后可再次触发。
 
     默认还开着「生成返修单前显示选项窗口」：完成告知由选项窗口顶部的绿字承担，
-    这里不再先弹「监制完成」提示框（需求方 2026-10-08：完成流程只打断一次）；
+    这里不再先弹「监制完成」提示框（需求 §86.3：完成流程只打断一次）；
     关掉选项窗口（或关掉自动生成）时提示框回来。
     """
     from mangaproof.config.settings import Settings
