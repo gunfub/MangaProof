@@ -5,7 +5,8 @@
 
 持有：
 - merged image（PSD 自带，长期缓存，绝不重合成）；
-- 背景图层（bg 名精确匹配，否则最底部有像素图层，需求 §24）；
+- 背景图层（bg 名精确匹配，否则最底部有像素图层，需求 §24；选中的背景层
+  永不被隐藏过滤排除，见 build_layers）；
 - 可监制图层列表（LayerInfo，像素延迟加载 + LRU 缓存）。
 """
 
@@ -94,6 +95,9 @@ class PSDDocument:
         self._bg_checked: bool = False
 
         self._layers: Optional[List[LayerInfo]] = None
+        # 全量图层清单（含隐藏层与隐藏组内的层）：bg 判定的候选集，
+        # 见 build_layers / _hidden_bg_exemption
+        self._all_layers: Optional[List[LayerInfo]] = None
         self._layer_by_id: Optional[Dict[str, LayerInfo]] = None
         self._bg_layer_id: Optional[str] = None
         # 全图层视觉边界预热是否已完成（个别提取失败的图层不再反复重试）
@@ -188,24 +192,27 @@ class PSDDocument:
         的图层一律不进列表——图层列表、统计、预加载、返修单都由此列表
         派生，隐藏图层因此自然被全部忽略（不占用内存也不参与进度）。
 
+        **唯一例外：背景图层永不被排除**（需求方 2026-10-08）。按需求 §24
+        的同一套判据（名字严格等于 `bg`；否则最底部、具有可用像素内容的
+        图层）选出的背景层，即使自身隐藏、或位于隐藏组里，也照常进列表，
+        `visible` 如实记为 False。否则隐藏过滤会把对比基准提前剔除，让
+        「最底部可见层」顶替成基准（实测：原始工程文件里被隐藏的最底层
+        原版底图就是这样被跳过的）。
+
         注意：psd-tools 1.18 的迭代顺序为自下而上（第一个即最底部图层，
         已用合成结果实证），因此「最底部 pixel 层」取迭代序中第一个
         pixel 层。
         """
-        infos: List[LayerInfo] = []
-        entries: List[Tuple] = []
+        # 一趟收全量清单（含隐藏层、隐藏组内的层）：bg 判定的候选集必须是
+        # 全集，可见性过滤只能在选出 bg 之后生效——提前剪掉隐藏子树就再也
+        # 找不到藏里面的背景层了。
+        entries: List[Tuple] = []      # (node, parent_id, path_id, visible)
 
         def visit(node, parent_id, path_id):
             # 先按文档顺序收集本层，再递归子层
-            if node.kind in _REVIEWABLE_KINDS and _layer_visible(node):
-                entries.append((node, parent_id, path_id))
-            # 隐藏的组：内部一律不可见，整棵子树直接跳过
-            try:
-                if node.is_group() and not _layer_visible(node):
-                    return
-            except Exception:
-                pass
-            # 递归子层（group 等容器）
+            if node.kind in _REVIEWABLE_KINDS:
+                entries.append((node, parent_id, path_id, _layer_visible(node)))
+            # 递归子层（group 等容器）；隐藏组照常递归
             try:
                 children = list(node)  # __iter__ 按文档顺序（自下而上）
             except Exception:
@@ -215,15 +222,16 @@ class PSDDocument:
 
         visit(self._psd, None, "0")
 
-        # 最底部可见 pixel 图层 = 迭代序中第一个 pixel 层
+        # 最底部 pixel 图层 = 迭代序中第一个 pixel 层
         # （漫画翻译监制场景中即原版未翻译底图，无蒙版/特效）
         bottom_pixel_id = None
-        for node, _parent, path_id in entries:
+        for node, _parent, path_id, _visible in entries:
             if node.kind == "pixel":
                 bottom_pixel_id = path_id
                 break
 
-        for node, parent_id, path_id in entries:
+        infos: List[LayerInfo] = []
+        for node, parent_id, path_id, visible in entries:
             name = str(getattr(node, "name", "") or "")
             mode = _LOADER_COMPOSITE
             if node.kind == "type":
@@ -235,8 +243,9 @@ class PSDDocument:
                 id=path_id,
                 name=name,
                 bounds=bbox,
-                # 列表里只有可见图层，这里恒为 True（保留字段便于上层判断）
-                visible=True,
+                # 如实记录 PSD 里的可见性：列表里除「永不排除的背景层」
+                # 之外都是可见层（见 _hidden_bg_exemption）
+                visible=visible,
                 layer_type=str(node.kind),
                 image_mode=mode,
                 parent_id=parent_id,
@@ -245,9 +254,43 @@ class PSDDocument:
             )
             infos.append(info)
 
-        self._layers = infos
+        # bg 判定要走 LRU（_has_content → layer_image → layer_by_id），
+        # 查询表必须先就位，且覆盖全量图层（隐藏的候选也要能取到像素）
+        self._all_layers = infos
         self._layer_by_id = {info.id: info for info in infos}
-        return infos
+        exempt = self._hidden_bg_exemption(infos)
+        self._layers = [i for i in infos if i.visible or i.id in exempt]
+        return self._layers
+
+    def _hidden_bg_exemption(self, infos: List[LayerInfo]) -> set:
+        """应豁免隐藏过滤的图层 id（至多一个：真正的背景层）。
+
+        先做**零像素代价**的结构判断，只有「隐藏层有可能是 bg」时才解析 bg：
+
+        - 有隐藏层名字严格等于 `bg`（§24 名称规则与位置无关）；
+        - 迭代序里第一个有 bbox 的图层（§24 兜底规则的落点）是隐藏的。
+
+        两者都不成立 → 隐藏层不可能成为 bg（有可见层压在下面），直接返回
+        空集。**这条快路径是必须的**：建结构发生在打开任务的逐页扫描里，
+        若无条件解析 bg，每页都要多解一次全页像素（实测 11～250 ms/页），
+        大文件夹的打开时间会成倍上涨。
+        """
+        if not any(not info.visible for info in infos):
+            return set()
+        candidate = any(not info.visible and info.name == "bg" for info in infos)
+        if not candidate:
+            for info in infos:
+                if info.bounds[2] > info.bounds[0] and info.bounds[3] > info.bounds[1]:
+                    candidate = not info.visible
+                    break
+        if not candidate:
+            return set()
+        # 判据与选 bg 完全同一套（§24，含内容探测），只是候选集是全量图层；
+        # 结果直接缓存，bg_layer_id() 不再重复解析
+        bg_id = self._select_bg_layer()
+        self._bg_layer_id = bg_id
+        info = self._layer_by_id.get(bg_id) if bg_id else None
+        return {bg_id} if info is not None and not info.visible else set()
 
     def _make_image_loader(self, node, mode: str = _LOADER_COMPOSITE):
         """返回惰性加载器（按图层类型选择提取路径）。
@@ -431,7 +474,13 @@ class PSDDocument:
         return None
 
     def _select_bg_layer(self) -> Optional[str]:
-        layers = self.layers
+        # 候选集是**全量图层**（含隐藏层与隐藏组内的层），判据与需求 §24
+        # 完全一致：先名字严格等于 "bg"，再最底部有可用像素内容的图层。
+        # 可见性只决定「谁进可监制列表」，不参与「谁当背景」的选择
+        # （需求方 2026-10-08）——否则隐藏的 bg 会在这里被间接跳过。
+        if self._all_layers is None:
+            self.build_layers()
+        layers = self._all_layers or []
         # 1) 名称严格等于 "bg"（大小写敏感）
         for info in layers:
             if info.name == "bg":

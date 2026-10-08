@@ -28,6 +28,8 @@ class LayerInfo:
     id: str                      # 稳定编号（文档内索引路径，如 "3" 或 "3.1"）
     name: str
     bounds: Tuple[int, int, int, int]   # (left, top, right, bottom)
+    # PSD 里的真实可见性。列表里的图层恒为 True，唯一例外是「永不被排除的
+    # 背景层」——它在 PSD 里可以是隐藏的（见 PSDDocument.build_layers）
     visible: bool
     layer_type: str              # psd-tools kind
     image_mode: str = "composite"  # 像素提取路径：composite | topil | topil_only

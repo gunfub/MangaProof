@@ -150,6 +150,117 @@ def test_hidden_layers_excluded_from_structure():
         assert doc.bg_layer_id() == doc.layers[0].id
 
 
+def _make_psd(path: Path, layers) -> None:
+    """按 (名字, 尺寸, 是否可见) 自下而上生成测试 PSD（ASCII 名）。"""
+    from PIL import Image
+    from psd_tools import PSDImage
+    from psd_tools.api.layers import PixelLayer
+
+    canvas = Image.new("RGBA", (200, 200), (255, 255, 255, 255))
+    box = Image.new("RGBA", (50, 50), (10, 10, 10, 255))
+    psd = PSDImage.frompil(canvas)
+    for name, size, visible in layers:
+        img = canvas if size == "page" else box
+        layer = PixelLayer.frompil(img, psd, name=name, top=0, left=0)
+        layer.visible = visible
+    psd.save(path)
+
+
+def test_hidden_bg_is_never_excluded():
+    """隐藏的背景层永不被隐藏过滤排除（需求方 2026-10-08 决策）。
+
+    bg 由需求 §24 的同一套判据在**全量图层**（含隐藏层）上选出；选中的
+    那层即使隐藏也照常进可监制列表，`visible` 如实记为 False。否则隐藏
+    过滤会把对比基准提前剔除，"最底部可见层"顶替成基准（真实工程文件里
+    被隐藏的最底层原版底图就是这样被跳过的）。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "hidden_bg.psd"
+        _make_psd(path, [
+            ("bg", "page", False),          # 原版底图被隐藏
+            ("top_visible", "box", True),
+        ])
+
+        doc = PSDDocument(path)
+        assert [(i.id, i.name, i.visible) for i in doc.layers] == [
+            ("0.0", "bg", False),
+            ("0.1", "top_visible", True),
+        ]
+        # 基准仍是被隐藏的 bg，而不是上面那个可见的层
+        assert doc.bg_layer_id() == "0.0"
+        # 豁免不等于"假装可见"：像素照常可取（预加载 / 对比基准要用）
+        assert doc.layer_image("0.0") is not None
+
+
+def test_hidden_fallback_bg_is_never_excluded():
+    """没有 bg 名时，最底部（隐藏的）兜底层同样永不被排除。
+
+    豁免只给真正的背景层：压在基准之上、名字也不是 bg 的隐藏层照旧剔除。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "hidden_fallback.psd"
+        _make_psd(path, [
+            ("flatbase", "page", False),    # 无 bg 名 → 兜底选中的基准层
+            ("top_visible", "box", True),
+            ("sketch", "box", False),       # 普通隐藏层：不是 bg，照旧剔除
+        ])
+
+        doc = PSDDocument(path)
+        assert [(i.id, i.name, i.visible) for i in doc.layers] == [
+            ("0.0", "flatbase", False),
+            ("0.1", "top_visible", True),
+        ]
+        assert doc.bg_layer_id() == "0.0"
+
+
+def test_hidden_group_bg_is_never_excluded():
+    """藏在隐藏组里的背景层同样永不被排除。
+
+    隐藏组不再整棵子树直接跳过：bg 判定必须先看到全量图层，否则藏在
+    隐藏文件夹里的基准层根本进不了候选集。
+    """
+    from PIL import Image
+    from psd_tools import PSDImage
+    from psd_tools.api.layers import Group, PixelLayer
+
+    with tempfile.TemporaryDirectory() as tmp:
+        canvas = Image.new("RGBA", (200, 200), (255, 255, 255, 255))
+        box = Image.new("RGBA", (50, 50), (10, 10, 10, 255))
+        psd = PSDImage.frompil(canvas)
+        folder = Group.new(psd, name="hidden_folder")
+        folder.visible = False
+        PixelLayer.frompil(canvas, folder, name="bg", top=0, left=0)
+        PixelLayer.frompil(box, psd, name="top_visible", top=10, left=10)
+        path = Path(tmp) / "bg_in_hidden_group.psd"
+        psd.save(path)
+
+        doc = PSDDocument(path)
+        assert [(i.id, i.name, i.visible) for i in doc.layers] == [
+            ("0.0.0", "bg", False),
+            ("0.1", "top_visible", True),
+        ]
+        assert doc.bg_layer_id() == "0.0.0"
+
+
+def test_hidden_layer_above_bg_keeps_bg_probe_lazy():
+    """隐藏层压在 bg 之上时不解析 bg：建结构阶段必须零像素提取。
+
+    背景豁免需要 bg 判定（§24 要读像素），所以只在「隐藏层有可能是 bg」
+    时才解析；打开任务是逐页建结构，普通文件不能平白多解一次全页像素。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "hidden_above.psd"
+        _make_psd(path, [
+            ("bg", "page", True),           # 可见且在最底部 → 不可能是隐藏层当 bg
+            ("top_hidden", "box", False),
+        ])
+
+        doc = PSDDocument(path)
+        assert [i.name for i in doc.layers] == ["bg"]
+        assert doc.resolved_bg_layer_id() is None      # 建结构阶段未解析 bg
+        assert doc.bg_layer_id() == "0.0"              # 真要基准时再解析
+
+
 def test_statistics_ignore_hidden_layers():
     """已隐藏/已消失图层的历史监制记录不计入总体统计。"""
     from mangaproof.review.state import TaskState
