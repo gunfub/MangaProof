@@ -26,7 +26,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QMessageBox,
@@ -3131,14 +3131,51 @@ def test_zero_layer_file_marked_passed() -> None:
         item = window.file_panel.list_widget.item(row)
         assert item.text().startswith(STATUS_ICONS[PASSED]), item.text()
 
+        # 正常页时的面板宽度提示：说明文字不许把它顶宽（实机反馈的回归点）
+        layer_panel = window.layer_panel
+        title = layer_panel.layout().itemAt(0).widget()
+        normal_hint = layer_panel.sizeHint().width()
+
         # 打开该文件：图层区显示说明文字、没有图层行、没有当前图层
         window._on_file_activated(row)
         _wait_for_file(window, "zero.psd")
         app.processEvents()
-        assert window.layer_panel.list_widget.count() == 0
-        assert window.layer_panel.placeholder_label.isVisible()
-        assert "0 图层" in window.layer_panel.placeholder_label.text()
+        assert layer_panel.list_widget.count() == 0
+        assert layer_panel.placeholder_label.isVisible()
+        assert "0 图层" in layer_panel.placeholder_label.text()
         assert window._current_index == -1
+
+        # 布局回归（实机反馈：图层栏被撑宽 + "图层"二字掉到中间）。这里盯的是
+        # **契约**而不是当前字体下的像素值——像素值在不同字号/平台会变，契约不变：
+        # 1) 标题竖向 Fixed：多余高度不许摊到标题上（否则二字在其中垂直居中）；
+        # 2) 说明区横向 Ignored + 最小宽度 1：说明文字不许反过来决定面板宽度
+        #    （窄屏 / 放大字号下最长一行会超过图层列表的默认宽度），只按可用
+        #    宽度折行；外面套了滚动区，字号再大也只滚动、不截断。
+        label = layer_panel.placeholder_label
+        assert title.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Fixed
+        assert layer_panel.placeholder_area.sizePolicy().horizontalPolicy() == (
+            QSizePolicy.Policy.Ignored
+        )
+        assert layer_panel.placeholder_area.minimumWidth() == 1
+        assert label.wordWrap() is True
+        assert title.height() == title.sizeHint().height(), (
+            title.height(), title.sizeHint().height()
+        )
+        assert title.y() < title.height(), title.y()
+        assert layer_panel.sizeHint().width() <= normal_hint, (
+            layer_panel.sizeHint().width(), normal_hint
+        )
+        assert label.width() <= layer_panel.width(), (label.width(), layer_panel.width())
+        assert label.height() >= label.heightForWidth(label.width()), (
+            label.height(), label.heightForWidth(label.width())
+        )
+
+        # 放大字号（窄屏 / Android 缩放的等效场景）后仍按可用宽度折行、不截断
+        label.setFont(QFont(label.font().family(), 20))
+        app.processEvents()
+        assert label.height() >= label.heightForWidth(label.width()), (
+            label.height(), label.heightForWidth(label.width())
+        )
 
         # 切回正常页：说明文字消失、图层行回来（两者互斥显示）
         window._on_file_activated(0)
@@ -3146,6 +3183,8 @@ def test_zero_layer_file_marked_passed() -> None:
         app.processEvents()
         assert not window.layer_panel.placeholder_label.isVisible()
         assert window.layer_panel.list_widget.count() > 0
+        # 列表高度上限已恢复（说明显示时它是 0，只留下宽度提示撑住面板）
+        assert window.layer_panel.list_widget.maximumHeight() > 0
 
         _close_window(window)
         app.processEvents()
@@ -3155,6 +3194,7 @@ def test_zero_layer_file_marked_passed() -> None:
         assert window.layer_panel.placeholder_label.text() == ""
         assert not window.layer_panel.placeholder_label.isVisible()
         assert window.layer_panel.list_widget.count() == 0
+        assert window.layer_panel.list_widget.maximumHeight() > 0
         assert window.file_panel.list_widget.count() == 0
 
     print("PASS test_zero_layer_file_marked_passed")
