@@ -26,7 +26,7 @@ from mangaproof.config.settings import (
     JPEG_QUALITY_CHOICES,
 )
 from mangaproof.review.issue import Issue
-from mangaproof.ui.theme import COLOR_TEXT_DIM
+from mangaproof.ui.theme import COLOR_PASS, COLOR_TEXT_DIM, COLOR_WARN
 from mangaproof.ui.widgets import NoWheelComboBox
 
 
@@ -202,8 +202,11 @@ class IssueDialog(QDialog):
 class ReportDialog(QDialog):
     """返修单生成（需求 §46、§49、§54）。
 
-    除名称外，可在生成时选择页面图像是否压缩（PNG 无损 / JPEG 压缩），
-    选择结果由主窗口记回设置，下次沿用。
+    除名称外，可在生成时选择页面图像是否压缩（PNG 无损 / JPEG 压缩）、
+    JPEG 质量与总览表是否隐藏无问题 PSD，选择结果由主窗口记回设置，下次沿用。
+
+    手动（Ctrl+R）与「全部图层完成」后的自动生成共用这一个窗口，是否弹出
+    由设置 `report_show_options` 控制（需求方 2026-10-08）。
     """
 
     def __init__(
@@ -215,6 +218,7 @@ class ReportDialog(QDialog):
         image_format: str = DEFAULT_REPORT_IMAGE_FORMAT,
         jpeg_quality: int = DEFAULT_JPEG_QUALITY,
         hide_clean_files: bool = True,
+        completed: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle("生成 MangaProof 返修单")
@@ -258,10 +262,18 @@ class ReportDialog(QDialog):
         form.addRow(self.hide_clean_check)
         layout.addLayout(form)
 
-        note = "⚠ 任务尚未全部完成，返修单将标注「任务状态：未完成」。" if incomplete else ""
+        # 顶部状态行。completed：本次是「全部图层已检查完成」触发的生成——
+        # 这个窗口要替代原先单独的「监制完成」提示框（能弹选项窗口时不再连弹
+        # 两个框，需求方 2026-10-08 决策），所以完成态必须在这里明说一句。
+        if completed:
+            note, color = "✓ 所有图层已检查完成，将生成最终返修单。", COLOR_PASS
+        elif incomplete:
+            note, color = "⚠ 任务尚未全部完成，返修单将标注「任务状态：未完成」。", COLOR_WARN
+        else:
+            note, color = "", COLOR_WARN
         self.note_label = QLabel(note)
         self.note_label.setWordWrap(True)
-        self.note_label.setStyleSheet("color: #f5a623;")
+        self.note_label.setStyleSheet(f"color: {color};")
         layout.addWidget(self.note_label)
 
         self.button_box = QDialogButtonBox(

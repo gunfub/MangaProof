@@ -717,6 +717,9 @@ class Settings:
     report_jpeg_quality: int = DEFAULT_JPEG_QUALITY
     # 返修单 PSD 总览表是否隐藏「全部通过且无问题」的页（默认隐藏）
     report_hide_clean_files: bool = True
+    # 生成返修单前是否弹选项窗口（默认开）：手动 Ctrl+R 与完成后自动生成
+    # 都受它控制，关掉后一律按上面这些设置值直接生成
+    report_show_options: bool = True
     hide_console: bool = True   # 打包产物隐藏控制台（直接运行 py 时始终显示）
     keybindings: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_KEYBINDINGS))
     issue_types: list[dict[str, str]] = field(
@@ -954,6 +957,7 @@ class SettingsManager:
             quality = DEFAULT_JPEG_QUALITY
         s.report_jpeg_quality = quality
         s.report_hide_clean_files = bool(raw.get("report_hide_clean_files", True))
+        s.report_show_options = bool(raw.get("report_show_options", True))
         s.hide_console = bool(raw.get("hide_console", True))
         s.custom_comment_key = str(
             raw.get("custom_comment_key", DEFAULT_KEYBINDINGS["custom_comment"])
@@ -1034,6 +1038,7 @@ class SettingsManager:
                     "report_image_format": self.settings.report_image_format,
                     "report_jpeg_quality": self.settings.report_jpeg_quality,
                     "report_hide_clean_files": self.settings.report_hide_clean_files,
+                    "report_show_options": self.settings.report_show_options,
                     "hide_console": self.settings.hide_console,
                     "custom_comment_key": self.settings.custom_comment_key,
                     "keybindings": self.settings.keybindings,

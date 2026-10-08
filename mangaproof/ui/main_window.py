@@ -1911,7 +1911,12 @@ class MainWindow(QMainWindow):
           反复弹窗、反复生成；
         - 之后若又改动了内容（补问题、改状态等），标志复位，下次完成时会
           重新提示并按设置重新生成；
-        - 是否自动生成返修单由设置「完成监制后自动生成返修单」控制（默认开）。
+        - 是否自动生成返修单由设置「完成监制后自动生成返修单」控制（默认开）；
+        - 会弹选项窗口时（自动生成 + 设置「生成返修单前显示选项窗口」都开），
+          由那个窗口顶部的「✓ 所有图层已检查完成」承担完成告知，这里不再先弹
+          提示框——完成流程只打断一次（需求方 2026-10-08 决策）；
+        - 在选项窗口里点「取消」不会自动重来：本次完成已经提示过，需要时按
+          Ctrl+R 手动生成（需求方 2026-10-08 决策）。
         """
         if not self._all_reviewed():
             self._completion_announced = False      # 有图层回到未监制 → 复位
@@ -1920,13 +1925,19 @@ class MainWindow(QMainWindow):
             return
         self._completion_announced = True
         self.issue_panel.set_hint("")
-        QMessageBox.information(
-            self,
-            "监制完成",
-            "所有图层已经检查。\n\n任务：%s" % (self.task.task_name if self.task else ""),
+        # 只有「自动生成 + 选项窗口」同时成立时窗口才会出现并接手完成告知
+        dialog_carries_notice = (
+            self.settings.generate_pdf_on_complete
+            and self.settings.report_show_options
         )
+        if not dialog_carries_notice:
+            QMessageBox.information(
+                self,
+                "监制完成",
+                "所有图层已经检查。\n\n任务：%s" % (self.task.task_name if self.task else ""),
+            )
         if self.settings.generate_pdf_on_complete:
-            self._generate_report(interactive=False)
+            self._generate_report(completed=dialog_carries_notice)
 
     def _hint_if_all_reviewed(self) -> None:
         """刚标记未通过时通常还要拖框批注：只给状态栏提示，不弹窗打断。"""
@@ -2440,13 +2451,23 @@ class MainWindow(QMainWindow):
     # ================================================================= 返修单（需求 §45～§54）
 
     def generate_report_dialog(self) -> None:
+        """手动生成入口（工具栏 / Ctrl+R）。"""
         if self.task is None or self._base_dir is None:
             QMessageBox.information(self, "生成返修单", "请先打开 PSD 或文件夹。")
             return
         self.save_task()
-        self._generate_report(interactive=True)
+        self._generate_report()
 
-    def _generate_report(self, interactive: bool) -> None:
+    def _generate_report(self, completed: bool = False) -> None:
+        """生成返修单：手动（Ctrl+R）与「全部图层完成」后的自动生成共用这条路。
+
+        是否先弹选项窗口由设置 `report_show_options` 决定（需求方 2026-10-08：
+        两条触发路径共用同一个开关，不再一条弹一条不弹）；关闭时直接用设置里
+        的名称 / 页面图像格式 / JPEG 质量 / 总览表选项生成。
+
+        completed：本次是否由「全部图层已检查完成」触发——选项窗口据此在顶部
+        显示完成告知，替代原先单独弹的「监制完成」提示框（见 _on_all_reviewed）。
+        """
         if self.task is None or self._base_dir is None:
             return
         default_name = default_report_name(
@@ -2458,7 +2479,7 @@ class MainWindow(QMainWindow):
         )
 
         name = self.settings.report_name or default_name
-        if interactive:
+        if self.settings.report_show_options:
             incomplete = self.task.count_all(self._layer_ids_by_file)["unreviewed"] > 0
             dialog = ReportDialog(
                 name,
@@ -2468,6 +2489,7 @@ class MainWindow(QMainWindow):
                 image_format=self.settings.report_image_format,
                 jpeg_quality=self.settings.report_jpeg_quality,
                 hide_clean_files=self.settings.report_hide_clean_files,
+                completed=completed,
             )
             if dialog.exec() != ReportDialog.DialogCode.Accepted:
                 return

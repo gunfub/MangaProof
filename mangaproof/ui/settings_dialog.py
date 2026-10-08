@@ -477,9 +477,21 @@ class SettingsDialog(QDialog):
             "勾选（默认）：所有图层检查完毕时自动生成返修单——使用上面的名称、\n"
             "页面图像格式与「总览表隐藏无问题 PSD」选项，同一次完成只生成一次；\n"
             "之后又补加/修改问题再完成时会重新生成。\n"
+            "生成前是否弹选项窗口由下面的开关控制（默认弹）。\n"
             "关闭后不会自动生成，可随时用「生成返修单」(Ctrl+R) 手动生成。"
         )
         report_form.addRow(self.pdf_check)
+
+        self.report_options_check = QCheckBox("生成返修单前显示选项窗口")
+        self.report_options_check.setChecked(settings.report_show_options)
+        self.report_options_check.setToolTip(
+            "勾选（默认）：每次生成返修单前都先弹出选项窗口（名称 / 页面图像格式 /\n"
+            "JPEG 质量 / 总览表是否隐藏无问题 PSD）——手动生成 (Ctrl+R) 与完成后\n"
+            "自动生成都受这个开关控制；窗口里改过的格式 / 质量 / 总览选择会被记住。\n"
+            "关闭后不再弹窗，直接用本页的设置生成。"
+        )
+        report_form.addRow(self.report_options_check)
+
         self.report_name_edit = QLineEdit(settings.report_name)
         self.report_name_edit.setPlaceholderText("留空使用默认名称（PSD 名 / 文件夹名）")
         report_form.addRow("返修单名称：", self.report_name_edit)
@@ -514,7 +526,8 @@ class SettingsDialog(QDialog):
         self.report_hide_clean_check.setToolTip(
             "返修单的「PSD 总览」表默认只列出有问题或未完成的 PSD；\n"
             "全部通过且无问题的页隐藏（表下注明隐藏数量）。\n"
-            "生成对话框（Ctrl+R）中可临时改选，选择会被记住。"
+            "开启选项窗口时可在生成前临时改选，选择会被记住；\n"
+            "关闭选项窗口时一律以本页的设置为准。"
         )
         report_form.addRow(self.report_hide_clean_check)
         self.report_image_combo.currentIndexChanged.connect(
@@ -638,6 +651,7 @@ class SettingsDialog(QDialog):
         settings.show_layer_outline = self.layer_outline_check.isChecked()
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.generate_pdf_on_complete = self.pdf_check.isChecked()
+        settings.report_show_options = self.report_options_check.isChecked()
         settings.report_name = self.report_name_edit.text().strip()
         settings.report_image_format = str(self.report_image_combo.currentData())
         settings.report_jpeg_quality = int(self.report_quality_combo.currentData())

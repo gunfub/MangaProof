@@ -611,7 +611,9 @@ def test_report_progress_dialog_and_cancel() -> None:
         with patch.object(gen, "_encode_page_image", slow_encode), patch.object(
             QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
         ):
-            window._generate_report(interactive=False)
+            # 关掉选项窗口：本用例测的是后台进度框与主线程不冻结
+            window.settings.report_show_options = False
+            window._generate_report()
             dialog = window._report_dialog
             assert dialog is not None, "导出未显示进度框"
             assert dialog.windowModality() == Qt.WindowModality.WindowModal
@@ -1011,11 +1013,12 @@ def test_full_workflow() -> None:
         assert window2.task.status_of("001.psd", ids[1]) == FAILED
         assert len(window2.task.issues_for("001.psd", ids[1])) == 2
 
-        # 生成返修单（非交互）：后台线程 + 进度框，避免大批量任务冻结界面
+        # 生成返修单（关掉选项窗口）：后台线程 + 进度框，避免大批量任务冻结界面
         with patch.object(
             QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
         ):
-            window2._generate_report(interactive=False)
+            window2.settings.report_show_options = False
+            window2._generate_report()
             assert window2._report_worker is not None, "返修单生成未走后台线程"
             assert window2._report_dialog is not None, "未显示返修单进度框"
             _wait_for_report(window2)
@@ -1311,7 +1314,8 @@ def test_report_dialog_hide_clean_option() -> None:
         with patch.object(ReportDialog, "exec", accept_and_uncheck), patch.object(
             QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
         ):
-            window._generate_report(interactive=True)
+            assert window.settings.report_show_options is True, "默认弹选项窗口"
+            window._generate_report()
             assert window._report_worker is not None
             _wait_for_report(window)
 
@@ -1323,6 +1327,131 @@ def test_report_dialog_hide_clean_option() -> None:
         app.processEvents()
 
     print("PASS test_report_dialog_hide_clean_option")
+
+
+def test_report_options_switch_controls_dialog() -> None:
+    """设置「生成返修单前显示选项窗口」：手动与自动两条路径共用同一个开关。
+
+    - 关：手动 (Ctrl+R) 不弹窗，直接用设置里的名称 / 页面图像格式生成；
+    - 开：完成监制后的自动生成前弹窗，窗口顶部给出「已完成」告知（替代原先
+      单独弹的那个完成提示框）；点取消则不生成，且不会自动重来。
+    """
+    from mangaproof.ui.dialogs import ReportDialog
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        # ① 关掉开关：手动触发不弹窗，按设置里的名称与格式直接生成
+        folder_off = _copy_fixtures(root / "off")
+        sm_off = SettingsManager(root / "off" / "settings.json")
+        sm_off.settings.report_show_options = False
+        sm_off.settings.report_name = "custom_report"
+        sm_off.settings.report_image_format = "jpeg"
+
+        window = MainWindow(sm_off)
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+        with patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window.open_folder(folder_off)
+        _wait_for_task(window)
+
+        shown: list = []
+
+        def record_exec(dialog_self):
+            shown.append(dialog_self)
+            return ReportDialog.DialogCode.Accepted
+
+        with patch.object(ReportDialog, "exec", record_exec), patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window.generate_report_dialog()
+            assert shown == [], "关掉开关后不应弹选项窗口"
+            assert window._report_worker is not None, "应直接进入后台生成"
+            _wait_for_report(window)
+        out = folder_off / "custom_report.pdf"
+        assert out.exists() and out.stat().st_size > 1000, out
+
+        _close_window(window)
+        app.processEvents()
+
+        # ② 开着开关：完成监制后的自动生成先弹选项窗口，并承担完成告知
+        folder_on = _copy_fixtures(root / "on")
+        sm_on = SettingsManager(root / "on" / "settings.json")
+        assert sm_on.settings.report_show_options is True
+        window2 = MainWindow(sm_on)
+        window2.resize(1200, 800)
+        window2.show()
+        app.processEvents()
+        with patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window2.open_folder(folder_on)
+        _wait_for_task(window2)
+        _open_and_prepare_completion(window2)
+
+        notes: list = []
+
+        def reject_with_note(dialog_self):
+            notes.append(dialog_self.note_label.text())
+            return ReportDialog.DialogCode.Rejected
+
+        with patch.object(ReportDialog, "exec", reject_with_note), patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ) as info:
+            window2.mark_pass()
+            app.processEvents()
+            assert info.call_count == 0, "选项窗口接手完成告知，不再弹提示框"
+            assert len(notes) == 1 and "已检查完成" in notes[0], notes
+            assert window2._report_worker is None, "取消后不生成"
+
+            # 取消后不自动重来：再按 Enter 不会重新弹窗、也不会生成
+            window2.mark_pass()
+            app.processEvents()
+            assert len(notes) == 1, notes
+            assert window2._report_worker is None
+
+        _close_window(window2)
+        app.processEvents()
+
+    print("PASS test_report_options_switch_controls_dialog")
+
+
+def test_report_show_options_setting_roundtrip() -> None:
+    """新开关的默认值、设置对话框读写与落盘往返（缺失键回落到默认开）。"""
+    import json
+
+    from mangaproof.config.settings import Settings
+    from mangaproof.ui.settings_dialog import SettingsDialog
+
+    assert Settings().report_show_options is True, "默认要弹选项窗口"
+
+    dlg = SettingsDialog(Settings())
+    try:
+        assert dlg.report_options_check.isChecked() is True
+        dlg.report_options_check.setChecked(False)
+        out = Settings()
+        dlg.apply_to(out)
+        assert out.report_show_options is False
+    finally:
+        dlg.deleteLater()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "settings.json"
+        sm = SettingsManager(path)
+        sm.settings.report_show_options = False
+        sm.save()
+        assert SettingsManager(path).settings.report_show_options is False
+
+        # 旧配置文件里没有这个键 → 用默认值（开），不能让老用户静默失去弹窗
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("report_show_options")
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        assert SettingsManager(path).settings.report_show_options is True
+
+    print("PASS test_report_show_options_setting_roundtrip")
 
 
 def _open_and_prepare_completion(window: MainWindow):
@@ -1342,10 +1471,17 @@ def _open_and_prepare_completion(window: MainWindow):
 
 
 def test_completion_auto_report_once() -> None:
-    """全部监制完成后按设置自动生成返修单：默认开、只触发一次、改动后可再次触发。"""
+    """全部监制完成后按设置自动生成返修单：默认开、只触发一次、改动后可再次触发。
+
+    默认还开着「生成返修单前显示选项窗口」：完成告知由选项窗口顶部的绿字承担，
+    这里不再先弹「监制完成」提示框（需求方 2026-10-08：完成流程只打断一次）；
+    关掉选项窗口（或关掉自动生成）时提示框回来。
+    """
     from mangaproof.config.settings import Settings
 
-    assert Settings().generate_pdf_on_complete is True, "默认要自动生成"
+    defaults = Settings()
+    assert defaults.generate_pdf_on_complete is True, "默认要自动生成"
+    assert defaults.report_show_options is True, "默认要弹选项窗口"
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1366,31 +1502,41 @@ def test_completion_auto_report_once() -> None:
             QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
         ) as info, patch.object(
             window, "_generate_report",
-            side_effect=lambda interactive: calls.append(interactive),
+            side_effect=lambda completed=False: calls.append(completed),
         ):
-            # Enter（mark_pass）完成最后一个图层 → 提示一次 + 自动生成一次（非交互）
+            # Enter（mark_pass）完成最后一个图层 → 直接进选项窗口，不再弹完成提示框
             window.mark_pass()
             app.processEvents()
-            assert info.call_count == 1, info.call_count
-            assert calls == [False], calls
+            assert info.call_count == 0, "选项窗口接手告知，不应再弹提示框"
+            assert calls == [True], calls
 
             # 再按 Enter：不重复弹窗、不重复生成
             window.mark_pass()
             app.processEvents()
-            assert info.call_count == 1 and calls == [False]
+            assert info.call_count == 0 and calls == [True]
 
             # 内容又变了（补问题）→ 复位，再完成时重新生成
             window._commit_new_issue("漏字", "补一条", (10, 10, 40, 40))
             window.mark_pass()
             app.processEvents()
-            assert info.call_count == 2 and calls == [False, False]
+            assert info.call_count == 0 and calls == [True, True]
 
-            # 设置关闭 → 只提示完成，不生成
+            # 关掉自动生成 → 没有任何窗口会告知完成，提示框回来、不生成
             window.settings.generate_pdf_on_complete = False
             window._commit_new_issue("漏字", "再来一条", (20, 20, 40, 40))
             window.mark_pass()
             app.processEvents()
-            assert info.call_count == 3 and calls == [False, False]
+            assert info.call_count == 1, info.call_count
+            assert calls == [True, True]
+
+            # 恢复自动生成但关掉选项窗口 → 提示框告知 + 直接生成（不再弹窗）
+            window.settings.generate_pdf_on_complete = True
+            window.settings.report_show_options = False
+            window._commit_new_issue("漏字", "第三条", (30, 30, 40, 40))
+            window.mark_pass()
+            app.processEvents()
+            assert info.call_count == 2, info.call_count
+            assert calls == [True, True, False]
 
         _close_window(window)
         app.processEvents()
@@ -1412,13 +1558,16 @@ def test_completion_paths_from_panel_and_fail() -> None:
         ):
             window.open_folder(folder)
         _wait_for_task(window)
+        # 本用例盯的是「完成提示框」这条路径：关掉选项窗口，完成告知才回到提示框
+        # （开着时由选项窗口顶部绿字承担，见 test_completion_auto_report_once）
+        window.settings.report_show_options = False
 
         def titles(mock) -> list:
             return [c.args[1] for c in mock.call_args_list if len(c.args) > 1]
 
         calls: list = []
         with patch.object(window, "_generate_report",
-                          side_effect=lambda interactive: calls.append(interactive)):
+                          side_effect=lambda completed=False: calls.append(completed)):
             # 1) 最后一个图层用「/」标记未通过 → 不弹完成提示（继续拖框批注），
             #    只给状态栏提示；随后 Enter 才完成
             _open_and_prepare_completion(window)
@@ -1818,7 +1967,8 @@ def test_settings_dialog_scroll_area() -> None:
     assert body is not None
     for group_child in (
         dlg.ratio_combo, dlg.issue_scope_combo, dlg.layer_outline_check,
-        dlg.memory_policy_combo, dlg.report_hide_clean_check, dlg.kb_button,
+        dlg.memory_policy_combo, dlg.report_hide_clean_check,
+        dlg.report_options_check, dlg.kb_button,
     ):
         assert body.isAncestorOf(group_child), group_child
     assert not body.isAncestorOf(dlg.button_box)
