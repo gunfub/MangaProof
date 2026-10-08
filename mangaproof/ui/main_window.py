@@ -77,7 +77,7 @@ from mangaproof.ui.about_dialog import AboutDialog
 from mangaproof.ui.dialogs import IssueDialog, ReportDialog
 from mangaproof.ui.file_panel import FilePanel
 from mangaproof.ui.issue_panel import IssuePanel
-from mangaproof.ui.layer_panel import LayerPanel
+from mangaproof.ui.layer_panel import ZERO_LAYER_PLACEHOLDER, LayerPanel
 from mangaproof.ui.nav_pad import NavPad
 from mangaproof.ui.license_dialog import AppLicenseDialog, LicenseDialog
 from mangaproof.ui.numbering_worker import (
@@ -1228,6 +1228,17 @@ class MainWindow(QMainWindow):
     def current_doc(self) -> Optional[PSDDocument]:
         return self._docs.get(self._current_file)
 
+    def _is_zero_layer_file(self, rel: str) -> bool:
+        """该 PSD 是否「0 图层文件」（解析成功，但 PSD 里没有任何图层）。
+
+        必须与「解析失败」区分开：读不出来的文件根本不在
+        `_layer_ids_by_file` 里，不能跟着一起算通过。0 图层文件没有可监制
+        的内容，按需求方 2026-10-08 决策直接算通过（左侧文件列表 ✓），
+        图层区改显示说明文字（见 LayerPanel.ZERO_LAYER_PLACEHOLDER）；
+        只是显示口径，**不写任何图层状态**，任务文件不受影响。
+        """
+        return rel in self._layer_ids_by_file and not self._layer_ids_by_file[rel]
+
     # ================================================================= 导航（需求 §11～§13）
 
     def _on_file_activated(self, index: int) -> None:
@@ -1346,7 +1357,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "打开 PSD", f"无法读取该 PSD 文件：{rel}")
 
         layer_ids = self._layer_ids_by_file.get(rel, [])
-        self.layer_panel.set_layers(self._layer_names_by_file.get(rel, []))
+        placeholder = ZERO_LAYER_PLACEHOLDER if self._is_zero_layer_file(rel) else ""
+        self.layer_panel.set_layers(
+            self._layer_names_by_file.get(rel, []), placeholder=placeholder
+        )
 
         if not layer_ids:
             self._current_index = -1
@@ -2687,7 +2701,11 @@ class MainWindow(QMainWindow):
         for record in self.task.files:
             rel = record.relative_path
             ids = self._layer_ids_by_file.get(rel, [])
-            statuses[rel] = self.task.file_status(rel, ids)
+            if self._is_zero_layer_file(rel):
+                # 0 图层文件：没有可监制内容 → 直接按通过显示
+                statuses[rel] = PASSED
+            else:
+                statuses[rel] = self.task.file_status(rel, ids)
         self.file_panel.set_file_statuses(statuses)
         try:
             row = [r.relative_path for r in self.task.files].index(self._current_file)

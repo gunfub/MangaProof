@@ -3013,6 +3013,153 @@ def test_hidden_layers_ignored_in_gui() -> None:
     print("PASS test_hidden_layers_ignored_in_gui")
 
 
+def _make_hidden_bg_psd(path: Path) -> None:
+    """生成「背景层被隐藏」的 PSD：最底部 bg 隐藏 + 一层可见内容层。
+
+    真实形态即原始工程文件：最底层原版底图被隐藏（画师在其上描图），
+    但对比基准仍然应该是那一层。
+    """
+    from PIL import Image
+    from psd_tools import PSDImage
+    from psd_tools.api.layers import PixelLayer
+
+    canvas = Image.new("RGBA", (200, 200), (255, 255, 255, 255))
+    box = Image.new("RGBA", (50, 50), (10, 10, 10, 255))
+    psd = PSDImage.frompil(canvas)
+    bg = PixelLayer.frompil(canvas, psd, name="bg", top=0, left=0)
+    bg.visible = False
+    PixelLayer.frompil(box, psd, name="top_visible", top=10, left=10)
+    psd.save(path)
+
+
+def test_hidden_bg_kept_in_gui() -> None:
+    """被隐藏的背景层照样进图层列表与统计（需求方 2026-10-08 决策 a）。
+
+    隐藏过滤只剔除普通隐藏层；背景层永不被排除，进列表后与普通图层一样
+    参与统计、预热与返修单，只是 PSD 里它自身是隐藏的。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        folder = root / "chapter"
+        folder.mkdir(parents=True)
+        _make_hidden_bg_psd(folder / "hidden_bg.psd")
+
+        window = MainWindow(SettingsManager(root / "settings.json"))
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+        with patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window.open_folder(folder)
+        _wait_for_task(window)
+        app.processEvents()
+
+        rel = "hidden_bg.psd"
+        assert window._layer_names_by_file[rel] == ["bg", "top_visible"]
+        assert window.layer_panel.list_widget.count() == 2
+        listed = [
+            window.layer_panel.list_widget.item(i).text()
+            for i in range(window.layer_panel.list_widget.count())
+        ]
+        assert "bg" in listed[0] and "top_visible" in listed[1], listed
+
+        # 统计把它算作可监制图层（可见性只影响 PSD 里怎么显示）
+        counts = window.task.count_all(window._layer_ids_by_file)
+        assert counts["total"] == 2, counts
+
+        # 预加载照常完成：隐藏的 bg 也要取像素（对比基准要用）
+        assert window.current_doc is not None
+        deadline = time.time() + 30
+        while window.warmup_label.text() != "图层预热完成" and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert window.warmup_label.text() == "图层预热完成"
+        assert window.current_doc.bg_layer_id() == "0.0"
+        assert window.current_doc.layer_by_id("0.0").visible is False
+
+        _close_window(window)
+        app.processEvents()
+
+    print("PASS test_hidden_bg_kept_in_gui")
+
+
+def _make_zero_layer_psd(path: Path) -> None:
+    """生成 0 图层 PSD：只有 merged image，没有任何图层记录。
+
+    这是"把图片拖进 Photoshop、未做任何处理直接保存"的形态（layer count = 0，
+    需求方 2026-10-08 提供的样本 local_samples/_001.psd 实测即此结构）。
+    """
+    from PIL import Image
+    from psd_tools import PSDImage
+
+    PSDImage.frompil(Image.new("RGBA", (120, 90), (200, 30, 30, 255))).save(path)
+
+
+def test_zero_layer_file_marked_passed() -> None:
+    """0 图层文件：左侧文件栏标通过、图层区给说明文字。
+
+    要求（需求方 2026-10-08）：判断为 0 图层文件后，左侧对应文件直接标记为
+    通过、右侧图层区改显示说明；**未打开任务时两栏必须还是初始空态**——
+    说明文字只在确实打开这种文件时出现，关任务即清空。
+    """
+    from mangaproof.review.state import STATUS_ICONS
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        folder = _copy_fixtures(root / "chapter01")
+        _make_zero_layer_psd(folder / "zero.psd")
+
+        window = MainWindow(SettingsManager(root / "settings.json"))
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+        with patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window.open_folder(folder)
+        _wait_for_task(window)
+        app.processEvents()
+
+        # 解析成功、但 PSD 里没有任何图层（≠ 解析失败：那种文件不在表里）
+        assert window._layer_ids_by_file["zero.psd"] == []
+        assert window._is_zero_layer_file("zero.psd") is True
+
+        # 左侧文件栏：0 图层文件直接标 ✓ 通过
+        files = [r.relative_path for r in window.task.files]
+        row = files.index("zero.psd")
+        item = window.file_panel.list_widget.item(row)
+        assert item.text().startswith(STATUS_ICONS[PASSED]), item.text()
+
+        # 打开该文件：图层区显示说明文字、没有图层行、没有当前图层
+        window._on_file_activated(row)
+        _wait_for_file(window, "zero.psd")
+        app.processEvents()
+        assert window.layer_panel.list_widget.count() == 0
+        assert window.layer_panel.placeholder_label.isVisible()
+        assert "0 图层" in window.layer_panel.placeholder_label.text()
+        assert window._current_index == -1
+
+        # 切回正常页：说明文字消失、图层行回来（两者互斥显示）
+        window._on_file_activated(0)
+        _wait_for_file(window, files[0])
+        app.processEvents()
+        assert not window.layer_panel.placeholder_label.isVisible()
+        assert window.layer_panel.list_widget.count() > 0
+
+        _close_window(window)
+        app.processEvents()
+
+        # 关任务后两栏回到初始空态：不残留说明文字（未打开项目时不受影响）
+        assert window.task is None
+        assert window.layer_panel.placeholder_label.text() == ""
+        assert not window.layer_panel.placeholder_label.isVisible()
+        assert window.layer_panel.list_widget.count() == 0
+        assert window.file_panel.list_widget.count() == 0
+
+    print("PASS test_zero_layer_file_marked_passed")
+
+
 def test_issue_panel_long_layer_name() -> None:
     """当前图层问题面板：超长图层名单行省略显示（不撑宽、不换行）。"""
     from mangaproof.ui.issue_panel import IssuePanel
