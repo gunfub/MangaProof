@@ -3187,7 +3187,7 @@ def _make_hidden_bg_psd(path: Path) -> None:
 
 
 def test_hidden_bg_kept_in_gui() -> None:
-    """被隐藏的背景层照样进图层列表与统计（需求方 2026-10-08 决策 a）。
+    """被隐藏的背景层照样进图层列表与统计（需求 §87）。
 
     隐藏过滤只剔除普通隐藏层；背景层永不被排除，进列表后与普通图层一样
     参与统计、预热与返修单，只是 PSD 里它自身是隐藏的。
@@ -3242,7 +3242,7 @@ def _make_zero_layer_psd(path: Path) -> None:
     """生成 0 图层 PSD：只有 merged image，没有任何图层记录。
 
     这是"把图片拖进 Photoshop、未做任何处理直接保存"的形态（layer count = 0，
-    需求方 2026-10-08 提供的样本 local_samples/_001.psd 实测即此结构）。
+    需求 §88 引用的样本 local_samples/_001.psd 实测即此结构）。
     """
     from PIL import Image
     from psd_tools import PSDImage
@@ -3253,7 +3253,7 @@ def _make_zero_layer_psd(path: Path) -> None:
 def test_zero_layer_file_marked_passed() -> None:
     """0 图层文件：左侧文件栏标通过、图层区给说明文字。
 
-    要求（需求方 2026-10-08）：判断为 0 图层文件后，左侧对应文件直接标记为
+    要求（需求 §88）：判断为 0 图层文件后，左侧对应文件直接标记为
     通过、右侧图层区改显示说明；**未打开任务时两栏必须还是初始空态**——
     说明文字只在确实打开这种文件时出现，关任务即清空。
     """

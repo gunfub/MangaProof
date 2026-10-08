@@ -167,7 +167,7 @@ def _make_psd(path: Path, layers) -> None:
 
 
 def test_hidden_bg_is_never_excluded():
-    """隐藏的背景层永不被隐藏过滤排除（需求方 2026-10-08 决策）。
+    """隐藏的背景层永不被隐藏过滤排除（需求 §87）。
 
     bg 由需求 §24 的同一套判据在**全量图层**（含隐藏层）上选出；选中的
     那层即使隐藏也照常进可监制列表，`visible` 如实记为 False。否则隐藏
