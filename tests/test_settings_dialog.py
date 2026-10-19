@@ -98,6 +98,17 @@ def _go(dlg: SettingsDialog, key: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_sidebar_titles_are_product_copy():
+    """侧边栏分类名是产品文案：改名前先确认需求方是否要一起改测试。"""
+    assert [title for title, _ in PAGES.values()] == [
+        "缩放与标注显示",
+        "对比呈现",
+        "扫描与运行策略",
+        "返修单参数",
+        "快捷键与滚轮",
+    ]
+
+
 def test_sidebar_categories_match_pages(qapp):
     dlg = _dialog()
     try:

@@ -337,7 +337,7 @@ class MainWindow(QMainWindow):
         self.action_redraw.setCheckable(True)
         self.action_redraw.toggled.connect(self._on_redraw_mode_toggled)
         toolbar.addAction(self.action_redraw)
-        self.action_compare = QAction("自动对比", self)
+        self.action_compare = QAction("对比呈现", self)
         self.action_compare.setCheckable(True)
         self.action_compare.toggled.connect(self._on_compare_action_toggled)
         toolbar.addAction(self.action_compare)
@@ -1969,9 +1969,10 @@ class MainWindow(QMainWindow):
         if self.settings.compare_mode == "manual":
             self.action_compare.setText(f"对比切换 ({key})")
         elif self._compare.is_running:
-            self.action_compare.setText(f"停止自动对比 ({key})")
+            # 运行中显示动作文案；闲置时与设置侧栏分类名「对比呈现」一致
+            self.action_compare.setText(f"停止对比 ({key})")
         else:
-            self.action_compare.setText(f"自动对比 ({key})")
+            self.action_compare.setText(f"对比呈现 ({key})")
 
     def _apply_compare_settings(self) -> None:
         """把设置中的对比模式/速度应用到控制器与工具栏按钮。"""

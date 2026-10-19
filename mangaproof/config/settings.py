@@ -59,7 +59,7 @@ CORE_SHORTCUT_LABELS: dict[str, str] = {
     "next_layer": "下一个图层",
     "pass_layer": "当前图层通过",
     "fail_layer": "当前图层未通过",
-    "toggle_compare": "自动对比",
+    "toggle_compare": "对比呈现",
     "cancel_operation": "取消/退出批注操作",
     "save_task": "保存任务",
     "custom_comment": "自定义批注",
