@@ -11,14 +11,19 @@
   快捷键与滚轮）。点哪一项，右侧只显示那一类的设置项；
 - 每个分类页有自己的滚动区，页头是分类名 + 一句说明。页内不再套 QGroupBox：
   分类名已经在侧边栏，再套一个同名外框只是重复；
-- 每行 = **左边文本（统一左对齐）+ 右边控件（统一右对齐）**：控件保持自身
-  sizeHint 宽度（下拉框宽度随内容而变，只有右边缘对齐），见 :class:`SettingsRow`；
+- 每行 = 左边文本（统一左对齐）+ 右边控件，见 :class:`SettingsRow`：
+  下拉框 / 输入框**紧跟文本之后的 10px 处开始、向右占满到基线**（所以每行左边缘
+  由该行文本长度决定，右边缘统一）；开关 / 按钮保持自身宽度、贴右缘；
+- 一切按**统一基线 GUTTER=24** 排：控件右缘距窗口右缘 24、左侧侧边栏与「恢复默认」
+  距窗口左缘 24、侧边栏到内容文本 24、上下留白 24；底部「确定 / 取消」的右缘也
+  压在控件右缘这条线上；
 - 开关统一用 ToggleSwitch（胶囊形、点一下就切换，见 ui/widgets.py），不再用方块勾选框；
 - 控件被禁用时（如手动对比下的「切换速度」、PNG 下的「JPEG 质量」），**该行文本
   跟随置灰**——由 SettingsRow 的事件过滤统一处理，新增设置项不用再单独写；
 - 同一分类内的设置项行距 16px（原来 QFormLayout 默认约 6px，挤在一起不好认）；
-- 窗口默认 860×560（原来 560×560 太方；与「第三方许可」窗口同尺寸），侧边栏 180，
-  内容区约 640；
+- 窗口默认 860×560（原来 560×560 太方；与「第三方许可」窗口同尺寸），侧边栏 180；
+- 侧边栏文字与内容页标题**同一格式**（15px 粗体），并且页头与侧边栏第一项的文字
+  顶端对齐（两边用同一个行高 `_nav_row_height`，各自垂直居中）；
 - 下拉框一律 NoWheelComboBox：**只能点开选**，滚轮不改值（见 ui/widgets.py），
   这条是设计要求，不要换回原生 QComboBox；
 - 底部「确定 / 取消」：确定保存并应用**所有分类**的改动，取消则本次全部丢弃
@@ -34,8 +39,8 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtGui import QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -109,16 +114,29 @@ PAGES: Dict[str, tuple[str, str]] = {
     "shortcut": ("快捷键与滚轮", "核心 / 问题类型快捷键，以及不按修饰键时的滚轮行为"),
 }
 
-#: 侧边栏宽度（固定：分类名最长是「MangaProof 返修单」）
+#: 统一留白基线：控件右缘距窗口右缘、左侧标题/侧边栏/底部按钮的留白都取它
+GUTTER = 24
+
+#: 侧边栏宽度（固定）：15px 粗体下最长项「MangaProof 返修单」实宽 135px，180 够用
 NAV_WIDTH = 180
 
+#: 侧边栏列表内边距 / 列表项上下内边距：页头靠这两个值 + 边框与第一项文字对齐
+NAV_PADDING = 4
+NAV_ITEM_VPAD = 8
+
+#: 页头标题与侧边栏项共用的字号 / 字重（反馈要求"侧边栏文本同标题格式"）
+HEADER_FONT_QSS = "font-size: 15px; font-weight: bold;"
+
 #: 窗口默认尺寸（原 560×560 太方；与 ui/license_dialog.py 的 860×560 一致）
-#: 与最小尺寸（小屏仍可缩到 640×440，每个分类页各自滚动）
+#: 与最小尺寸（小屏仍可缩，每个分类页各自滚动）
 DEFAULT_DIALOG_SIZE = (860, 560)
-MINIMUM_DIALOG_SIZE = (640, 440)
+MINIMUM_DIALOG_SIZE = (720, 440)
 
 #: 同一分类内相邻设置项的纵向间距（原来 QFormLayout 默认约 6px）
 ROW_SPACING = 16
+
+#: 行内"文本 → 控件"的间距（下拉框贴着冒号）
+ROW_LABEL_GAP = 10
 
 
 class KeybindingsDialog(QDialog):
@@ -289,20 +307,29 @@ class KeybindingsDialog(QDialog):
 class SettingsRow(QWidget):
     """一行设置：左边是文本（统一左对齐），右边是控件（统一右对齐）。
 
-    为什么不用 QFormLayout：需求是"文本统一左对齐、控件统一贴右"。QFormLayout
-    的字段列只能整体对齐，做不到"控件右边缘对齐 + 各自保持自身宽度"。
+    为什么不用 QFormLayout：需求是"文本统一左对齐、控件统一压在右基线上"，
+    而且下拉框要从各自文本之后开始（每行起点因此不同）。QFormLayout 的字段列
+    只能整体对齐，两件事都做不到。
 
-    约定：
+    两种排法（``expand``）：
 
-    - 控件保持自身 ``sizeHint`` 宽度（``Fixed`` 水平策略）：下拉框宽度随选项
-      文字而变，所以只有右边缘对齐、左边缘不齐——这正是想要的效果；
+    - ``expand=True``（下拉框 / 输入框）：控件紧跟文本之后（ROW_LABEL_GAP）开始，
+      向右**占满**到行的右缘。因此每一行的左边缘由该行文本长度决定（"贴着冒号"），
+      右边缘统一压在基线上；
+    - ``expand=False``（开关 / 按钮）：控件保持自身宽度、贴行右缘（右对齐）；
     - **控件被禁用时文本一起置灰**：行内监听控件的 ``EnabledChange``，把同样的
       禁用状态施加到文本上（样式见 ui/theme.py 的 ``QLabel#settingsRowLabel:disabled``）。
       这样 ``_update_*_enabled()`` 里只需要管控件，不用逐个记得改文本；
     - 控件上已有的 tooltip 会在建行时复制给文本，鼠标停在文字上也能看到说明。
     """
 
-    def __init__(self, text: str, control: QWidget, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        text: str,
+        control: QWidget,
+        expand: bool = False,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self.label = QLabel(text)
         self.label.setObjectName("settingsRowLabel")
@@ -310,18 +337,25 @@ class SettingsRow(QWidget):
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
+        row.setSpacing(ROW_LABEL_GAP)   # 标签与控件之间固定间距（"贴着冒号"）
         row.addWidget(
             self.label, 0,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
-        row.addStretch(1)
-        row.addWidget(
-            control, 0,
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-        )
-
-        control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        if expand:
+            control.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            row.addWidget(control, 1)
+        else:
+            control.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
+            row.addStretch(1)
+            row.addWidget(
+                control, 0,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
         if isinstance(control, ToggleSwitch):
             # 开关本身没有文字，读屏软件用的是行文本
             control.setAccessibleName(text)
@@ -361,13 +395,15 @@ class SettingsDialog(QDialog):
         self._kb_dialog: Optional[KeybindingsDialog] = None
         self._kb_reset_defaults = False
 
-        #: 分类键（见模块级 PAGES）-> 页面控件 / 行容器 / 滚动区
+        #: 分类键（见模块级 PAGES）-> 页面控件 / 行容器 / 滚动区 / 页头标题
         self.page_widgets: Dict[str, QWidget] = {}
         self.page_rows: Dict[str, QVBoxLayout] = {}
         self.page_scrolls: Dict[str, QScrollArea] = {}
+        self.page_titles: Dict[str, QLabel] = {}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
+        # 四边留白统一用基线值：左侧与右缘（控件基线到窗口边）对称
+        layout.setContentsMargins(GUTTER, GUTTER, GUTTER, GUTTER)
         layout.setSpacing(10)
 
         # 首次使用引导文案（可选）：只说明「这里是全部设置项、不改就用默认值」，
@@ -387,7 +423,7 @@ class SettingsDialog(QDialog):
 
         # ---- 主体：左侧分类 + 右侧分类页 ----
         body = QHBoxLayout()
-        body.setSpacing(12)
+        body.setSpacing(GUTTER)
 
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("settingsNav")
@@ -402,12 +438,13 @@ class SettingsDialog(QDialog):
                 background: {COLOR_BG_PANEL};
                 border: 1px solid {COLOR_BORDER};
                 border-radius: 6px;
-                padding: 6px;
+                padding: {NAV_PADDING}px;
                 outline: none;
+                {HEADER_FONT_QSS}
             }}
             QListWidget#settingsNav::item {{
-                padding: 9px 10px;
-                margin: 2px 0;
+                padding: {NAV_ITEM_VPAD}px 10px;
+                margin: 0px;
                 border-radius: 5px;
             }}
             QListWidget#settingsNav::item:selected {{
@@ -418,6 +455,16 @@ class SettingsDialog(QDialog):
                 background: {COLOR_BG_HOVER};
             }}
             """
+        )
+        # 侧边栏文字与页头同一格式（15px 粗体）。绘制由上面的 QSS 负责；
+        # 这里再设一次同尺寸 QFont，用它算出统一行高——QSS 的字号要等窗口
+        # 显示后才进 fontMetrics()，建页时算不准。
+        header_font = self.nav_list.font()
+        header_font.setPixelSize(15)
+        header_font.setBold(True)
+        self.nav_list.setFont(header_font)
+        self._nav_row_height = (
+            QFontMetrics(header_font).height() + 2 * NAV_ITEM_VPAD
         )
         body.addWidget(self.nav_list)
 
@@ -466,15 +513,29 @@ class SettingsDialog(QDialog):
         否则用户先改 A 分类、再改 B 分类时，A 的改动会随控件销毁一起丢掉。
         """
         title, hint = PAGES[key]
+
+        # 侧边栏项先建：页头要按它的行高 / 文字格式对齐
+        item = QListWidgetItem(title)
+        item.setData(Qt.ItemDataRole.UserRole, key)
+        item.setSizeHint(QSize(0, self._nav_row_height))
+        self.nav_list.addItem(item)
+
         page = QWidget()
         page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-        page_layout.setSpacing(4)
+        # 与侧边栏第一项的文字顶端对齐：下沉「列表边框 1px + 列表内边距」
+        page_layout.setContentsMargins(0, 1 + NAV_PADDING, 0, 0)
+        page_layout.setSpacing(2)
 
         title_label = QLabel(title)
         title_label.setObjectName("settingsPageTitle")
-        title_label.setStyleSheet("font-size: 15px; font-weight: bold;")
+        title_label.setStyleSheet(HEADER_FONT_QSS)
+        title_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        # 与侧边栏项同高：两边文字都在各自的盒子里垂直居中，文字顶端自然对齐
+        title_label.setFixedHeight(self._nav_row_height)
         page_layout.addWidget(title_label)
+        self.page_titles[key] = title_label
 
         hint_label = QLabel(hint)
         hint_label.setObjectName("settingsPageHint")
@@ -490,7 +551,8 @@ class SettingsDialog(QDialog):
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 8, 10, 14)   # 右侧留出滚动条的位置
+        # 右侧不留边距：控件右缘直接压基线（滚动条出现时才会整体左移 12px）
+        content_layout.setContentsMargins(0, 8, 0, 14)
         content_layout.setSpacing(0)
 
         # 设置项一行一个（SettingsRow）：文本统一左对齐、控件统一右对齐。
@@ -502,21 +564,27 @@ class SettingsDialog(QDialog):
         scroll.setWidget(content)
         page_layout.addWidget(scroll, 1)
 
-        item = QListWidgetItem(title)
-        item.setData(Qt.ItemDataRole.UserRole, key)
-        self.nav_list.addItem(item)
         self.stack.addWidget(page)
         self.page_widgets[key] = page
         self.page_rows[key] = rows
         self.page_scrolls[key] = scroll
         return rows
 
-    def _add_row(self, rows: QVBoxLayout, text: str, control: QWidget) -> SettingsRow:
-        """往分类页里添一行设置（文本左对齐、控件右对齐，控件宽 = 自身 sizeHint）。
+    def _add_row(
+        self,
+        rows: QVBoxLayout,
+        text: str,
+        control: QWidget,
+        expand: bool = False,
+    ) -> SettingsRow:
+        """往分类页里添一行设置。
+
+        - ``expand=True``：下拉框 / 输入框从文本后 ROW_LABEL_GAP 起、占满到行的右缘；
+        - ``expand=False``：开关 / 按钮保持自身宽度、贴行右缘。
 
         注意：控件的 tooltip 要在调用本方法**之前**设好——建行时会把它复制给文本。
         """
-        row = SettingsRow(text, control, rows.parentWidget())
+        row = SettingsRow(text, control, expand, rows.parentWidget())
         rows.addWidget(row)
         return row
 
@@ -542,7 +610,7 @@ class SettingsDialog(QDialog):
             "它**不是像素缩放百分比**——状态栏那个「缩放：xx%」才是当前的实际像素缩放；\n"
             "手动滚轮缩放不会被它覆盖，只影响下一次自动定位。"
         )
-        self._add_row(rows, "图层自动显示比例：", self.ratio_combo)
+        self._add_row(rows, "图层自动显示比例：", self.ratio_combo, expand=True)
 
         # bg / bg 拷贝 的独立比例（需求 §20.2，默认关）。
         # 关闭时两个下拉置灰：值仍保留在设置里，只是不参与自动缩放。
@@ -578,8 +646,10 @@ class SettingsDialog(QDialog):
         )
         self.bg_ratio_check.toggled.connect(self._update_bg_ratio_enabled)
         self._update_bg_ratio_enabled()
-        self._add_row(rows, "bg 自动显示比例：", self.bg_ratio_combo)
-        self._add_row(rows, "bg 拷贝自动显示比例：", self.bg_copy_ratio_combo)
+        self._add_row(rows, "bg 自动显示比例：", self.bg_ratio_combo, expand=True)
+        self._add_row(
+            rows, "bg 拷贝自动显示比例：", self.bg_copy_ratio_combo, expand=True
+        )
 
         self.issue_scope_combo = NoWheelComboBox()
         self.issue_scope_combo.addItem("当前页全部问题（默认，跨图层显示红框）", "page")
@@ -592,7 +662,7 @@ class SettingsDialog(QDialog):
             "· 仅当前图层：只显示当前图层的问题，其余图层红框隐藏。\n"
             "切换图层/翻页即时生效，不影响已保存的问题数据。"
         )
-        self._add_row(rows, "问题红框显示：", self.issue_scope_combo)
+        self._add_row(rows, "问题红框显示：", self.issue_scope_combo, expand=True)
 
         self.layer_outline_check = ToggleSwitch()
         self.layer_outline_check.setChecked(self._settings.show_layer_outline)
@@ -626,7 +696,9 @@ class SettingsDialog(QDialog):
                 "提示：50% 时文字会非常小；折叠屏内屏上想让顶部工具栏整行不折叠，\n"
                 "经验值是 75% 及以下（与设备宽度有关）。"
             )
-            self._add_row(rows, "界面缩放（重启后生效）：", self.ui_scale_combo)
+            self._add_row(
+                rows, "界面缩放（重启后生效）：", self.ui_scale_combo, expand=True
+            )
 
     def _build_compare_page(self, rows: QVBoxLayout) -> None:
         self.compare_mode_combo = NoWheelComboBox()
@@ -634,7 +706,7 @@ class SettingsDialog(QDialog):
         self.compare_mode_combo.addItem("手动切换（按一下切一次）", "manual")
         mode_idx = self.compare_mode_combo.findData(self._settings.compare_mode)
         self.compare_mode_combo.setCurrentIndex(max(0, mode_idx))
-        self._add_row(rows, "对比模式：", self.compare_mode_combo)
+        self._add_row(rows, "对比模式：", self.compare_mode_combo, expand=True)
 
         self.compare_speed_combo = NoWheelComboBox()
         for hz, name in COMPARE_SPEED_TIERS:
@@ -650,7 +722,7 @@ class SettingsDialog(QDialog):
         speed_idx = self.compare_speed_combo.findData(current_hz)
         self.compare_speed_combo.setCurrentIndex(max(0, speed_idx))
         self.compare_speed_combo.setToolTip("手动切换模式下无需设定速度")
-        self._add_row(rows, "切换速度：", self.compare_speed_combo)
+        self._add_row(rows, "切换速度：", self.compare_speed_combo, expand=True)
         self.compare_mode_combo.currentIndexChanged.connect(
             self._update_compare_speed_enabled
         )
@@ -698,7 +770,7 @@ class SettingsDialog(QDialog):
                 "内存占用与缓存慷慨度的平衡档位，切换后立即生效，无需重启。\n"
                 "三档均会驱逐窗口外文档结构（内存与书本页数无关）。"
             )
-        self._add_row(rows, "内存策略：", self.memory_policy_combo)
+        self._add_row(rows, "内存策略：", self.memory_policy_combo, expand=True)
 
     def _build_report_page(self, rows: QVBoxLayout) -> None:
         self.pdf_check = ToggleSwitch()
@@ -725,7 +797,7 @@ class SettingsDialog(QDialog):
         self.report_name_edit = QLineEdit(self._settings.report_name)
         self.report_name_edit.setPlaceholderText("留空使用默认名称（PSD 名 / 文件夹名）")
         self.report_name_edit.setMinimumWidth(320)
-        self._add_row(rows, "返修单名称：", self.report_name_edit)
+        self._add_row(rows, "返修单名称：", self.report_name_edit, expand=True)
 
         self.report_image_combo = NoWheelComboBox()
         self.report_image_combo.addItem("PNG 无损（默认，体积大）", "png")
@@ -738,7 +810,7 @@ class SettingsDialog(QDialog):
             "· JPEG：压缩，体积显著变小（漫画页面常见大幅网点/渐变），画质略降；\n"
             "红框与 ①②③ 编号始终是 PDF 矢量，与图片格式无关。"
         )
-        self._add_row(rows, "页面图像：", self.report_image_combo)
+        self._add_row(rows, "页面图像：", self.report_image_combo, expand=True)
 
         self.report_quality_combo = NoWheelComboBox()
         for q in JPEG_QUALITY_CHOICES:
@@ -748,7 +820,7 @@ class SettingsDialog(QDialog):
         q_idx = self.report_quality_combo.findData(self._settings.report_jpeg_quality)
         self.report_quality_combo.setCurrentIndex(max(0, q_idx))
         self.report_quality_combo.setToolTip("仅 JPEG 压缩时生效：质量越低体积越小")
-        self._add_row(rows, "JPEG 质量：", self.report_quality_combo)
+        self._add_row(rows, "JPEG 质量：", self.report_quality_combo, expand=True)
 
         self.report_hide_clean_check = ToggleSwitch()
         self.report_hide_clean_check.setChecked(self._settings.report_hide_clean_files)
@@ -777,7 +849,9 @@ class SettingsDialog(QDialog):
             "Ctrl+滚轮始终为缩放，Alt+滚轮始终为左右移动；\n"
             "触控板双指滚不受影响，始终为平移。"
         )
-        self._add_row(rows, "鼠标滚轮（不按修饰键）：", self.wheel_mode_combo)
+        self._add_row(
+            rows, "鼠标滚轮（不按修饰键）：", self.wheel_mode_combo, expand=True
+        )
 
         self.kb_button = QPushButton("设置快捷键…")
         self.kb_button.setToolTip("在独立窗口中设置核心快捷键与问题类型快捷键")

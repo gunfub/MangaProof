@@ -37,14 +37,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QKeySequence, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox
+from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox, QLineEdit
 
 from mangaproof.config.settings import DEFAULT_WHEEL_MODE, Settings, SettingsManager
 from mangaproof.ui.settings_dialog import (
     DEFAULT_DIALOG_SIZE,
+    GUTTER,
     MINIMUM_DIALOG_SIZE,
     NAV_WIDTH,
     PAGES,
+    ROW_LABEL_GAP,
     ROW_SPACING,
     KeybindingsDialog,
     SettingsDialog,
@@ -200,7 +202,7 @@ def _page_row_widgets(dlg: SettingsDialog, key: str) -> list[SettingsRow]:
 
 
 def test_row_layout_label_left_control_right(qapp):
-    """每行文本贴左、控件贴右；下拉框宽度取自身内容，只有右边缘对齐。"""
+    """每行文本贴左；下拉框紧跟文本、占满到右缘；开关贴右缘。"""
     dlg = _dialog()
     dlg.show()
     qapp.processEvents()
@@ -218,11 +220,77 @@ def test_row_layout_label_left_control_right(qapp):
                 assert row.control.geometry().right() == row.rect().right(), (
                     key, row.label.text(),
                 )
-                if isinstance(row.control, NoWheelComboBox):
-                    combo_widths.add(row.control.width())
+                if isinstance(row.control, (NoWheelComboBox, QLineEdit)):
+                    # 填充式：紧跟文本之后 ROW_LABEL_GAP 处开始
+                    assert row.control.geometry().x() == (
+                        row.label.geometry().right() + 1 + ROW_LABEL_GAP
+                    ), (key, row.label.text())
+                    if isinstance(row.control, NoWheelComboBox):
+                        combo_widths.add(row.control.width())
+                else:
+                    # 右对齐式（开关 / 按钮）：保持自身宽度
                     assert row.control.width() == row.control.sizeHint().width()
-        # 下拉框宽度确实不止一种（宽度随内容，左边缘因此不齐）
+        # 每行文本长度不同 → 下拉框左缘不同 → 宽度不止一种
         assert len(combo_widths) >= 4, combo_widths
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_gutter_baseline_and_button_alignment(qapp):
+    """统一基线 GUTTER：四边留白、侧边栏/恢复默认、内容文本、底部按钮都用它。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        margins = dlg.layout().contentsMargins()
+        assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+            GUTTER, GUTTER, GUTTER, GUTTER,
+        )
+        # 左侧：侧边栏与「恢复默认设置」都从基线处开始
+        assert dlg.nav_list.geometry().x() == GUTTER
+        assert dlg.reset_btn.mapTo(dlg, QPoint(0, 0)).x() == GUTTER
+        # 侧边栏右缘 → 内容文本 = 基线
+        title = dlg.page_titles["display"]
+        assert title.mapTo(dlg, QPoint(0, 0)).x() == (
+            dlg.nav_list.geometry().right() + 1 + GUTTER
+        )
+        # 右侧：下拉框与底部按钮共用同一条右缘（窗口宽 - 基线）
+        _go(dlg, "display")
+        baseline = dlg.width() - GUTTER
+        assert dlg.ratio_combo.mapTo(
+            dlg, QPoint(dlg.ratio_combo.width(), 0)
+        ).x() == baseline
+        assert dlg.button_box.mapTo(
+            dlg, QPoint(dlg.button_box.width(), 0)
+        ).x() == baseline
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_header_matches_first_nav_item(qapp):
+    """侧边栏文字与内容页标题同格式（15px 粗体），且文字顶端对齐。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        nav = dlg.nav_list
+        title = dlg.page_titles["display"]
+        for font in (nav.font(), title.font()):
+            assert font.pixelSize() == 15, font.pixelSize()
+            assert font.bold() is True
+        item_rect = nav.visualItemRect(nav.item(0))
+        assert title.height() == item_rect.height()
+        nav_text_top = nav.viewport().mapTo(
+            dlg, item_rect.topLeft()
+        ).y() + (item_rect.height() - nav.fontMetrics().height()) // 2
+        title_text_top = title.mapTo(dlg, QPoint(0, 0)).y() + (
+            title.height() - title.fontMetrics().height()
+        ) // 2
+        assert abs(nav_text_top - title_text_top) <= 1, (
+            nav_text_top, title_text_top,
+        )
     finally:
         dlg.close()
         dlg.deleteLater()
