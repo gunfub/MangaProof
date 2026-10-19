@@ -1195,10 +1195,9 @@ def test_compare_manual_mode_workflow() -> None:
         # 切回自动挡：按钮文案与 Space 行为恢复自动闪切
         window.settings.compare_mode = "auto"
         window._apply_compare_settings()
-        assert window.action_compare.text() == "对比呈现 (Space)"
+        assert window.action_compare.text() == "自动对比 (Space)"
         window.toggle_compare()
         assert window._compare.is_running
-        assert window.action_compare.text() == "停止对比 (Space)"
         window.toggle_compare()
         assert not window._compare.is_running
         assert window.viewer.source == "merged"

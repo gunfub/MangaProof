@@ -112,9 +112,9 @@ from mangaproof.ui.widgets import NoWheelComboBox, ToggleSwitch
 #: 顺序即侧边栏顺序，键同时是 page_widgets / page_rows / page_scrolls 的键。
 PAGES: Dict[str, tuple[str, str]] = {
     "display": ("缩放与标注显示", "画布上的自动缩放与叠加显示"),
-    "compare": ("对比呈现", "Original 与背景的对比方式与速度"),
+    "compare": ("对比呈现", "Original 与背景的闪切方式与速度"),
     "task": ("扫描与运行策略", "打开任务时的扫描方式、控制台窗口与内存回收"),
-    "report": ("返修单参数", "自动生成、名称、页面图像与总览选项"),
+    "report": ("返修单参数", "完成监制后自动生成的返修单：名称、页面图像与总览"),
     "shortcut": ("快捷键与滚轮", "核心 / 问题类型快捷键，以及不按修饰键时的滚轮行为"),
 }
 
