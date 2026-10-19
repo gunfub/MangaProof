@@ -439,7 +439,7 @@ mangaproof/
 └── _psd_fast.c        # 纯 C 解码加速（scripts/build_accel.py 编译）
 packaging/             # 三平台 PyInstaller spec、Linux 桌面模板、Android 打包配置与 hook
 scripts/               # 构建 / 加速扩展 / 图标生成脚本
-docs/                  # Android 适配与打包研究文档
+docs/                  # 开发文档：Android 适配、打包研究、踩坑记录、设置页设计规范
 tests/                 # 测试套件：状态机 / 内存策略 / 打包 hook / GUI 冒烟（夹具为真实美术 PSD）
 THIRD_PARTY_LICENSES.md  # 第三方组件与许可全文（由 scripts/build_third_party_doc.py 生成）
 ```
