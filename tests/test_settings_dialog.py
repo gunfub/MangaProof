@@ -379,6 +379,30 @@ def test_disabled_control_greys_its_row_label(qapp):
         dlg.deleteLater()
 
 
+def test_field_column_aligns_to_shortest_combo(qapp):
+    """同一页的下拉/输入框左缘统一，且 = 本页最长行文本 + 间距。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        for key in _KEYS:
+            _go(dlg, key)
+            qapp.processEvents()
+            rows = [
+                row for row in _page_row_widgets(dlg, key)
+                if isinstance(row.control, (NoWheelComboBox, QLineEdit))
+            ]
+            if len(rows) < 2:      # 只有一行时谈不上"对齐"
+                continue
+            xs = {row.control.geometry().x() for row in rows}
+            assert len(xs) == 1, (key, xs)
+            widest = max(row.label.sizeHint().width() for row in rows)
+            assert xs.pop() == widest + ROW_LABEL_GAP, key
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
 def test_ok_cancel_buttons_are_chinese(qapp):
     """程序没装 Qt 翻译，标准按钮默认是英文；这里必须显式中文。"""
     dlg = _dialog()

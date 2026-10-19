@@ -51,15 +51,21 @@ class NoWheelComboBox(QComboBox):
 # 胶囊开关
 # ---------------------------------------------------------------------------
 
-#: 轨道尺寸与外观（逻辑像素）：轨道 40×20、圆角 6px（不是半圆）；滑块 16×16，
-#: 用与轨道**相同**的圆角 6px（圆角方块，不是圆形），风格才统一。
+#: 轨道尺寸与外观（逻辑像素）：轨道 40×20、圆角 6px（不是半圆）；滑块 16×16 圆角方块。
 #: 控件尺寸**就是**轨道尺寸——设置行按控件右边缘对齐，多留一圈 padding 会让
 #: 开关的可见右边缘比下拉框/按钮缩进几个像素，对不齐。
 _SWITCH_TRACK_W = 40
 _SWITCH_TRACK_H = 20
 _SWITCH_RADIUS = 6
 _SWITCH_KNOB = 16
-_SWITCH_KNOB_RADIUS = 6
+
+#: 滑块与轨道的四周间隙（= (轨道高 − 滑块高) / 2）
+_SWITCH_KNOB_GAP = (_SWITCH_TRACK_H - _SWITCH_KNOB) / 2.0
+
+#: 滑块圆角 = 轨道圆角 − 间隙：这样两段圆弧**同心**，才是真正的内偏移形状。
+#: 用相同半径（6px）时：直边间隙 2px、45° 拐角间隙 2.83px，而且圆弧→直边的
+#: 转折点错开 2px，拐角处会"张开"一条蓝楔形——怎么调半径都不贴合。
+_SWITCH_KNOB_RADIUS = _SWITCH_RADIUS - _SWITCH_KNOB_GAP
 
 #: 滑块滑动时长（毫秒）：只是视觉过渡，`isChecked()` 立即生效
 _SWITCH_ANIM_MS = 120
@@ -81,8 +87,8 @@ class ToggleSwitch(QAbstractButton):
     为什么不用 QCheckBox：设置页里「开/关」是一整行的状态，方形勾选框
     和右侧的下拉框放在一起层级不统一；胶囊开关只表达"当前是开还是关"，
     比勾选框更像状态指示。形状按要求做成**圆角矩形轨道**（圆角 6px，
-    不是两端半圆的跑道形），滑块是**同圆角的方块**（不是圆形），
-    开时滑到右、关时滑到左。
+    不是两端半圆的跑道形），滑块是圆角方块：圆角按"轨道圆角 − 间隙"算
+    （同心圆弧，拐角处不会张开缝隙），开时滑到右、关时滑到左。
 
     交互（刻意保持简单）：
 
@@ -172,12 +178,12 @@ class ToggleSwitch(QAbstractButton):
         painter.setBrush(track_color)
         painter.drawRoundedRect(track, _SWITCH_RADIUS, _SWITCH_RADIUS)
 
-        inset = (_SWITCH_TRACK_H - _SWITCH_KNOB) / 2.0
+        inset = _SWITCH_KNOB_GAP
         x_left = track.x() + inset
         x_right = track.x() + _SWITCH_TRACK_W - inset - _SWITCH_KNOB
         knob_x = x_left + (x_right - x_left) * self._progress
         painter.setBrush(knob_color)
-        # 圆角方块：圆角与轨道一致，形状与外壳是一套语言
+        # 圆角方块：半径 = 轨道半径 − 间隙（同心圆弧，拐角处间隙与直边一致）
         painter.drawRoundedRect(
             QRectF(knob_x, track.y() + inset, _SWITCH_KNOB, _SWITCH_KNOB),
             _SWITCH_KNOB_RADIUS,

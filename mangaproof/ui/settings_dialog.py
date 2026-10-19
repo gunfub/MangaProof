@@ -12,8 +12,9 @@
 - 每个分类页有自己的滚动区，页头是分类名 + 一句说明。页内不再套 QGroupBox：
   分类名已经在侧边栏，再套一个同名外框只是重复；
 - 每行 = 左边文本（统一左对齐）+ 右边控件，见 :class:`SettingsRow`：
-  下拉框 / 输入框**紧跟文本之后的 10px 处开始、向右占满到基线**（所以每行左边缘
-  由该行文本长度决定，右边缘统一）；开关 / 按钮保持自身宽度、贴右缘；
+  下拉框 / 输入框从**本页统一字段列**开始、向右占满到基线——列起点 = 本页最长的
+  行文本 + 10px，等价于"左缘对齐到本页最窄的那个下拉框"；开关 / 按钮保持自身
+  宽度、贴右缘；
 - 一切按**统一基线 GUTTER=24** 排：控件右缘距窗口右缘 24、左侧侧边栏与「恢复默认」
   距窗口左缘 24、侧边栏到内容文本 24、上下留白 24；底部「确定 / 取消」的右缘也
   压在控件右缘这条线上；
@@ -314,8 +315,9 @@ class SettingsRow(QWidget):
     两种排法（``expand``）：
 
     - ``expand=True``（下拉框 / 输入框）：控件紧跟文本之后（ROW_LABEL_GAP）开始，
-      向右**占满**到行的右缘。因此每一行的左边缘由该行文本长度决定（"贴着冒号"），
-      右边缘统一压在基线上；
+      向右**占满**到行的右缘。行本身按自己的文本起始；页面建完后
+      ``SettingsDialog._align_page_fields()`` 会把本页填充行的文本补到等宽，
+      于是整页的下拉框左缘对齐到"本页最窄的那个下拉框"、右缘一律压基线；
     - ``expand=False``（开关 / 按钮）：控件保持自身宽度、贴行右缘（右对齐）；
     - **控件被禁用时文本一起置灰**：行内监听控件的 ``EnabledChange``，把同样的
       禁用状态施加到文本上（样式见 ui/theme.py 的 ``QLabel#settingsRowLabel:disabled``）。
@@ -334,6 +336,7 @@ class SettingsRow(QWidget):
         self.label = QLabel(text)
         self.label.setObjectName("settingsRowLabel")
         self.control = control
+        self.expand = expand      # True = 填充型（下拉框/输入框），参与字段列对齐
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -479,8 +482,11 @@ class SettingsDialog(QDialog):
         self._build_task_page(self._add_page("task"))
         self._build_report_page(self._add_page("report"))
         self._build_shortcut_page(self._add_page("shortcut"))
-        # 行全部加完之后再收尾：内容不足一屏时整体贴顶，多出的高度留在下方
+        # 行全部加完之后再收尾：
+        # 1) 同一页的下拉框/输入框统一从"本页最长文本之后"开始（= 最窄那个下拉框的左缘）；
+        # 2) 内容不足一屏时整体贴顶，多出的高度留在下方。
         for rows in self.page_rows.values():
+            self._align_page_fields(rows)
             rows.addStretch(1)
 
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
@@ -587,6 +593,28 @@ class SettingsDialog(QDialog):
         row = SettingsRow(text, control, expand, rows.parentWidget())
         rows.addWidget(row)
         return row
+
+    def _align_page_fields(self, rows: QVBoxLayout) -> None:
+        """把同一页的填充型控件对齐到同一条左缘（= 本页最窄的那个下拉框）。
+
+        所有控件右缘都压在基线上，所以"左缘对齐到最窄的下拉框"等价于：取本页
+        最长的行文本宽度作为字段列起点，其余行的文本补足到这个宽度。
+
+        只统计下拉框 / 输入框行：开关行的文案通常比下拉标签长得多（例如
+        「bg / bg 拷贝 使用独立的自动显示比例」），算进去会把整列无谓地推右，
+        而开关本身是贴右缘的、不参与这一列。列宽由字体度量实时算出，改文案
+        或加设置项都会自动重排。
+        """
+        fill_rows: list[SettingsRow] = []
+        for i in range(rows.count()):
+            widget = rows.itemAt(i).widget()
+            if isinstance(widget, SettingsRow) and widget.expand:
+                fill_rows.append(widget)
+        if not fill_rows:
+            return
+        column = max(row.label.sizeHint().width() for row in fill_rows)
+        for row in fill_rows:
+            row.label.setMinimumWidth(column)
 
     def _on_nav_changed(self, row: int) -> None:
         """侧边栏切换：只切显示，不重建控件（见模块 docstring 的说明）。"""

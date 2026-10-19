@@ -163,3 +163,18 @@ def test_on_off_paint_differs(qapp):
     finally:
         host.close()
         host.deleteLater()
+
+
+def test_knob_radius_is_track_radius_minus_gap():
+    """内圆角 = 外圆角 − 间隙：两段圆弧同心，拐角处的间隙才与直边一致。
+
+    用相同半径时（6px）：直边间隙 2px、45° 拐角间隙 2.83px，而且圆弧→直边的
+    转折点错开 2px，拐角会"张开"——所以这里把它钉成公式，改尺寸时不会忘。
+    """
+    from mangaproof.ui import widgets
+
+    gap = (widgets._SWITCH_TRACK_H - widgets._SWITCH_KNOB) / 2
+    assert widgets._SWITCH_KNOB_GAP == gap
+    assert widgets._SWITCH_KNOB_RADIUS == widgets._SWITCH_RADIUS - gap
+    assert gap > 0
+    assert widgets._SWITCH_KNOB_RADIUS > 0
