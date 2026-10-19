@@ -127,7 +127,7 @@ _TEXT_INPUT_TYPES = ("QLineEdit", "QTextEdit", "QPlainTextEdit", "QComboBox")
 # 只把「设置页面」摆到用户面前让他自己过一遍，不预设、不推荐、不代替决策——
 # 默认值已经在 config/settings.py 里定好，用户不改也照常工作。
 FIRST_RUN_INTRO = (
-    "首次使用：这里是全部设置项，按自己的习惯调整即可。\n"
+    "首次使用：左侧是分类，点哪个就只看那一类设置，按自己的习惯调整即可。\n"
     "每一项都有说明文字；全部保持默认也可以，随时可在 设置 →「设置…」里再改。"
 )
 # 提醒条文案按平台给（config/settings.py 的 first_run_banner）：Android 上

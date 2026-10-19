@@ -1,0 +1,395 @@
+# SPDX-FileCopyrightText: 2026 gunfub
+# SPDX-License-Identifier: GPL-3.0-only
+
+"""设置对话框：左侧分类侧边栏 + 跨分类「确定 / 取消」语义。
+
+2026-10-19 起设置页从「一个长滚动页 + 五个 QGroupBox」改成「左侧分类 + 右侧分类页」。
+这个模块钉住三类最容易回退的东西：
+
+1. **结构**：五项分类 = 五页，切分类只切显示（右侧只显示该分类的设置）；
+   默认窗口横向（宽 > 高，不再是 560×560 的方块），同页设置项行距加大；
+2. **滚轮**：所有下拉框都不响应滚轮（只能点开选，这是设计要求），键盘仍可改值；
+3. **跨分类保存**：在多个分类里各改几项后点「确定」→ 全部写回；点「取消」（含 X）
+   → 全部丢弃，Settings 与打开前完全一致。
+
+第 3 条是这次改造的核心风险：若切页时重建控件、或 apply_to 只读当前页，
+先前分类的改动就会静默丢失——用户以为保存了，实际只存了最后一页。
+
+运行：QT_QPA_PLATFORM=offscreen uv run python -m pytest tests/test_settings_dialog.py -v
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QKeyEvent, QKeySequence, QWheelEvent
+from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox
+
+from mangaproof.config.settings import DEFAULT_WHEEL_MODE, Settings, SettingsManager
+from mangaproof.ui.settings_dialog import (
+    DEFAULT_DIALOG_SIZE,
+    MINIMUM_DIALOG_SIZE,
+    NAV_WIDTH,
+    PAGES,
+    ROW_SPACING,
+    KeybindingsDialog,
+    SettingsDialog,
+)
+from mangaproof.ui.widgets import NoWheelComboBox
+
+#: 每个分类「有代表性」的一个控件：用来验证切页后右侧只有该页的设置
+_PAGE_WIDGETS = {
+    "display": "ratio_combo",
+    "compare": "compare_mode_combo",
+    "task": "memory_policy_combo",
+    "report": "report_name_edit",
+    "shortcut": "wheel_mode_combo",
+}
+
+#: 分类键的顺序 = 侧边栏顺序
+_KEYS = list(PAGES)
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+def _dialog(settings: Settings | None = None, intro: str = "") -> SettingsDialog:
+    return SettingsDialog(settings if settings is not None else Settings(), None, intro=intro)
+
+
+def _wheel(dy: int = -120) -> QWheelEvent:
+    p = QPointF(10.0, 10.0)
+    return QWheelEvent(
+        p, p, QPoint(0, 0), QPoint(0, dy),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase, False,
+    )
+
+
+def _go(dlg: SettingsDialog, key: str) -> None:
+    """点侧边栏切到某个分类。"""
+    dlg.nav_list.setCurrentRow(_KEYS.index(key))
+    QApplication.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# ① 结构：分类 = 侧边栏 = 页
+# --------------------------------------------------------------------------- #
+
+
+def test_sidebar_categories_match_pages(qapp):
+    dlg = _dialog()
+    try:
+        assert len(PAGES) == 5
+        assert dlg.nav_list.count() == len(PAGES)
+        assert dlg.stack.count() == len(PAGES)
+        assert [dlg.nav_list.item(i).text() for i in range(len(PAGES))] == [
+            title for title, _ in PAGES.values()
+        ]
+        # 侧边栏项带着分类键，顺序与 PAGES 一致
+        assert [
+            dlg.nav_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(len(PAGES))
+        ] == _KEYS
+        # 默认停在第一页
+        assert dlg.nav_list.currentRow() == 0
+        assert dlg.stack.currentIndex() == 0
+        # 每个分类键都有页面 / 表单 / 滚动区
+        for key in _KEYS:
+            assert key in dlg.page_widgets
+            assert key in dlg.page_forms
+            assert key in dlg.page_scrolls
+            assert dlg.page_widgets[key].isAncestorOf(dlg.page_scrolls[key])
+    finally:
+        dlg.deleteLater()
+
+
+def test_switching_category_shows_only_that_page(qapp):
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        for row, key in enumerate(_KEYS):
+            _go(dlg, key)
+            assert dlg.stack.currentIndex() == row
+            assert dlg.stack.currentWidget() is dlg.page_widgets[key]
+            # 本页的控件可见、其它页的控件不可见
+            for other, attr in _PAGE_WIDGETS.items():
+                widget = getattr(dlg, attr)
+                assert dlg.page_widgets[other].isAncestorOf(widget), (key, other)
+                assert widget.isVisibleTo(dlg) is (other == key), (key, other)
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_sidebar_wheel_does_not_switch_page(qapp):
+    """侧边栏滚轮只可能滚动列表，不能顺手切页（更不能改任何设置值）。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        before_page = dlg.stack.currentIndex()
+        before_row = dlg.nav_list.currentRow()
+        for dy in (-120, 120):
+            QApplication.sendEvent(dlg.nav_list, _wheel(dy))
+            assert dlg.nav_list.currentRow() == before_row
+            assert dlg.stack.currentIndex() == before_page
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_window_is_landscape_and_fits_768p(qapp):
+    """默认窗口不再是方的：宽 > 高；最小尺寸仍能塞进 768p 笔记本。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        assert (dlg.width(), dlg.height()) == DEFAULT_DIALOG_SIZE
+        assert dlg.width() > dlg.height() * 1.3, "设置窗口应明显横向"
+        assert dlg.minimumWidth() == MINIMUM_DIALOG_SIZE[0]
+        assert dlg.minimumHeight() == MINIMUM_DIALOG_SIZE[1]
+        # 768p（可用高度约 728）以内：最小高度必须留得住底部按钮
+        assert MINIMUM_DIALOG_SIZE[1] <= 480
+        # 侧边栏固定宽，内容区拿走剩下的宽度
+        assert dlg.nav_list.minimumWidth() == dlg.nav_list.maximumWidth() == NAV_WIDTH
+        assert dlg.nav_list.width() == NAV_WIDTH
+        assert dlg.stack.width() > dlg.nav_list.width() * 3
+        assert dlg.button_box.isVisibleTo(dlg)
+        assert not dlg.nav_list.isAncestorOf(dlg.button_box)
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_rows_are_more_spacious_than_before(qapp):
+    """同一分类内的设置项行距加大（原来 QFormLayout 默认约 6px）。"""
+    dlg = _dialog()
+    try:
+        for key, form in dlg.page_forms.items():
+            assert form.verticalSpacing() == ROW_SPACING, key
+            assert form.verticalSpacing() >= 12, key
+    finally:
+        dlg.deleteLater()
+
+
+def test_ok_cancel_buttons_are_chinese(qapp):
+    """程序没装 Qt 翻译，标准按钮默认是英文；这里必须显式中文。"""
+    dlg = _dialog()
+    kb = KeybindingsDialog(Settings())
+    try:
+        assert dlg.button_box.button(QDialogButtonBox.StandardButton.Ok).text() == "确定"
+        assert dlg.button_box.button(QDialogButtonBox.StandardButton.Cancel).text() == "取消"
+        assert kb.button_box.button(QDialogButtonBox.StandardButton.Ok).text() == "确定"
+        assert kb.button_box.button(QDialogButtonBox.StandardButton.Cancel).text() == "取消"
+    finally:
+        dlg.deleteLater()
+        kb.deleteLater()
+
+
+# --------------------------------------------------------------------------- #
+# ② 滚轮：下拉只能点开选（键盘仍可用）
+# --------------------------------------------------------------------------- #
+
+
+def test_every_combo_ignores_wheel(qapp):
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        combos = dlg.findChildren(NoWheelComboBox)
+        assert len(combos) >= 9, [c.objectName() for c in combos]
+        for combo in combos:
+            before = combo.currentIndex()
+            for dy in (-120, 120):
+                ev = _wheel(dy)
+                QApplication.sendEvent(combo, ev)
+                if combo.isEnabled():
+                    # 忽略滚轮 → 事件继续冒泡给滚动区（滚页面，而不是改值）
+                    assert not ev.isAccepted(), f"{combo.currentText()} 不该吞滚轮"
+                assert combo.currentIndex() == before, (combo.currentText(), dy)
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+    # 对照：原生 QComboBox 会被滚轮改值（说明禁用确有作用）
+    plain = QComboBox()
+    plain.addItems(["a", "b", "c"])
+    ev = _wheel()
+    QApplication.sendEvent(plain, ev)
+    assert ev.isAccepted() and plain.currentIndex() == 1
+
+
+def test_keyboard_still_changes_combo(qapp):
+    """禁用滚轮不等于禁用控件：点开后用键盘仍可正常改值。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        combo = dlg.issue_scope_combo
+        combo.setFocus()
+        qapp.processEvents()
+        before = combo.currentIndex()
+        QApplication.sendEvent(
+            combo,
+            QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier
+            ),
+        )
+        qapp.processEvents()
+        assert combo.currentIndex() != before
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+# --------------------------------------------------------------------------- #
+# ③ 跨分类「确定 / 取消」
+# --------------------------------------------------------------------------- #
+
+
+def test_cross_category_edits_all_applied_on_ok(qapp):
+    """在三个分类里各改几项 → 确定：全部写回（不是只保存当前显示的那一页）。"""
+    out = Settings()
+    dlg = _dialog(Settings())
+    try:
+        # 显示：自动显示比例 60% → 40%
+        dlg.ratio_combo.setCurrentIndex(dlg.ratio_combo.findData(0.4))
+        # 返修单：填名称、关掉完成后自动生成
+        _go(dlg, "report")
+        dlg.report_name_edit.setText("第 5 话 返修")
+        dlg.pdf_check.setChecked(False)
+        # 快捷键与滚轮：裸滚轮改为缩放
+        _go(dlg, "shortcut")
+        dlg.wheel_mode_combo.setCurrentIndex(dlg.wheel_mode_combo.findData("zoom"))
+        # 再切回显示页：先前改的值还在（切页不重建控件）
+        _go(dlg, "display")
+        assert dlg.ratio_combo.currentData() == 0.4
+
+        dlg.apply_to(out)
+        assert out.layer_display_ratio == 0.4
+        assert out.report_name == "第 5 话 返修"
+        assert out.generate_pdf_on_complete is False
+        assert out.wheel_mode == "zoom"
+    finally:
+        dlg.deleteLater()
+
+
+def test_cancel_discards_edits_from_every_category(qapp):
+    """取消（含点 X）＝ 什么都没发生：Settings 与打开设置前逐字段一致。"""
+    settings = Settings()
+    before = copy.deepcopy(settings)
+    dlg = _dialog(settings)
+    try:
+        dlg.ratio_combo.setCurrentIndex(dlg.ratio_combo.findData(0.4))
+        _go(dlg, "report")
+        dlg.report_name_edit.setText("不该保存")
+        dlg.pdf_check.setChecked(False)
+        _go(dlg, "shortcut")
+        dlg.wheel_mode_combo.setCurrentIndex(dlg.wheel_mode_combo.findData("zoom"))
+        assert settings == before, "改控件期间不允许碰 Settings"
+
+        dlg.reject()
+        assert dlg.result() == SettingsDialog.DialogCode.Rejected
+        assert settings == before
+
+        # 重新打开：显示的是原设置（用户视角就是"没改过"）
+        again = _dialog(settings)
+        try:
+            assert again.report_name_edit.text() == ""
+            assert again.pdf_check.isChecked() is True
+            assert again.wheel_mode_combo.currentData() == DEFAULT_WHEEL_MODE
+            assert again.ratio_combo.currentData() == before.layer_display_ratio
+        finally:
+            again.deleteLater()
+    finally:
+        dlg.deleteLater()
+
+
+def test_keybindings_subdialog_discarded_by_cancel(qapp):
+    """子对话框里改的快捷键，主对话框取消时同样不生效。"""
+    settings = Settings()
+    dlg = _dialog(settings)
+    try:
+        kb = KeybindingsDialog(settings)
+        kb._core_edits["prev_psd"].setKeySequence(QKeySequence("F1"))
+        dlg._kb_dialog = kb
+        dlg.reject()
+        assert settings.keybindings["prev_psd"] == "Up"
+    finally:
+        dlg.deleteLater()
+
+
+def test_main_window_ok_saves_every_category(qapp):
+    """端到端：经 MainWindow 打开设置 → 跨分类改 → 确定：运行时生效且落盘。"""
+    from mangaproof.ui.main_window import MainWindow
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "settings.json"
+        window = MainWindow(SettingsManager(path))
+        window.show()
+        qapp.processEvents()
+        try:
+            def fake_exec(dialog):          # 模拟用户操作后点「确定」
+                dialog.ratio_combo.setCurrentIndex(
+                    dialog.ratio_combo.findData(0.4)
+                )
+                dialog.nav_list.setCurrentRow(_KEYS.index("report"))
+                QApplication.processEvents()
+                dialog.report_name_edit.setText("跨分类")
+                dialog.pdf_check.setChecked(False)
+                return SettingsDialog.DialogCode.Accepted
+
+            with patch.object(SettingsDialog, "exec", fake_exec):
+                window.open_settings_dialog()
+
+            assert window.settings.layer_display_ratio == 0.4
+            assert window.settings.report_name == "跨分类"
+            assert window.settings.generate_pdf_on_complete is False
+            # 界面热应用：工具栏比例下拉跟随
+            assert window.ratio_combo.currentData() == 0.4
+            # 落盘：两个分类的改动都在
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            assert saved["layer_display_ratio"] == 0.4
+            assert saved["report_name"] == "跨分类"
+            assert saved["generate_pdf_on_complete"] is False
+        finally:
+            window.close()
+            qapp.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# ④ 首次使用引导条（可选）不影响分类页
+# --------------------------------------------------------------------------- #
+
+
+def test_intro_sits_above_categories(qapp):
+    dlg = _dialog(intro="首次使用：左侧是分类。")
+    dlg.show()
+    qapp.processEvents()
+    try:
+        assert dlg.intro_label is not None
+        assert dlg.intro_label.isVisibleTo(dlg)
+        assert not dlg.intro_label.isAncestorOf(dlg.nav_list)
+        assert dlg.nav_list.isVisibleTo(dlg)
+        assert dlg.stack.count() == len(PAGES)
+    finally:
+        dlg.close()
+        dlg.deleteLater()

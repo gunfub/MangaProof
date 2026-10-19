@@ -1,18 +1,28 @@
 # SPDX-FileCopyrightText: 2026 gunfub
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""设置对话框（需求 §20、§30、§35、§46、§49）。
+"""设置对话框（需求 §20、§30、§35、§46、§49、§55）。
 
-- 图层显示比例（10%～100%）与 bg / bg 拷贝 的独立比例（默认关）；
-- 自动对比：模式（自动/手动切换）与预设切换速度档位；
-- 快捷键设置独立子对话框（KeybindingsDialog）：核心快捷键、
-  问题类型快捷键、自定义批注键——主对话框只保留入口按钮，
-  避免设置页过长挤压；
-- PDF 生成开关、返修单自定义名称、递归扫描；
-- 问题红框显示范围（当前页全部问题 / 仅当前图层）、蓝色虚线边界框开关、
-  内存回收策略档位。
+布局：左侧分类侧边栏 + 右侧分类页。
 
-主对话框的分组放在滚动区内，底部按钮固定可见（768p 笔记本友好）。
+先看下面这些约定，再改这个文件：
+
+- 侧边栏五项 = 原来的五个小分类（显示 / 自动对比 / 任务 / MangaProof 返修单 /
+  快捷键与滚轮）。点哪一项，右侧只显示那一类的设置项；
+- 每个分类页有自己的滚动区，页头是分类名 + 一句说明。页内不再套 QGroupBox：
+  分类名已经在侧边栏，再套一个同名外框只是重复；
+- 同一分类内的设置项行距 16px（原来 QFormLayout 默认约 6px，挤在一起不好认）；
+- 窗口默认 860×560（原来 560×560 太方；与「第三方许可」窗口同尺寸），侧边栏 180，
+  内容区约 640；
+- 下拉框一律 NoWheelComboBox：**只能点开选**，滚轮不改值（见 ui/widgets.py），
+  这条是设计要求，不要换回原生 QComboBox；
+- 底部「确定 / 取消」：确定保存并应用**所有分类**的改动，取消则本次全部丢弃
+  （控件状态只活在对话框里，永远不提前写 Settings）。
+
+**分类页必须一次建好、常驻内存**（不能按需创建，也不能切页时销毁重建）：
+用户可能在多个分类里各改几项再点「确定」，若切页时重建控件，先前分类的改动
+就丢了。所以这里用 QStackedWidget 只做显示切换，`apply_to()` 按控件逐个读取，
+与当前显示哪一页无关。
 """
 
 from __future__ import annotations
@@ -32,9 +42,12 @@ from PySide6.QtWidgets import (
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -69,8 +82,40 @@ from mangaproof.config.settings import (
     shortcut_conflicts,
     ui_scale_choices,
 )
-from mangaproof.ui.theme import COLOR_ACCENT, COLOR_BG_WIDGET, COLOR_TEXT, COLOR_WARN
+from mangaproof.ui.theme import (
+    COLOR_ACCENT,
+    COLOR_BG_PANEL,
+    COLOR_BG_SELECTED,
+    COLOR_BG_WIDGET,
+    COLOR_BG_HOVER,
+    COLOR_BORDER,
+    COLOR_TEXT,
+    COLOR_TEXT_DIM,
+    COLOR_WARN,
+)
 from mangaproof.ui.widgets import NoWheelComboBox
+
+#: 侧边栏分类：内部键 -> (侧边栏 / 页头标题, 页头的一句说明)。
+#: 顺序即侧边栏顺序，键同时是 page_widgets / page_forms / page_scrolls 的键。
+PAGES: Dict[str, tuple[str, str]] = {
+    "display": ("显示", "画布上的自动缩放与叠加显示"),
+    "compare": ("自动对比", "Original 与背景的闪切方式与速度"),
+    "task": ("任务", "打开任务时的扫描方式、控制台窗口与内存回收"),
+    "report": ("MangaProof 返修单", "完成监制后自动生成的返修单：名称、页面图像与总览"),
+    "shortcut": ("快捷键与滚轮", "核心 / 问题类型快捷键，以及不按修饰键时的滚轮行为"),
+}
+
+#: 侧边栏宽度（固定：分类名最长是「MangaProof 返修单」）
+NAV_WIDTH = 180
+
+#: 窗口默认尺寸（原 560×560 太方；与 ui/license_dialog.py 的 860×560 一致）
+#: 与最小尺寸（小屏仍可缩到 640×440，每个分类页各自滚动）
+DEFAULT_DIALOG_SIZE = (860, 560)
+MINIMUM_DIALOG_SIZE = (640, 440)
+
+#: 同一分类内相邻设置项的纵向间距（原来 QFormLayout 默认约 6px）
+ROW_SPACING = 16
+
 
 class KeybindingsDialog(QDialog):
     """快捷键设置子对话框：核心快捷键 + 问题类型快捷键 + 自定义批注键。
@@ -144,6 +189,9 @@ class KeybindingsDialog(QDialog):
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        # 与主设置对话框 / 「关于」页一致：没装 Qt 翻译时标准按钮是英文，显式改中文
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         button_row.addWidget(self.button_box)
@@ -235,11 +283,11 @@ class KeybindingsDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    """程序设置主对话框。
+    """程序设置主对话框：左侧分类侧边栏 + 右侧分类页。
 
-    设置分组放在滚动区里（内容随版本增长，768p 笔记本上按钮不能被挤到
-    屏幕外）；底部「恢复默认设置 / 确定 / 取消」固定在滚动区之外，
-    任何窗口高度下都可见可点。
+    每个分类页都有自己的滚动区（768p 笔记本上内容也不会把底部按钮挤出去）；
+    底部「恢复默认设置 / 确定 / 取消」固定在分类区之外，任何窗口高度下都
+    可见可点。「确定」写回**所有分类**的改动，「取消」全部丢弃（含窗口 X / Esc）。
     """
 
     def __init__(
@@ -250,15 +298,24 @@ class SettingsDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("MangaProof 设置")
-        self.resize(560, 560)   # 与快捷键子对话框一致；小屏可自由缩小（内容滚动）
+        # 默认横向（原 560×560 太方）：侧边栏 180 + 内容区约 640
+        self.resize(*DEFAULT_DIALOG_SIZE)
+        self.setMinimumSize(*MINIMUM_DIALOG_SIZE)
         self._settings = settings
         self._kb_dialog: Optional[KeybindingsDialog] = None
         self._kb_reset_defaults = False
 
+        #: 分类键（见模块级 PAGES）-> 页面控件 / 表单布局 / 滚动区
+        self.page_widgets: Dict[str, QWidget] = {}
+        self.page_forms: Dict[str, QFormLayout] = {}
+        self.page_scrolls: Dict[str, QScrollArea] = {}
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
 
         # 首次使用引导文案（可选）：只说明「这里是全部设置项、不改就用默认值」，
-        # 不预设、不推荐任何值——放在滚动区之外，任何窗口高度下都看得见
+        # 不预设、不推荐任何值——放在分类区之外，任何窗口高度下都看得见
         self.intro_label: Optional[QLabel] = None
         if intro:
             self.intro_label = QLabel(intro)
@@ -272,27 +329,145 @@ class SettingsDialog(QDialog):
             )
             layout.addWidget(self.intro_label)
 
-        # 滚动区：高度不足时出现滚动条，宽度始终跟随对话框
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        body = QWidget()
-        body_layout = QVBoxLayout(body)
-        # 底部留一点空隙：滚到底时最后一组不贴边
-        body_layout.setContentsMargins(0, 0, 0, 6)
-        self.scroll_area.setWidget(body)
-        layout.addWidget(self.scroll_area, 1)
+        # ---- 主体：左侧分类 + 右侧分类页 ----
+        body = QHBoxLayout()
+        body.setSpacing(12)
 
-        # ---- 显示 ----
-        display_group = QGroupBox("显示")
-        display_form = QFormLayout(display_group)
+        self.nav_list = QListWidget()
+        self.nav_list.setObjectName("settingsNav")
+        self.nav_list.setFixedWidth(NAV_WIDTH)
+        self.nav_list.setUniformItemSizes(True)
+        self.nav_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.nav_list.setStyleSheet(
+            f"""
+            QListWidget#settingsNav {{
+                background: {COLOR_BG_PANEL};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 6px;
+                padding: 6px;
+                outline: none;
+            }}
+            QListWidget#settingsNav::item {{
+                padding: 9px 10px;
+                margin: 2px 0;
+                border-radius: 5px;
+            }}
+            QListWidget#settingsNav::item:selected {{
+                background: {COLOR_BG_SELECTED};
+                color: white;
+            }}
+            QListWidget#settingsNav::item:hover {{
+                background: {COLOR_BG_HOVER};
+            }}
+            """
+        )
+        body.addWidget(self.nav_list)
+
+        self.stack = QStackedWidget()
+        body.addWidget(self.stack, 1)
+        layout.addLayout(body, 1)
+
+        # 五个分类页：**一次全部建好**（切页只切显示，不销毁重建）。
+        # 顺序即侧边栏顺序，也是 PAGES 的插入顺序。
+        self._build_display_page(self._add_page("display"))
+        self._build_compare_page(self._add_page("compare"))
+        self._build_task_page(self._add_page("task"))
+        self._build_report_page(self._add_page("report"))
+        self._build_shortcut_page(self._add_page("shortcut"))
+
+        self.nav_list.currentRowChanged.connect(self._on_nav_changed)
+        self.nav_list.setCurrentRow(0)
+
+        # ---- 按钮 ----
+        button_row = QHBoxLayout()
+        self.reset_btn = QPushButton("恢复默认设置")
+        self.reset_btn.clicked.connect(self._reset_defaults)
+        button_row.addWidget(self.reset_btn)
+        button_row.addStretch(1)
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        # 程序没装 Qt 翻译，标准按钮默认是英文 "OK / Cancel"；这里是全中文界面，显式改中文
+        # （与 ui/about_dialog.py、ui/license_dialog.py 的做法一致）
+        self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        button_row.addWidget(self.button_box)
+        layout.addLayout(button_row)
+
+    # -- 分类页骨架 --------------------------------------------------------
+
+    def _add_page(self, key: str) -> QFormLayout:
+        """建一个分类页（侧边栏项 + 页头 + 独立滚动区），返回它的表单布局。
+
+        页面在这里就**建好并常驻**：切页只切 QStackedWidget 的显示，绝不重建，
+        否则用户先改 A 分类、再改 B 分类时，A 的改动会随控件销毁一起丢掉。
+        """
+        title, hint = PAGES[key]
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(4)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("settingsPageTitle")
+        title_label.setStyleSheet("font-size: 15px; font-weight: bold;")
+        page_layout.addWidget(title_label)
+
+        hint_label = QLabel(hint)
+        hint_label.setObjectName("settingsPageHint")
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+        page_layout.addWidget(hint_label)
+
+        # 每页自己的滚动区：内容再长也只滚这一页，底部按钮始终在滚动区外
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(2, 8, 10, 14)   # 右侧留出滚动条的位置
+        content_layout.setSpacing(0)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(ROW_SPACING)   # 设置项之间加大留白
+        # 标签右对齐：字段列拉宽后（窗口变宽）短标签不会离自己的控件太远
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        content_layout.addLayout(form)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        page_layout.addWidget(scroll, 1)
+
+        item = QListWidgetItem(title)
+        item.setData(Qt.ItemDataRole.UserRole, key)
+        self.nav_list.addItem(item)
+        self.stack.addWidget(page)
+        self.page_widgets[key] = page
+        self.page_forms[key] = form
+        self.page_scrolls[key] = scroll
+        return form
+
+    def _on_nav_changed(self, row: int) -> None:
+        """侧边栏切换：只切显示，不重建控件（见模块 docstring 的说明）。"""
+        if 0 <= row < self.stack.count():
+            self.stack.setCurrentIndex(row)
+
+    # -- 各分类页内容 ------------------------------------------------------
+
+    def _build_display_page(self, form: QFormLayout) -> None:
         self.ratio_combo = NoWheelComboBox()
         for r in DISPLAY_RATIOS:
             self.ratio_combo.addItem(f"{int(r * 100)}%", r)
-        current_ratio = settings.layer_display_ratio
+        current_ratio = self._settings.layer_display_ratio
         if current_ratio not in DISPLAY_RATIOS:
             self.ratio_combo.addItem(f"{int(current_ratio * 100)}%", current_ratio)
         idx = self.ratio_combo.findData(current_ratio)
@@ -303,12 +478,12 @@ class SettingsDialog(QDialog):
             "它**不是像素缩放百分比**——状态栏那个「缩放：xx%」才是当前的实际像素缩放；\n"
             "手动滚轮缩放不会被它覆盖，只影响下一次自动定位。"
         )
-        display_form.addRow("图层自动显示比例：", self.ratio_combo)
+        form.addRow("图层自动显示比例：", self.ratio_combo)
 
         # bg / bg 拷贝 的独立比例（需求 §20.2，默认关）。
         # 关闭时两个下拉置灰：值仍保留在设置里，只是不参与自动缩放。
         self.bg_ratio_check = QCheckBox("bg / bg 拷贝 使用独立的自动显示比例")
-        self.bg_ratio_check.setChecked(settings.bg_ratio_enabled)
+        self.bg_ratio_check.setChecked(self._settings.bg_ratio_enabled)
         self.bg_ratio_check.setToolTip(
             "开启后，只有下面这两类图层用自己的比例，其余图层仍用上面的全局比例：\n"
             "· bg：PS 里名为 bg 的图层；没有 bg 名时按既有规则退回「最底部有内容的图层」；\n"
@@ -316,13 +491,13 @@ class SettingsDialog(QDialog):
             "  没有这一层就不套用独立比例、也不做兜底。\n"
             "关闭（默认）时所有图层统一用全局比例，行为与旧版一致。"
         )
-        display_form.addRow(self.bg_ratio_check)
+        form.addRow(self.bg_ratio_check)
 
         self.bg_ratio_combo = NoWheelComboBox()
         self.bg_copy_ratio_combo = NoWheelComboBox()
         for combo, current in (
-            (self.bg_ratio_combo, settings.bg_display_ratio),
-            (self.bg_copy_ratio_combo, settings.bg_copy_display_ratio),
+            (self.bg_ratio_combo, self._settings.bg_display_ratio),
+            (self.bg_copy_ratio_combo, self._settings.bg_copy_display_ratio),
         ):
             for r in DISPLAY_RATIOS:
                 combo.addItem(f"{int(r * 100)}%", r)
@@ -339,13 +514,13 @@ class SettingsDialog(QDialog):
         )
         self.bg_ratio_check.toggled.connect(self._update_bg_ratio_enabled)
         self._update_bg_ratio_enabled()
-        display_form.addRow("bg 自动显示比例：", self.bg_ratio_combo)
-        display_form.addRow("bg 拷贝自动显示比例：", self.bg_copy_ratio_combo)
+        form.addRow("bg 自动显示比例：", self.bg_ratio_combo)
+        form.addRow("bg 拷贝自动显示比例：", self.bg_copy_ratio_combo)
 
         self.issue_scope_combo = NoWheelComboBox()
         self.issue_scope_combo.addItem("当前页全部问题（默认，跨图层显示红框）", "page")
         self.issue_scope_combo.addItem("仅当前图层的问题（旧版行为）", "layer")
-        scope_idx = self.issue_scope_combo.findData(settings.issue_scope)
+        scope_idx = self.issue_scope_combo.findData(self._settings.issue_scope)
         self.issue_scope_combo.setCurrentIndex(max(0, scope_idx))
         self.issue_scope_combo.setToolTip(
             "画布上红框（问题标注）的显示范围：\n"
@@ -353,16 +528,16 @@ class SettingsDialog(QDialog):
             "· 仅当前图层：只显示当前图层的问题，其余图层红框隐藏。\n"
             "切换图层/翻页即时生效，不影响已保存的问题数据。"
         )
-        display_form.addRow("问题红框显示：", self.issue_scope_combo)
+        form.addRow("问题红框显示：", self.issue_scope_combo)
 
         self.layer_outline_check = QCheckBox("显示当前图层的蓝色虚线边界框")
-        self.layer_outline_check.setChecked(settings.show_layer_outline)
+        self.layer_outline_check.setChecked(self._settings.show_layer_outline)
         self.layer_outline_check.setToolTip(
             "画布上标出当前图层视觉内容范围的蓝色虚线框（定位辅助）。\n"
             "关闭后不再绘制该框，图层定位与自动缩放行为不受影响；\n"
             "切换图层、翻页、改设置均即时生效。"
         )
-        display_form.addRow(self.layer_outline_check)
+        form.addRow(self.layer_outline_check)
 
         # 界面缩放：**仅 Android 显示**。桌面端缩放恒为 1.0（由
         # config/settings.resolve_ui_scale 的平台判定硬保证），因此桌面既不
@@ -372,10 +547,11 @@ class SettingsDialog(QDialog):
             self.ui_scale_combo = NoWheelComboBox()
             for scale in ui_scale_choices():
                 self.ui_scale_combo.addItem(f"{int(round(scale * 100))}%", scale)
-            idx = self.ui_scale_combo.findData(settings.ui_scale)
+            idx = self.ui_scale_combo.findData(self._settings.ui_scale)
             if idx < 0:   # 兼容手工写入的非标准档位
                 self.ui_scale_combo.addItem(
-                    f"{int(round(settings.ui_scale * 100))}%", settings.ui_scale
+                    f"{int(round(self._settings.ui_scale * 100))}%",
+                    self._settings.ui_scale,
                 )
                 idx = self.ui_scale_combo.count() - 1
             self.ui_scale_combo.setCurrentIndex(max(0, idx))
@@ -386,26 +562,22 @@ class SettingsDialog(QDialog):
                 "提示：50% 时文字会非常小；折叠屏内屏上想让顶部工具栏整行不折叠，\n"
                 "经验值是 75% 及以下（与设备宽度有关）。"
             )
-            display_form.addRow("界面缩放（重启后生效）：", self.ui_scale_combo)
+            form.addRow("界面缩放（重启后生效）：", self.ui_scale_combo)
 
-        body_layout.addWidget(display_group)
-
-        # ---- 自动对比 ----
-        compare_group = QGroupBox("自动对比")
-        compare_form = QFormLayout(compare_group)
+    def _build_compare_page(self, form: QFormLayout) -> None:
         self.compare_mode_combo = NoWheelComboBox()
         self.compare_mode_combo.addItem("自动切换（定时来回闪切）", "auto")
         self.compare_mode_combo.addItem("手动切换（按一下切一次）", "manual")
-        mode_idx = self.compare_mode_combo.findData(settings.compare_mode)
+        mode_idx = self.compare_mode_combo.findData(self._settings.compare_mode)
         self.compare_mode_combo.setCurrentIndex(max(0, mode_idx))
-        compare_form.addRow("对比模式：", self.compare_mode_combo)
+        form.addRow("对比模式：", self.compare_mode_combo)
 
         self.compare_speed_combo = NoWheelComboBox()
         for hz, name in COMPARE_SPEED_TIERS:
             self.compare_speed_combo.addItem(
                 f"{name} · {hz} 次/秒（每张 {hz_to_interval_ms(hz)}ms）", hz
             )
-        current_hz = settings.compare_speed_hz
+        current_hz = self._settings.compare_speed_hz
         if current_hz not in [hz for hz, _ in COMPARE_SPEED_TIERS]:
             self.compare_speed_combo.addItem(
                 f"自定义 · {current_hz} 次/秒（每张 {hz_to_interval_ms(current_hz)}ms）",
@@ -414,24 +586,21 @@ class SettingsDialog(QDialog):
         speed_idx = self.compare_speed_combo.findData(current_hz)
         self.compare_speed_combo.setCurrentIndex(max(0, speed_idx))
         self.compare_speed_combo.setToolTip("手动切换模式下无需设定速度")
-        compare_form.addRow("切换速度：", self.compare_speed_combo)
+        form.addRow("切换速度：", self.compare_speed_combo)
         self.compare_mode_combo.currentIndexChanged.connect(
             self._update_compare_speed_enabled
         )
         self._update_compare_speed_enabled()
-        body_layout.addWidget(compare_group)
 
-        # ---- 任务 ----
-        task_group = QGroupBox("任务")
-        task_form = QFormLayout(task_group)
+    def _build_task_page(self, form: QFormLayout) -> None:
         self.recursive_check = QCheckBox("递归扫描子文件夹")
-        self.recursive_check.setChecked(settings.recursive_scan)
-        task_form.addRow(self.recursive_check)
+        self.recursive_check.setChecked(self._settings.recursive_scan)
+        form.addRow(self.recursive_check)
         # 控制台开关仅 Windows 打包产物有意义（见 mangaproof/console.py）
         import sys as _sys
 
         self.console_check = QCheckBox("打包产物关闭控制台窗口（仅 Windows）")
-        self.console_check.setChecked(settings.hide_console)
+        self.console_check.setChecked(self._settings.hide_console)
         self.console_check.setToolTip(
             "仅对 Windows 打包产物生效（默认关闭）。\n"
             "开启后控制台窗口直接消失（FreeConsole 销毁，不是最小化）；\n"
@@ -441,7 +610,7 @@ class SettingsDialog(QDialog):
         )
         if _sys.platform != "win32":
             self.console_check.setEnabled(False)
-        task_form.addRow(self.console_check)
+        form.addRow(self.console_check)
 
         # 内存回收策略（三档：宽松/平衡/激进），运行时热应用。
         # Android 端锁定为激进：控件**禁用但保留**（与上面 console_check 同做法），
@@ -451,7 +620,7 @@ class SettingsDialog(QDialog):
         self.memory_policy_combo.addItem("宽松（LRU 768MB，bg 预生成池 768MB）", "relaxed")
         self.memory_policy_combo.addItem("平衡（LRU 512MB，bg 预生成池 512MB）", "balanced")
         self.memory_policy_combo.addItem("激进（LRU 256MB，bg 预生成仅留 2 张）", "aggressive")
-        policy_idx = self.memory_policy_combo.findData(settings.memory_policy)
+        policy_idx = self.memory_policy_combo.findData(self._settings.memory_policy)
         self.memory_policy_combo.setCurrentIndex(max(0, policy_idx))
         if android_memory_policy_locked():
             self.memory_policy_combo.setEnabled(False)
@@ -465,14 +634,11 @@ class SettingsDialog(QDialog):
                 "内存占用与缓存慷慨度的平衡档位，切换后立即生效，无需重启。\n"
                 "三档均会驱逐窗口外文档结构（内存与书本页数无关）。"
             )
-        task_form.addRow("内存策略：", self.memory_policy_combo)
-        body_layout.addWidget(task_group)
+        form.addRow("内存策略：", self.memory_policy_combo)
 
-        # ---- 返修单 ----
-        report_group = QGroupBox("MangaProof 返修单")
-        report_form = QFormLayout(report_group)
+    def _build_report_page(self, form: QFormLayout) -> None:
         self.pdf_check = QCheckBox("完成监制后自动生成返修单")
-        self.pdf_check.setChecked(settings.generate_pdf_on_complete)
+        self.pdf_check.setChecked(self._settings.generate_pdf_on_complete)
         self.pdf_check.setToolTip(
             "勾选（默认）：所有图层检查完毕时自动生成返修单——使用上面的名称、\n"
             "页面图像格式与「总览表隐藏无问题 PSD」选项，同一次完成只生成一次；\n"
@@ -480,26 +646,27 @@ class SettingsDialog(QDialog):
             "生成前是否弹选项窗口由下面的开关控制（默认弹）。\n"
             "关闭后不会自动生成，可随时用「生成返修单」(Ctrl+R) 手动生成。"
         )
-        report_form.addRow(self.pdf_check)
+        form.addRow(self.pdf_check)
 
         self.report_options_check = QCheckBox("生成返修单前显示选项窗口")
-        self.report_options_check.setChecked(settings.report_show_options)
+        self.report_options_check.setChecked(self._settings.report_show_options)
         self.report_options_check.setToolTip(
             "勾选（默认）：每次生成返修单前都先弹出选项窗口（名称 / 页面图像格式 /\n"
             "JPEG 质量 / 总览表是否隐藏无问题 PSD）——手动生成 (Ctrl+R) 与完成后\n"
             "自动生成都受这个开关控制；窗口里改过的格式 / 质量 / 总览选择会被记住。\n"
             "关闭后不再弹窗，直接用本页的设置生成。"
         )
-        report_form.addRow(self.report_options_check)
+        form.addRow(self.report_options_check)
 
-        self.report_name_edit = QLineEdit(settings.report_name)
+        self.report_name_edit = QLineEdit(self._settings.report_name)
         self.report_name_edit.setPlaceholderText("留空使用默认名称（PSD 名 / 文件夹名）")
-        report_form.addRow("返修单名称：", self.report_name_edit)
+        self.report_name_edit.setMinimumWidth(320)
+        form.addRow("返修单名称：", self.report_name_edit)
 
         self.report_image_combo = NoWheelComboBox()
         self.report_image_combo.addItem("PNG 无损（默认，体积大）", "png")
         self.report_image_combo.addItem("JPEG 压缩（体积小，有损）", "jpeg")
-        fmt_idx = self.report_image_combo.findData(settings.report_image_format)
+        fmt_idx = self.report_image_combo.findData(self._settings.report_image_format)
         self.report_image_combo.setCurrentIndex(max(0, fmt_idx))
         self.report_image_combo.setToolTip(
             "问题明细页的页面图像格式（生成时也可临时改选，选择会被记住）：\n"
@@ -507,68 +674,56 @@ class SettingsDialog(QDialog):
             "· JPEG：压缩，体积显著变小（漫画页面常见大幅网点/渐变），画质略降；\n"
             "红框与 ①②③ 编号始终是 PDF 矢量，与图片格式无关。"
         )
-        report_form.addRow("页面图像：", self.report_image_combo)
+        form.addRow("页面图像：", self.report_image_combo)
 
         self.report_quality_combo = NoWheelComboBox()
         for q in JPEG_QUALITY_CHOICES:
             self.report_quality_combo.addItem(
                 f"{q}%" + ("（默认）" if q == DEFAULT_JPEG_QUALITY else ""), q
             )
-        q_idx = self.report_quality_combo.findData(settings.report_jpeg_quality)
+        q_idx = self.report_quality_combo.findData(self._settings.report_jpeg_quality)
         self.report_quality_combo.setCurrentIndex(max(0, q_idx))
         self.report_quality_combo.setToolTip("仅 JPEG 压缩时生效：质量越低体积越小")
-        report_form.addRow("JPEG 质量：", self.report_quality_combo)
+        form.addRow("JPEG 质量：", self.report_quality_combo)
 
         self.report_hide_clean_check = QCheckBox(
             "总览表隐藏无问题的 PSD（全部图层通过）"
         )
-        self.report_hide_clean_check.setChecked(settings.report_hide_clean_files)
+        self.report_hide_clean_check.setChecked(self._settings.report_hide_clean_files)
         self.report_hide_clean_check.setToolTip(
             "返修单的「PSD 总览」表默认只列出有问题或未完成的 PSD；\n"
             "全部通过且无问题的页隐藏（表下注明隐藏数量）。\n"
             "开启选项窗口时可在生成前临时改选，选择会被记住；\n"
             "关闭选项窗口时一律以本页的设置为准。"
         )
-        report_form.addRow(self.report_hide_clean_check)
+        form.addRow(self.report_hide_clean_check)
         self.report_image_combo.currentIndexChanged.connect(
             self._update_report_quality_enabled
         )
         self._update_report_quality_enabled()
-        body_layout.addWidget(report_group)
 
-        # ---- 快捷键（入口按钮 → 独立子对话框）----
-        shortcut_group = QGroupBox("快捷键与滚轮")
-        shortcut_form = QFormLayout(shortcut_group)
+    def _build_shortcut_page(self, form: QFormLayout) -> None:
         self.wheel_mode_combo = NoWheelComboBox()
         self.wheel_mode_combo.addItem("上下移动视图（默认）", "pan")
         self.wheel_mode_combo.addItem("缩放视图", "zoom")
-        wheel_idx = self.wheel_mode_combo.findData(settings.wheel_mode)
+        wheel_idx = self.wheel_mode_combo.findData(self._settings.wheel_mode)
         self.wheel_mode_combo.setCurrentIndex(max(0, wheel_idx))
         self.wheel_mode_combo.setToolTip(
             "不按修饰键时鼠标滚轮的行为。\n"
             "Ctrl+滚轮始终为缩放，Alt+滚轮始终为左右移动；\n"
             "触控板双指滚不受影响，始终为平移。"
         )
-        shortcut_form.addRow("鼠标滚轮（不按修饰键）：", self.wheel_mode_combo)
+        form.addRow("鼠标滚轮（不按修饰键）：", self.wheel_mode_combo)
+
         self.kb_button = QPushButton("设置快捷键…")
         self.kb_button.setToolTip("在独立窗口中设置核心快捷键与问题类型快捷键")
         self.kb_button.clicked.connect(self._open_keybindings_dialog)
-        shortcut_form.addRow("核心 / 问题类型快捷键：", self.kb_button)
-        body_layout.addWidget(shortcut_group)
-
-        # ---- 按钮 ----
-        button_row = QHBoxLayout()
-        self.reset_btn = QPushButton("恢复默认设置")
-        self.reset_btn.clicked.connect(self._reset_defaults)
-        button_row.addWidget(self.reset_btn)
-        button_row.addStretch(1)
-        self.button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        button_row.addWidget(self.button_box)
-        layout.addLayout(button_row)
+        # 按钮包一层：默认的字段增长策略会让按钮跟着整列拉宽，这里让它保持自然宽度
+        kb_row = QHBoxLayout()
+        kb_row.setContentsMargins(0, 0, 0, 0)
+        kb_row.addWidget(self.kb_button)
+        kb_row.addStretch(1)
+        form.addRow("核心 / 问题类型快捷键：", kb_row)
 
     # -- 快捷键子对话框 ----------------------------------------------------
 
@@ -601,6 +756,10 @@ class SettingsDialog(QDialog):
     # -- 复位 / 应用 --------------------------------------------------------
 
     def _reset_defaults(self) -> None:
+        """把**所有分类**的控件复位到默认值。
+
+        只是改控件，不直接改 Settings——仍需点「确定」才生效（点「取消」等于没做过）。
+        """
         idx = self.ratio_combo.findData(DEFAULT_DISPLAY_RATIO)
         self.ratio_combo.setCurrentIndex(max(0, idx))
         self.bg_ratio_check.setChecked(DEFAULT_BG_RATIO_ENABLED)
@@ -620,6 +779,7 @@ class SettingsDialog(QDialog):
         self.recursive_check.setChecked(False)
         self.console_check.setChecked(True)
         self.pdf_check.setChecked(True)
+        self.report_options_check.setChecked(True)
         self.report_name_edit.clear()
         # 恢复默认走**平台默认**：Android 上该控件已禁用，复位到"平衡"会显示一个
         # 与事实不符的值（实际跑的是激进）。
@@ -640,6 +800,12 @@ class SettingsDialog(QDialog):
         self._kb_reset_defaults = True
 
     def apply_to(self, settings: Settings) -> None:
+        """把**所有分类**的当前控件值写回 settings（只在「确定」时调用）。
+
+        取值一律按控件读，与当前显示的是哪个分类页无关：五个页面在构造时一次
+        建好并常驻（QStackedWidget 只切显示），因此用户在多个分类里改过的值
+        会在这里一次性全部写回。**不能**改成"只保存当前可见页"。
+        """
         settings.layer_display_ratio = float(self.ratio_combo.currentData())
         settings.bg_ratio_enabled = self.bg_ratio_check.isChecked()
         settings.bg_display_ratio = float(self.bg_ratio_combo.currentData())

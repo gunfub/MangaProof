@@ -1950,50 +1950,52 @@ def test_layer_outline_paint_path() -> None:
     print("PASS test_layer_outline_paint_path")
 
 
-def test_settings_dialog_scroll_area() -> None:
-    """设置对话框：分组可滚动、底部按钮常驻；下拉框聚焦与否都不响应滚轮。
+def test_settings_dialog_sidebar_layout() -> None:
+    """设置对话框：左侧分类 + 每页独立滚动，底部按钮常驻；下拉框聚焦与否都不响应滚轮。
 
     历史问题：分组全部平铺，minimumSizeHint 高达 717px，768p 笔记本上
-    按钮会被挤出屏幕且无法缩小。
+    按钮会被挤出屏幕且无法缩小。改成侧边栏后继续钉住：任何窗口高度下
+    底部按钮都可见可点，内容只在分类页内部滚动。
     """
     from mangaproof.config.settings import Settings
     from mangaproof.ui.settings_dialog import SettingsDialog
     from mangaproof.ui.widgets import NoWheelComboBox
 
-    dlg = SettingsDialog(Settings())
-    dlg.resize(560, 480)
+    # 带首次使用引导条（最挤的形态）压到最小尺寸
+    dlg = SettingsDialog(Settings(), None, intro="首次使用：左侧是分类。")
+    dlg.resize(640, 440)
     dlg.show()
     app.processEvents()
 
-    # 1) 结构：分组在滚动区内，底部按钮在滚动区外（任何高度都可见可点）
-    sa = dlg.scroll_area
-    body = sa.widget()
-    assert body is not None
-    for group_child in (
-        dlg.ratio_combo, dlg.issue_scope_combo, dlg.layer_outline_check,
-        dlg.memory_policy_combo, dlg.report_hide_clean_check,
-        dlg.report_options_check, dlg.kb_button,
-    ):
-        assert body.isAncestorOf(group_child), group_child
-    assert not body.isAncestorOf(dlg.button_box)
-    assert not sa.isAncestorOf(dlg.button_box)
+    # 1) 结构：五个分类各有自己的滚动区，控件在对应页里，底部按钮不在任何滚动区
+    assert dlg.nav_list.count() == 5
+    assert dlg.stack.count() == 5
+    for key, page in dlg.page_widgets.items():
+        scroll = dlg.page_scrolls[key]
+        assert page.isAncestorOf(scroll), key
+        assert scroll.widget() is not None, key
+        assert not scroll.isAncestorOf(dlg.button_box), key
+    assert dlg.page_scrolls["display"].widget().isAncestorOf(dlg.ratio_combo)
+    assert dlg.page_scrolls["display"].widget().isAncestorOf(dlg.layer_outline_check)
+    assert dlg.page_scrolls["task"].widget().isAncestorOf(dlg.memory_policy_combo)
+    assert dlg.page_scrolls["report"].widget().isAncestorOf(dlg.report_options_check)
+    assert dlg.page_scrolls["shortcut"].widget().isAncestorOf(dlg.kb_button)
 
-    # 2) 小屏可用：可缩到 480px 以内，且内容溢出时出现滚动条
+    # 2) 小屏可用：最小尺寸下按钮完整可见
     assert dlg.minimumSizeHint().height() < 480, dlg.minimumSizeHint()
-    assert dlg.height() == 480, dlg.size()
-    vbar = sa.verticalScrollBar()
-    assert vbar.maximum() > 0, "内容高于视口时应有滚动条"
-    assert dlg.button_box.geometry().bottom() <= dlg.height() + 1
-    dlg.resize(560, 380)
-    app.processEvents()
-    assert dlg.height() == 380, dlg.size()
     assert dlg.button_box.geometry().bottom() <= dlg.height() + 1
 
-    # 3) 滚到底部：最后一组（快捷键与滚轮）可达
+    # 3) 再矮于最小尺寸（极端小屏，仅测试用）：按钮仍不跑出窗口，内容只在分类页内滚
+    dlg.setMinimumSize(0, 0)
+    dlg.resize(640, 300)
+    app.processEvents()
+    vbar = dlg.page_scrolls["display"].verticalScrollBar()
+    assert vbar.maximum() > 0, "内容高于视口时分类页内应有滚动条"
+    assert dlg.button_box.geometry().bottom() <= dlg.height() + 1
     vbar.setValue(vbar.maximum())
     app.processEvents()
-    vp = sa.viewport()
-    assert 0 <= dlg.wheel_mode_combo.mapTo(vp, QPoint(0, 0)).y() < vp.height()
+    vp = dlg.page_scrolls["display"].viewport()
+    assert 0 <= dlg.layer_outline_check.mapTo(vp, QPoint(0, 0)).y() < vp.height()
 
     # 4) 下拉框不响应滚轮：聚焦与否都不改值（原生 QComboBox 会直接改值）
     def wheel_event(dy: int = -120) -> QWheelEvent:
@@ -2045,7 +2047,7 @@ def test_settings_dialog_scroll_area() -> None:
     dlg.close()
     app.processEvents()
 
-    print("PASS test_settings_dialog_scroll_area")
+    print("PASS test_settings_dialog_sidebar_layout")
 
 
 def test_no_wheel_combo_app_wide() -> None:
