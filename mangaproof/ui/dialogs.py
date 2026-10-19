@@ -9,10 +9,10 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QTextEdit,
@@ -27,7 +27,7 @@ from mangaproof.config.settings import (
 )
 from mangaproof.review.issue import Issue
 from mangaproof.ui.theme import COLOR_PASS, COLOR_TEXT_DIM, COLOR_WARN
-from mangaproof.ui.widgets import NoWheelComboBox
+from mangaproof.ui.widgets import NoWheelComboBox, ToggleSwitch
 
 
 class _CommentEdit(QTextEdit):
@@ -199,11 +199,60 @@ class IssueDialog(QDialog):
         return str(self.type_combo.currentData()), self.comment_edit.toPlainText().strip()
 
 
+#: 返修单选项窗口的行距（对齐设置页 docs/设置页设计规范.md 的 ROW_SPACING=16）。
+#: 横向保持 QFormLayout 默认的 6：文字贴着控件，才和 16px 的竖向行距拉开层次
+#: （原先两者都是 6，「文字→控件」和「控件→控件」看起来一样宽）。
+_ROW_SPACING = 16
+_ROW_FIELD_GAP = 6
+
+
+class _SwitchRow(QWidget):
+    """一行「文本 + 胶囊开关」：文本在标签列起点，开关贴字段列右缘。
+
+    这个窗口用 QFormLayout 排（标签列 / 字段列由表单统一），所以只需要一个
+    **跨两列**的行：文本自然落在其余行标签的左缘，开关被 stretch 推到表单
+    右缘——也就是输入框 / 下拉框的右缘。没有直接复用
+    :class:`mangaproof.ui.settings_dialog.SettingsRow`：那个类绑定设置页的
+    页级 QVBoxLayout 与字段列对齐，搬过来反而多一层模块耦合。
+    """
+
+    def __init__(self, text: str, control: QWidget, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.label = QLabel(text)
+        # 复用设置页行文本的 objectName：控件禁用时文字一起置灰（theme.py）
+        self.label.setObjectName("settingsRowLabel")
+        self.control = control
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        row.addWidget(
+            self.label, 0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+        row.addStretch(1)
+        row.addWidget(
+            self.control, 0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        if isinstance(control, ToggleSwitch):
+            # 开关本身没有文字，读屏软件用的是行文本
+            control.setAccessibleName(text)
+        if control.toolTip():
+            self.label.setToolTip(control.toolTip())
+
+
 class ReportDialog(QDialog):
     """返修单生成（需求 §46、§49、§54）。
 
     除名称外，可在生成时选择页面图像是否压缩（PNG 无损 / JPEG 压缩）、
     JPEG 质量与总览表是否隐藏无问题 PSD，选择结果由主窗口记回设置，下次沿用。
+
+    「总览表隐藏无问题 PSD」用设置页同款胶囊开关（:class:`ToggleSwitch`）：
+    文案与其余行标签同列、胶囊右缘与输入框 / 下拉框同线；行距按设置页的
+    16px，开关行抬到与输入行同高，四行文本节距才一致（见模块常量
+    ``_ROW_SPACING`` 与 ``_SwitchRow``）。
 
     手动（Ctrl+R）与「全部图层完成」后的自动生成共用这一个窗口，是否弹出
     由设置 `report_show_options` 控制（需求 §86）。
@@ -226,6 +275,9 @@ class ReportDialog(QDialog):
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        # 行距按设置页加大到 16；横向保持 6（文字贴着控件，见模块常量）
+        form.setVerticalSpacing(_ROW_SPACING)
+        form.setHorizontalSpacing(_ROW_FIELD_GAP)
         self.name_edit = QLineEdit(default_name)
         form.addRow("返修单名称：", self.name_edit)
 
@@ -252,14 +304,30 @@ class ReportDialog(QDialog):
         self.image_format_combo.currentIndexChanged.connect(self._sync_quality_enabled)
         self._sync_quality_enabled()
 
-        self.hide_clean_check = QCheckBox("总览表隐藏无问题的 PSD（全部图层通过）")
+        self.hide_clean_check = ToggleSwitch()
         self.hide_clean_check.setChecked(bool(hide_clean_files))
         self.hide_clean_check.setToolTip(
-            "勾选后，返修单的「PSD 总览」表只列出有问题或未完成的 PSD，\n"
+            "开启后，返修单的「PSD 总览」表只列出有问题或未完成的 PSD，\n"
             "全部通过且无问题的页会被隐藏（表下注明隐藏数量），报告更聚焦；\n"
             "未通过、未监制的 PSD 始终保留。"
         )
-        form.addRow(self.hide_clean_check)
+        self.hide_clean_row = _SwitchRow(
+            "总览表隐藏无问题的 PSD（全部图层通过）", self.hide_clean_check
+        )
+        form.addRow(self.hide_clean_row)
+        # 开关行与上面三行同高：胶囊只有 20px，按自然高度排版会把末行文本中心
+        # 到上一行的节距从 46 压到 41。高度取输入控件的实际 sizeHint（先 polish，
+        # 样式表的 padding 才进 sizeHint），换字体 / 缩放时自动跟随，不写死像素。
+        field_widgets = (
+            self.name_edit,
+            self.image_format_combo,
+            self.quality_combo,
+        )
+        for field_widget in field_widgets:
+            field_widget.ensurePolished()
+        self.hide_clean_row.setMinimumHeight(
+            max(widget.sizeHint().height() for widget in field_widgets)
+        )
         layout.addLayout(form)
 
         # 顶部状态行。completed：本次是「全部图层已检查完成」触发的生成——
@@ -279,7 +347,10 @@ class ReportDialog(QDialog):
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        # 程序没装 Qt 翻译，标准按钮默认是英文；这里是全中文界面，显式改中文
+        # （与设置页、关于页、第三方许可页的做法一致）
         self.button_box.button(QDialogButtonBox.StandardButton.Ok).setText("生成")
+        self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)

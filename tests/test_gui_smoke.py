@@ -1282,11 +1282,11 @@ def test_settings_keybindings_subdialog() -> None:
 
 
 def test_report_dialog_hide_clean_option() -> None:
-    """生成对话框：总览隐藏干净页默认勾选；改选后写回设置并持久化。"""
+    """生成对话框：总览隐藏干净页默认开启；改选后写回设置并持久化。"""
     from mangaproof.config.settings import Settings
     from mangaproof.ui.dialogs import ReportDialog
 
-    assert Settings().report_hide_clean_files is True, "默认勾选"
+    assert Settings().report_hide_clean_files is True, "默认开启"
     dialog = ReportDialog("n", "task", False, None, hide_clean_files=True)
     assert dialog.hide_clean_files() is True
     dialog.hide_clean_check.setChecked(False)
