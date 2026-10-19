@@ -224,7 +224,7 @@ def _encode_page_image(
     """numpy RGBA → 白底合成 → 图片字节（PNG 无损 / JPEG 压缩）。
 
     JPEG 体积远小于 PNG（漫画页面常见大幅网点/渐变），代价是有损压缩：
-    质量由 ``quality`` 控制（60～95）。透明区域统一合成到白底，
+    质量由 ``quality`` 控制（40～95）。透明区域统一合成到白底，
     与 PDF 页面背景一致。
     """
     pil = Image.fromarray(img)
@@ -296,7 +296,7 @@ def generate_report(
     progress_cb(done, total, message)：页面级进度（耗时步骤见下），
     回调内抛出 ReportCancelled 可中断生成；
     image_format："png"（无损，默认）或 "jpeg"（有损压缩，体积小），
-    image_quality：JPEG 质量 60～95；
+    image_quality：JPEG 质量 40～95；
     hide_clean_files：PSD 总览表是否隐藏「全部通过且无问题」的页（默认隐藏，
     表下会注明隐藏数量；未通过 / 未监制的页始终保留）。
 

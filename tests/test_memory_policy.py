@@ -240,3 +240,33 @@ def test_settings_report_hide_clean_files(tmp_path):
     assert SettingsManager(path).settings.report_hide_clean_files is False
     path.write_text(json.dumps({"settings_version": 1}), encoding="utf-8")
     assert SettingsManager(path).settings.report_hide_clean_files is True
+
+
+def test_settings_jpeg_quality_tiers(tmp_path):
+    """JPEG 质量档位 40～95：只接受档位值，区间内非档位 / 区间外都回落默认 80。"""
+    from mangaproof.config.settings import (
+        DEFAULT_JPEG_QUALITY,
+        JPEG_QUALITY_CHOICES,
+    )
+
+    assert JPEG_QUALITY_CHOICES == (40, 50, 60, 70, 80, 90, 95)
+    assert DEFAULT_JPEG_QUALITY == 80
+
+    path = tmp_path / "settings.json"
+    for quality in JPEG_QUALITY_CHOICES:
+        path.write_text(
+            json.dumps({"settings_version": 1, "report_jpeg_quality": quality}),
+            encoding="utf-8",
+        )
+        assert SettingsManager(path).settings.report_jpeg_quality == quality
+
+    # 39 / 96 出区间；55 在区间内但不是档位 → 一律默认 80
+    for quality in (39, 55, 96):
+        path.write_text(
+            json.dumps({"settings_version": 1, "report_jpeg_quality": quality}),
+            encoding="utf-8",
+        )
+        assert (
+            SettingsManager(path).settings.report_jpeg_quality
+            == DEFAULT_JPEG_QUALITY
+        ), quality

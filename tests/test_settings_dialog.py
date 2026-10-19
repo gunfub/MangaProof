@@ -391,6 +391,33 @@ def test_disabled_control_greys_its_row_label(qapp):
         dlg.deleteLater()
 
 
+def test_report_quality_combo_offers_low_tiers(qapp):
+    """JPEG 质量档位扩到 40～95：新档只有数值，80 保留默认标记。"""
+    dlg = _dialog()
+    try:
+        combo = dlg.report_quality_combo
+        assert [combo.itemText(i) for i in range(combo.count())] == [
+            "40%", "50%", "60%", "70%", "80%（默认）", "90%", "95%",
+        ]
+        combo.setCurrentIndex(combo.findData(40))
+        out = Settings()
+        dlg.apply_to(out)
+        assert out.report_jpeg_quality == 40
+    finally:
+        dlg.deleteLater()
+
+
+def test_report_quality_combo_falls_back_to_default(qapp):
+    """直接构造的非档位值（55）在下拉框里回落默认 80，不显示成 40。"""
+    settings = Settings()
+    settings.report_jpeg_quality = 55
+    dlg = SettingsDialog(settings)
+    try:
+        assert dlg.report_quality_combo.currentData() == 80
+    finally:
+        dlg.deleteLater()
+
+
 def test_field_column_aligns_to_shortest_combo(qapp):
     """同一页的下拉/输入框左缘统一，且 = 本页最长行文本 + 间距。"""
     dlg = _dialog()

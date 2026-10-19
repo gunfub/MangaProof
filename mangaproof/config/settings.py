@@ -231,7 +231,8 @@ DEFAULT_CONTINUOUS_ANNOTATION = False
 # - "jpeg"：有损压缩，体积显著变小（漫画页面常见网点/渐变），质量可调。
 REPORT_IMAGE_FORMATS: tuple[str, ...] = ("png", "jpeg")
 DEFAULT_REPORT_IMAGE_FORMAT = "png"
-JPEG_QUALITY_CHOICES: tuple[int, ...] = (60, 70, 80, 90, 95)
+# 质量档位（40～95）：40/50 体积最小、画质损失也更明显；80 为默认。
+JPEG_QUALITY_CHOICES: tuple[int, ...] = (40, 50, 60, 70, 80, 90, 95)
 DEFAULT_JPEG_QUALITY = 80
 
 # ---------------------------------------------------------------------------
@@ -953,7 +954,9 @@ class SettingsManager:
             quality = int(raw.get("report_jpeg_quality", DEFAULT_JPEG_QUALITY))
         except (TypeError, ValueError):
             quality = DEFAULT_JPEG_QUALITY
-        if not (60 <= quality <= 95):
+        # 只接受界面上的档位（40～95）：区间外、或区间内但不在档位上（如手改的 55）
+        # 一律回落到默认 80，避免下拉框显示值与存储值不一致。
+        if quality not in JPEG_QUALITY_CHOICES:
             quality = DEFAULT_JPEG_QUALITY
         s.report_jpeg_quality = quality
         s.report_hide_clean_files = bool(raw.get("report_hide_clean_files", True))

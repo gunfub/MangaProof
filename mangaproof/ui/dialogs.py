@@ -298,6 +298,9 @@ class ReportDialog(QDialog):
         for q in JPEG_QUALITY_CHOICES:
             self.quality_combo.addItem(f"{q}%" + ("（默认）" if q == DEFAULT_JPEG_QUALITY else ""), q)
         q_idx = self.quality_combo.findData(jpeg_quality)
+        if q_idx < 0:
+            # 非档位值（settings 加载时已回落；这里兜底直接构造的调用方）
+            q_idx = self.quality_combo.findData(DEFAULT_JPEG_QUALITY)
         self.quality_combo.setCurrentIndex(max(0, q_idx))
         self.quality_combo.setToolTip("仅 JPEG 压缩时生效：质量越低体积越小")
         form.addRow("JPEG 质量：", self.quality_combo)

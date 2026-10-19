@@ -239,3 +239,41 @@ def test_status_note_keeps_semantic_color_and_stays_separate(qapp):
         assert COLOR_PASS in done.note_label.styleSheet()
     finally:
         _close(done)
+
+
+# --------------------------------------------------------------------------- #
+# ⑥ JPEG 质量档位：新增 40/50，非档位值回落默认 80
+# --------------------------------------------------------------------------- #
+
+
+def test_jpeg_quality_combo_offers_low_tiers(qapp):
+    dialog = _dialog(qapp)
+    try:
+        combo = dialog.quality_combo
+        assert [combo.itemText(i) for i in range(combo.count())] == [
+            "40%", "50%", "60%", "70%", "80%（默认）", "90%", "95%",
+        ]
+        assert dialog.jpeg_quality() == 80
+        combo.setCurrentIndex(combo.findData(40))
+        assert dialog.jpeg_quality() == 40
+    finally:
+        _close(dialog)
+
+
+def test_jpeg_quality_prefill_and_fallback(qapp):
+    dialog = ReportDialog("n", "task", False, None, jpeg_quality=50)
+    dialog.show()
+    qapp.processEvents()
+    try:
+        assert dialog.jpeg_quality() == 50, "新档位应能预选"
+    finally:
+        _close(dialog)
+
+    # 非档位值（调用方直接传 55）静默回落默认 80，不落到第一项 40
+    dialog = ReportDialog("n", "task", False, None, jpeg_quality=55)
+    dialog.show()
+    qapp.processEvents()
+    try:
+        assert dialog.jpeg_quality() == 80
+    finally:
+        _close(dialog)

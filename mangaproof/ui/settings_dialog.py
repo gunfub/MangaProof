@@ -898,6 +898,9 @@ class SettingsDialog(QDialog):
                 f"{q}%" + ("（默认）" if q == DEFAULT_JPEG_QUALITY else ""), q
             )
         q_idx = self.report_quality_combo.findData(self._settings.report_jpeg_quality)
+        if q_idx < 0:
+            # 非档位值（settings 加载时已回落；这里兜底直接构造的 Settings）
+            q_idx = self.report_quality_combo.findData(DEFAULT_JPEG_QUALITY)
         self.report_quality_combo.setCurrentIndex(max(0, q_idx))
         self.report_quality_combo.setToolTip("仅 JPEG 压缩时生效：质量越低体积越小")
         self._add_row(rows, "JPEG 质量：", self.report_quality_combo, expand=True)
