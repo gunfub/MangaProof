@@ -18,6 +18,9 @@
 - 一切按**统一基线 GUTTER=24** 排：控件右缘距窗口右缘 24、左侧侧边栏与「恢复默认」
   距窗口左缘 24、侧边栏到内容文本 24、上下留白 24；底部「确定 / 取消」的右缘也
   压在控件右缘这条线上；
+- 页头（标题 + 灰色说明 + 1px 分割线）**固定不动**，设置项在它下面的滚动区里：
+  内容不超高时滚动条隐藏、控件右缘压在基线上；需要滚动时滚动条出现在最右
+  （右缘与「确定 / 取消」对齐），控件右缘让到滚动条左侧 SCROLL_GAP=6px；
 - 开关统一用 ToggleSwitch（胶囊形、点一下就切换，见 ui/widgets.py），不再用方块勾选框；
 - 控件被禁用时（如手动对比下的「切换速度」、PNG 下的「JPEG 质量」），**该行文本
   跟随置灰**——由 SettingsRow 的事件过滤统一处理，新增设置项不用再单独写；
@@ -117,6 +120,9 @@ PAGES: Dict[str, tuple[str, str]] = {
 
 #: 统一留白基线：控件右缘距窗口右缘、左侧标题/侧边栏/底部按钮的留白都取它
 GUTTER = 24
+
+#: 滚动条出现时，控件右缘与滚动条左侧的间隙（不滚动时控件回到基线，不留这段）
+SCROLL_GAP = 6
 
 #: 侧边栏宽度（固定）：15px 粗体下最长项「MangaProof 返修单」实宽 135px，180 够用
 NAV_WIDTH = 180
@@ -398,11 +404,14 @@ class SettingsDialog(QDialog):
         self._kb_dialog: Optional[KeybindingsDialog] = None
         self._kb_reset_defaults = False
 
-        #: 分类键（见模块级 PAGES）-> 页面控件 / 行容器 / 滚动区 / 页头标题
+        #: 分类键（见模块级 PAGES）-> 页面控件 / 行容器 / 滚动区 / 表头部件
         self.page_widgets: Dict[str, QWidget] = {}
         self.page_rows: Dict[str, QVBoxLayout] = {}
         self.page_scrolls: Dict[str, QScrollArea] = {}
         self.page_titles: Dict[str, QLabel] = {}
+        self.page_hints: Dict[str, QLabel] = {}
+        self.page_dividers: Dict[str, QFrame] = {}
+        self.page_contents: Dict[str, QWidget] = {}
 
         layout = QVBoxLayout(self)
         # 四边留白统一用基线值：左侧与右缘（控件基线到窗口边）对称
@@ -530,7 +539,7 @@ class SettingsDialog(QDialog):
         page_layout = QVBoxLayout(page)
         # 与侧边栏第一项的文字顶端对齐：下沉「列表边框 1px + 列表内边距」
         page_layout.setContentsMargins(0, 1 + NAV_PADDING, 0, 0)
-        page_layout.setSpacing(2)
+        page_layout.setSpacing(0)      # 页头三段的距离全部显式给，便于精确控制
 
         title_label = QLabel(title)
         title_label.setObjectName("settingsPageTitle")
@@ -541,6 +550,7 @@ class SettingsDialog(QDialog):
         # 与侧边栏项同高：两边文字都在各自的盒子里垂直居中，文字顶端自然对齐
         title_label.setFixedHeight(self._nav_row_height)
         page_layout.addWidget(title_label)
+        page_layout.addSpacing(2)
         self.page_titles[key] = title_label
 
         hint_label = QLabel(hint)
@@ -548,6 +558,18 @@ class SettingsDialog(QDialog):
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
         page_layout.addWidget(hint_label)
+        self.page_hints[key] = hint_label
+
+        # 分割线：说明与设置项之间，上下留空都取设置项行距（ROW_SPACING）。
+        # 它属于固定页头——滚动区在它下面，翻页时标题/说明/分割线都不动。
+        page_layout.addSpacing(ROW_SPACING)
+        divider = QFrame()
+        divider.setObjectName("settingsDivider")
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background: {COLOR_BORDER}; border: none;")
+        page_layout.addWidget(divider)
+        page_layout.addSpacing(ROW_SPACING)
+        self.page_dividers[key] = divider
 
         # 每页自己的滚动区：内容再长也只滚这一页，底部按钮始终在滚动区外
         scroll = QScrollArea()
@@ -557,8 +579,8 @@ class SettingsDialog(QDialog):
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        # 右侧不留边距：控件右缘直接压基线（滚动条出现时才会整体左移 12px）
-        content_layout.setContentsMargins(0, 8, 0, 14)
+        # 顶部不再留白（页头下方的 16px 已经给了）；右侧间隙由滚动条显示时动态补
+        content_layout.setContentsMargins(0, 0, 0, 14)
         content_layout.setSpacing(0)
 
         # 设置项一行一个（SettingsRow）：文本统一左对齐、控件统一右对齐。
@@ -570,10 +592,13 @@ class SettingsDialog(QDialog):
         scroll.setWidget(content)
         page_layout.addWidget(scroll, 1)
 
+        # 滚动条显示/隐藏时同步内容右侧间隙（见 eventFilter）
+        scroll.verticalScrollBar().installEventFilter(self)
         self.stack.addWidget(page)
         self.page_widgets[key] = page
         self.page_rows[key] = rows
         self.page_scrolls[key] = scroll
+        self.page_contents[key] = content
         return rows
 
     def _add_row(
@@ -615,6 +640,32 @@ class SettingsDialog(QDialog):
         column = max(row.label.sizeHint().width() for row in fill_rows)
         for row in fill_rows:
             row.label.setMinimumWidth(column)
+
+    def eventFilter(self, obj, event) -> bool:   # noqa: N802（Qt 命名）
+        """滚动条显示/隐藏 → 同步该页内容的右侧间隙。
+
+        有滚动条时控件右缘让到滚动条左侧 6px；没有滚动条时收回这 6px，
+        控件右缘继续压在基线上（与底部「确定 / 取消」同一条线）。
+        """
+        if event.type() in (QEvent.Type.Show, QEvent.Type.Hide):
+            for key, scroll in self.page_scrolls.items():
+                if scroll.verticalScrollBar() is obj:
+                    self._set_content_gap(
+                        key,
+                        SCROLL_GAP if event.type() == QEvent.Type.Show else 0,
+                    )
+                    break
+        return super().eventFilter(obj, event)
+
+    def _set_content_gap(self, key: str, gap: int) -> None:
+        """把某页内容容器的右侧内边距设为 gap（0 = 收回基线）。"""
+        content = self.page_contents[key]
+        margins = content.layout().contentsMargins()
+        if margins.right() == gap:
+            return
+        content.layout().setContentsMargins(
+            margins.left(), margins.top(), gap, margins.bottom()
+        )
 
     def _on_nav_changed(self, row: int) -> None:
         """侧边栏切换：只切显示，不重建控件（见模块 docstring 的说明）。"""

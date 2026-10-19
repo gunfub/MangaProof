@@ -48,6 +48,7 @@ from mangaproof.ui.settings_dialog import (
     PAGES,
     ROW_LABEL_GAP,
     ROW_SPACING,
+    SCROLL_GAP,
     KeybindingsDialog,
     SettingsDialog,
     SettingsRow,
@@ -398,6 +399,102 @@ def test_field_column_aligns_to_shortest_combo(qapp):
             assert len(xs) == 1, (key, xs)
             widest = max(row.label.sizeHint().width() for row in rows)
             assert xs.pop() == widest + ROW_LABEL_GAP, key
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def _right(widget, ref) -> int:
+    """控件右缘在 ref 坐标系里的 x（右缘是开区间，所以正好等于基线值）。"""
+    return widget.mapTo(ref, QPoint(widget.width(), 0)).x()
+
+
+def test_divider_between_hint_and_rows(qapp):
+    """说明与设置项之间有一条 1px 分割线，上下留空都等于设置项行距。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        for key in _KEYS:
+            _go(dlg, key)
+            qapp.processEvents()
+            hint = dlg.page_hints[key]
+            divider = dlg.page_dividers[key]
+            scroll = dlg.page_scrolls[key]
+            assert divider.height() == 1, key
+            above = divider.mapTo(dlg, QPoint(0, 0)).y() - (
+                hint.mapTo(dlg, QPoint(0, 0)).y() + hint.height()
+            )
+            below = scroll.mapTo(dlg, QPoint(0, 0)).y() - (
+                divider.mapTo(dlg, QPoint(0, 0)).y() + divider.height()
+            )
+            assert above == ROW_SPACING, (key, above)
+            assert below == ROW_SPACING, (key, below)
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_header_stays_fixed_while_scrolling(qapp):
+    """标题 / 说明 / 分割线在滚动时不动（它们在滚动区之外）。"""
+    dlg = _dialog()
+    dlg.setMinimumSize(0, 0)
+    dlg.show()
+    dlg.resize(720, 300)
+    qapp.processEvents()
+    qapp.processEvents()
+    try:
+        _go(dlg, "display")
+        qapp.processEvents()
+        fixeds = [
+            dlg.page_titles["display"],
+            dlg.page_hints["display"],
+            dlg.page_dividers["display"],
+        ]
+        before = [w.mapTo(dlg, QPoint(0, 0)).y() for w in fixeds]
+        bar = dlg.page_scrolls["display"].verticalScrollBar()
+        assert bar.maximum() > 0, "压矮后应可滚动"
+        bar.setValue(bar.maximum())
+        qapp.processEvents()
+        after = [w.mapTo(dlg, QPoint(0, 0)).y() for w in fixeds]
+        assert after == before
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_scrollbar_sits_on_baseline_and_controls_keep_gap(qapp):
+    """滚动条右缘压基线；控件右缘让到滚动条左侧 SCROLL_GAP；无滚动条时回基线。"""
+    dlg = _dialog()
+    dlg.setMinimumSize(0, 0)
+    dlg.show()
+    qapp.processEvents()
+    try:
+        _go(dlg, "display")
+        qapp.processEvents()
+        scroll = dlg.page_scrolls["display"]
+        bar = scroll.verticalScrollBar()
+
+        # 1) 不滚动：滚动条隐藏，控件压基线
+        assert not bar.isVisible()
+        assert _right(dlg.ratio_combo, dlg) == dlg.width() - GUTTER
+
+        # 2) 压矮：滚动条出现在最右（右缘 = 基线），控件让出 6px
+        dlg.resize(720, 300)
+        qapp.processEvents()
+        qapp.processEvents()
+        assert bar.isVisible()
+        baseline = dlg.width() - GUTTER
+        assert _right(bar, dlg) == baseline
+        assert _right(dlg.ratio_combo, dlg) == _right(bar, dlg) - SCROLL_GAP - bar.width()
+        assert bar.mapTo(dlg, QPoint(0, 0)).x() - _right(dlg.ratio_combo, dlg) == SCROLL_GAP
+
+        # 3) 恢复高度：滚动条隐藏，控件回到基线
+        dlg.resize(860, 560)
+        qapp.processEvents()
+        qapp.processEvents()
+        assert not bar.isVisible()
+        assert _right(dlg.ratio_combo, dlg) == dlg.width() - GUTTER
     finally:
         dlg.close()
         dlg.deleteLater()
