@@ -159,6 +159,8 @@ QScrollBar::handle:horizontal {{ background: {COLOR_BORDER}; border-radius: 5px;
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 QMessageBox {{ background-color: {COLOR_BG_MAIN}; }}
 QLabel#hintLabel {{ color: {COLOR_WARN}; }}
+/* 设置页每行的文本：控件被禁用时文本一起置灰（见 ui/settings_dialog.py 的 SettingsRow） */
+QLabel#settingsRowLabel:disabled {{ color: {COLOR_TEXT_DIM}; }}
 QToolTip {{ background-color: {COLOR_BG_PANEL}; color: {COLOR_TEXT}; border: 1px solid {COLOR_BORDER}; }}
 """
 

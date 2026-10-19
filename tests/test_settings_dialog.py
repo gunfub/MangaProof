@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QKeyEvent, QKeySequence, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QDialogButtonBox
 
 from mangaproof.config.settings import DEFAULT_WHEEL_MODE, Settings, SettingsManager
@@ -47,8 +48,9 @@ from mangaproof.ui.settings_dialog import (
     ROW_SPACING,
     KeybindingsDialog,
     SettingsDialog,
+    SettingsRow,
 )
-from mangaproof.ui.widgets import NoWheelComboBox
+from mangaproof.ui.widgets import NoWheelComboBox, ToggleSwitch
 
 #: 每个分类「有代表性」的一个控件：用来验证切页后右侧只有该页的设置
 _PAGE_WIDGETS = {
@@ -110,10 +112,10 @@ def test_sidebar_categories_match_pages(qapp):
         # 默认停在第一页
         assert dlg.nav_list.currentRow() == 0
         assert dlg.stack.currentIndex() == 0
-        # 每个分类键都有页面 / 表单 / 滚动区
+        # 每个分类键都有页面 / 行容器 / 滚动区
         for key in _KEYS:
             assert key in dlg.page_widgets
-            assert key in dlg.page_forms
+            assert key in dlg.page_rows
             assert key in dlg.page_scrolls
             assert dlg.page_widgets[key].isAncestorOf(dlg.page_scrolls[key])
     finally:
@@ -183,9 +185,128 @@ def test_rows_are_more_spacious_than_before(qapp):
     """同一分类内的设置项行距加大（原来 QFormLayout 默认约 6px）。"""
     dlg = _dialog()
     try:
-        for key, form in dlg.page_forms.items():
-            assert form.verticalSpacing() == ROW_SPACING, key
-            assert form.verticalSpacing() >= 12, key
+        for key, rows in dlg.page_rows.items():
+            assert rows.spacing() == ROW_SPACING, key
+            assert rows.spacing() >= 12, key
+    finally:
+        dlg.deleteLater()
+
+
+def _page_row_widgets(dlg: SettingsDialog, key: str) -> list[SettingsRow]:
+    """某分类页里的所有设置行（末尾的 stretch 不算）。"""
+    rows = dlg.page_rows[key]
+    widgets = [rows.itemAt(i).widget() for i in range(rows.count())]
+    return [w for w in widgets if w is not None]
+
+
+def test_row_layout_label_left_control_right(qapp):
+    """每行文本贴左、控件贴右；下拉框宽度取自身内容，只有右边缘对齐。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        combo_widths = set()
+        for key in _KEYS:
+            _go(dlg, key)      # 隐藏页不参与布局，切过去才有几何
+            qapp.processEvents()
+            rows = _page_row_widgets(dlg, key)
+            assert rows, key
+            assert len({row.width() for row in rows}) == 1, key
+            for row in rows:
+                assert isinstance(row, SettingsRow), key
+                assert row.label.geometry().x() == 0, (key, row.label.text())
+                assert row.control.geometry().right() == row.rect().right(), (
+                    key, row.label.text(),
+                )
+                if isinstance(row.control, NoWheelComboBox):
+                    combo_widths.add(row.control.width())
+                    assert row.control.width() == row.control.sizeHint().width()
+        # 下拉框宽度确实不止一种（宽度随内容，左边缘因此不齐）
+        assert len(combo_widths) >= 4, combo_widths
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_boolean_settings_are_pill_switches(qapp):
+    """7 个布尔设置全部是胶囊开关；文本在行标签上，开关本身不显示文字。"""
+    dlg = _dialog()
+    try:
+        attrs = (
+            "bg_ratio_check",
+            "layer_outline_check",
+            "recursive_check",
+            "console_check",
+            "pdf_check",
+            "report_options_check",
+            "report_hide_clean_check",
+        )
+        for attr in attrs:
+            widget = getattr(dlg, attr)
+            assert isinstance(widget, ToggleSwitch), attr
+            assert widget.text() == "", attr
+            row = widget.parentWidget()
+            assert isinstance(row, SettingsRow), attr
+            assert row.label.text(), attr
+            assert widget.accessibleName() == row.label.text(), attr
+    finally:
+        dlg.deleteLater()
+
+
+def test_clicking_switch_row_updates_setting(qapp):
+    """点行最右边的开关 → 状态改变，确定后写回该设置。"""
+    dlg = _dialog()
+    dlg.show()
+    qapp.processEvents()
+    try:
+        _go(dlg, "display")
+        before = dlg.layer_outline_check.isChecked()
+        QTest.mouseClick(
+            dlg.layer_outline_check,
+            Qt.MouseButton.LeftButton,
+            pos=dlg.layer_outline_check.rect().center(),
+        )
+        assert dlg.layer_outline_check.isChecked() is (not before)
+        out = Settings()
+        dlg.apply_to(out)
+        assert out.show_layer_outline is (not before)
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+
+
+def test_disabled_control_greys_its_row_label(qapp):
+    """控件置灰时，该行文本跟着置灰（不能只有下拉框是灰的）。"""
+    dlg = _dialog()
+    try:
+        def row_of(control) -> SettingsRow:
+            row = control.parentWidget()
+            assert isinstance(row, SettingsRow)
+            return row
+
+        # JPEG 质量：默认 PNG → 整行置灰；切到 JPEG 恢复
+        assert not dlg.report_quality_combo.isEnabled()
+        assert not row_of(dlg.report_quality_combo).label.isEnabled()
+        dlg.report_image_combo.setCurrentIndex(
+            dlg.report_image_combo.findData("jpeg")
+        )
+        assert dlg.report_quality_combo.isEnabled()
+        assert row_of(dlg.report_quality_combo).label.isEnabled()
+
+        # bg 独立比例：默认关 → 两个比例行整行置灰；打开开关即恢复
+        assert not dlg.bg_ratio_combo.isEnabled()
+        assert not row_of(dlg.bg_ratio_combo).label.isEnabled()
+        assert not row_of(dlg.bg_copy_ratio_combo).label.isEnabled()
+        dlg.bg_ratio_check.setChecked(True)
+        assert row_of(dlg.bg_ratio_combo).label.isEnabled()
+        assert row_of(dlg.bg_copy_ratio_combo).label.isEnabled()
+
+        # 手动对比 → 切换速度整行置灰
+        dlg.compare_mode_combo.setCurrentIndex(
+            dlg.compare_mode_combo.findData("manual")
+        )
+        assert not dlg.compare_speed_combo.isEnabled()
+        assert not row_of(dlg.compare_speed_combo).label.isEnabled()
     finally:
         dlg.deleteLater()
 
