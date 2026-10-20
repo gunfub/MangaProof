@@ -994,11 +994,127 @@ def test_proxy_row_aligns_with_other_rows(dialog):
     assert proxy_right < btn_left, "输入框与按钮不能重叠"
 
     form = _form_layout(dlg)
-    # 「代理」两个字与 CDK 标签同为右对齐，右边界必须齐平
+    # 文本统一左对齐（规范 §4）：两行标签左缘必须齐平
     proxy_label = form.labelForField(dlg.proxy_edit.parentWidget())
     cdk_label = form.labelForField(dlg.cdk_edit)
     assert proxy_label is not None and cdk_label is not None
-    assert _box(dlg, proxy_label)[1] == _box(dlg, cdk_label)[1]
+    assert _box(dlg, proxy_label)[0] == _box(dlg, cdk_label)[0]
+
+
+# -- 版式：对齐 docs/设置页设计规范.md 的简化形态（2026-10-20） ----------------
+
+def _row_widgets(dlg) -> list:
+    """按行序取每行的字段控件（与 _form_labels 同序）。"""
+    from PySide6.QtWidgets import QFormLayout
+
+    form = _form_layout(dlg)
+    return [
+        form.itemAt(r, QFormLayout.ItemRole.FieldRole).widget()
+        for r in range(form.rowCount())
+    ]
+
+
+def _row_label_widgets(dlg) -> list:
+    from PySide6.QtWidgets import QFormLayout
+
+    form = _form_layout(dlg)
+    return [
+        form.itemAt(r, QFormLayout.ItemRole.LabelRole).widget()
+        for r in range(form.rowCount())
+    ]
+
+
+def test_form_spacing_matches_settings_spec(dialog):
+    """行距 16、横向 6（简化形态的落地值，见 ReportDialog 的 _ROW_SPACING）。"""
+    dlg, _ = dialog
+    form = _form_layout(dlg)
+    assert form.verticalSpacing() == 16, "行距要按规范取 ROW_SPACING=16"
+    assert form.horizontalSpacing() == 6, "简化形态横向保持 6，文字才贴着控件"
+
+
+def test_labels_are_left_aligned_on_the_gutter(dialog):
+    """文本统一左对齐，且起点就是左留白基线（曾经右对齐，左缘参差不齐）。"""
+    dlg, _ = dialog
+    _laid_out(dlg)
+    lefts = {_box(dlg, label)[0] for label in _row_label_widgets(dlg)}
+    assert lefts == {16}, f"标签左缘应齐平在 GUTTER=16，实际 {sorted(lefts)}"
+
+
+def test_field_column_starts_after_the_widest_label(dialog):
+    """字段列 = 本页最长标签 + ROW_LABEL_GAP(6)，不写死数值。"""
+    dlg, _ = dialog
+    _laid_out(dlg)
+    labels = _row_label_widgets(dlg)
+    widest = max(labels, key=lambda label: label.width())
+    widest_left, widest_right = _box(dlg, widest)
+    field_left, _ = _box(dlg, dlg.cdk_edit)
+    assert widest.text() == "MirrorChyan CDK", "最长标签变了就要重算字段列"
+    assert field_left - widest_right == 6, "文本与控件之间固定 6px"
+    assert field_left > widest_left
+
+
+def test_all_controls_share_the_right_baseline(dialog):
+    """所有控件右缘压同一条线：窗口宽 − GUTTER。"""
+    dlg, _ = dialog
+    _laid_out(dlg)
+    baseline = dlg.width() - 16
+    for widget in _row_widgets(dlg):
+        assert _box(dlg, widget)[1] == baseline, f"{widget.__class__.__name__} 右缘没对齐"
+
+
+def test_divider_is_one_pixel_flat_line(dialog):
+    """分割线是 1px 实线（原来是用 Sunken HLine，实测渲染成 3px 凹槽）。"""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QFrame
+
+    from mangaproof.ui.theme import COLOR_BORDER
+
+    dlg, _ = dialog
+    _laid_out(dlg)
+    divider = dlg.findChild(QFrame, "updateDivider")
+    assert divider is not None
+    assert divider.frameShape() == QFrame.Shape.NoFrame
+    assert divider.height() == 1
+    # 颜色用像素判断（样式表生效时调色板不是最终呈现的颜色，见踩坑记录第 2 条）
+    image = divider.grab().toImage()
+    assert image.width() > 0
+    assert image.pixelColor(image.width() // 2, 0) == QColor(COLOR_BORDER)
+
+
+def test_description_is_dim_and_compact(dialog):
+    """灰色说明：1–2 行、dim 色、带申请链接（规范 §3 + 需求方决定）。"""
+    from mangaproof.ui.theme import COLOR_TEXT_DIM
+
+    dlg, _ = dialog
+    _laid_out(dlg)
+    assert COLOR_TEXT_DIM in dlg.hint_label.styleSheet()
+    text = dlg.hint_label.text()
+    assert text.count("<br>") <= 1, "说明最多两行（曾经是 4 行的一大段）"
+    # 高度兜底：4 行时实测 90px；两行约 38–46px（视布局是否刚走完一遍）
+    assert dlg.hint_label.height() < 70
+    assert GITHUB_TOKEN_URL in text
+    assert dlg.hint_label.openExternalLinks() is True
+
+
+def test_window_is_a_landscape_rectangle(dialog):
+    """窗口是横向长方形，且宽度不低于"提示行不折行"的下限（760）。"""
+    dlg, _ = dialog
+    _laid_out(dlg)
+    assert dlg.width() >= 760
+    ratio = dlg.width() / dlg.height()
+    assert 1.2 <= ratio <= 1.45, f"宽高比 {ratio:.2f} 跑偏了"
+
+
+def test_row_labels_grey_out_with_the_form(dialog):
+    """控件禁用时行文本一起置灰（规范 §6；颜色规则在 theme.py）。"""
+    dlg, _ = dialog
+    dlg._on_check_clicked()
+    assert all(not label.isEnabled() for label in dlg._row_labels), \
+        "检查中表单整体禁用，行文本也要跟着灰"
+
+    dlg._check_worker = None
+    _check(dlg, start=False)
+    assert all(label.isEnabled() for label in dlg._row_labels)
 
 
 def test_progress_bar_does_not_squeeze_form(dialog):

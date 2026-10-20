@@ -80,6 +80,17 @@
 视觉沿用现有 MangaProof 风格（需求 1.1.1）：不写死颜色、不自建样式表，
 对话框自动继承 ``ui/theme.py`` 的全局暗色主题；进度条用 ``QProgressBar``
 （检查阶段为不确定模式，需求 §31）。
+
+**版式**（2026-10-20）：按 ``docs/设置页设计规范.md`` 附录 A 的**简化形态**排版 ——
+本页是单分类、6 行、功能子对话框，所以省掉侧边栏与页头小标题，保留
+「灰色说明 + 1px 分割线 + 16px 行距 + 左对齐文本 + 统一右基线 + 置灰联动」。
+
+窗口 **840 × 635（宽高比 1.32）**，与"800 × 605"的原型同比例：
+
+- 高度 635 是**实际排版**的结果 —— 每行控件按 QSS 的自然高度 30px 排（旧版
+  605 是把行高从 30 压到 24 挤出来的，控件实际低于自己 minimumSizeHint）；
+- 宽度按同一个比例回算：635 × 1.32 ≈ 840。760 是"最长提示行不折行"的下限，
+  再窄提示就折行；860 以上字段列超过 700px 会显空，840 正好在中间。
 """
 
 from __future__ import annotations
@@ -119,6 +130,7 @@ from mangaproof.ui.update_worker import (
     UpdateCheckWorker,
     UpdateDownloadWorker,
 )
+from mangaproof.ui.theme import COLOR_BORDER, COLOR_TEXT_DIM
 from mangaproof.update import cdk_store
 from mangaproof.update.errors import UpdateError
 from mangaproof.update.humanize import human_size, human_speed
@@ -127,6 +139,31 @@ from mangaproof.utils.platform import is_android_strict, is_source_run
 from mangaproof.ui.widgets import NoWheelComboBox
 
 log = logging.getLogger("mangaproof.ui.update_dialog")
+
+# ---------------------------------------------------------------------------
+# 版式常量：对齐 docs/设置页设计规范.md（简化形态，见模块文档）
+# ---------------------------------------------------------------------------
+
+#: 窗口最小宽度（逻辑像素）。高度不写死，由内容算出（实测 635）。
+#: 比例沿用定稿原型 800 × 605 ≈ 1.32 → 840 × 635 ≈ 1.32。
+#: 760 是"最长提示行不折行"的下限；860 起字段列超过 700px 显得空。
+DIALOG_MIN_WIDTH = 840
+
+#: 四边内边距（规范要求左右相等；完整形态 24，小窗口按比例取 16）。
+GUTTER = 16
+
+#: 行距（规范 ROW_SPACING）。行高 30（QSS 自然高度）+ 16 = 46，与设置页同节距。
+ROW_SPACING = 16
+
+#: 文本 ↔ 控件间距。简化形态的落地值（见 dialogs.py 的 _ROW_FIELD_GAP）：
+#: 横向明显小于竖向，文字才"贴着"控件，而不是与行距糊成一片。
+ROW_LABEL_GAP = 6
+
+#: 块间距：表单→说明、进度条→按钮。
+BLOCK_GAP = 12
+
+#: 进度条之前的间距：它属于"输出区"的一部分，比块间距再紧一点。
+OUTPUT_GAP = 10
 
 #: 状态区固定高度（px）：内容超过就在这一块里滚动。
 #: 必须是**固定**高度而不是只设上限：Qt 在窗口大小不变的前提下重排布局，
@@ -200,8 +237,11 @@ SOURCE_RUN_HINT = (
 SOURCE_RUN_TOOLTIP = "源码运行不提供更新包下载：请在项目目录执行 git pull"
 
 #: GitHub Token 输入框的占位文案。
-#: 说清"只对 GitHub 渠道有意义"与"留空的代价"，避免用户以为它是必填项。
-GITHUB_TOKEN_PLACEHOLDER = "仅 GitHub Release 渠道需要；留空则匿名请求（易被限流）"
+#: 输入框为空时这段字就是唯一的说明，所以直接讲**用途**：绕过 IP 限速
+#: （匿名配额 60 次/小时，用尽即 403 —— 本机实测过），而不是先说"仅某渠道需要"。
+GITHUB_TOKEN_PLACEHOLDER = (
+    "绕过 GitHub API 的 IP 限速（匿名只有 60 次/小时，用尽会被拒绝）"
+)
 
 #: 申请 GitHub Token 的官方入口（细粒度令牌，勾 Contents: read 即可）。
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
@@ -239,7 +279,8 @@ class UpdateDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"{APP_NAME} 更新")
         self.setModal(True)
-        self.setMinimumWidth(560)
+        # 宽度按 docs/设置页设计规范.md 的简化形态定档（见模块文档的"版式"一节）
+        self.setMinimumWidth(DIALOG_MIN_WIDTH)
 
         self._settings = settings
         #: 是否源码运行：源码运行只允许「检查更新」，不提供更新包下载
@@ -277,11 +318,20 @@ class UpdateDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 12)
-        root.setSpacing(10)
+        # 四边同宽：规范只要求左右相等，但顶/底对称，窗口看起来才不"头重脚轻"。
+        root.setContentsMargins(GUTTER, GUTTER, GUTTER, GUTTER)
+        # 间距全部显式给：分割线上下按规范固定 ROW_SPACING，其余按层级 12/10 ——
+        # 统一 spacing 做不出这种层次（设置页的页面布局也是同一套做法）。
+        root.setSpacing(0)
 
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # 文本统一左对齐（规范 §4）：QFormLayout 会自动把字段列算成
+        # "本页最长标签 + ROW_LABEL_GAP"，于是所有控件左缘一致、右缘压基线。
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setVerticalSpacing(ROW_SPACING)
+        form.setHorizontalSpacing(ROW_LABEL_GAP)
         # 字段列一律吃掉剩余宽度：显式声明，避免 macOS 等平台默认策略把控件
         # 留在 sizeHint 宽度上（那样右边就与其他行对不齐了）
         form.setFieldGrowthPolicy(
@@ -289,20 +339,23 @@ class UpdateDialog(QDialog):
         )
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
 
+        #: 各行左侧文本：``_set_form_enabled()`` 里要与控件一起置灰
+        self._row_labels: list[QLabel] = []
+
         self.branch_combo = NoWheelComboBox()
         for value in UPDATE_BRANCHES:
             self.branch_combo.addItem(BRANCH_LABELS.get(value, value), value)
-        form.addRow("更新分支", self.branch_combo)
+        self._add_row(form, "更新分支", self.branch_combo)
 
         self.channel_combo = NoWheelComboBox()
         for value in UPDATE_CHANNELS:
             self.channel_combo.addItem(CHANNEL_LABELS.get(value, value), value)
-        form.addRow("更新渠道", self.channel_combo)
+        self._add_row(form, "更新渠道", self.channel_combo)
 
         self.cdk_edit = QLineEdit()
         self.cdk_edit.setPlaceholderText("仅 MirrorChyan 渠道需要；留空则只能走 R2 / GitHub")
         self.cdk_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("MirrorChyan CDK", self.cdk_edit)
+        self._add_row(form, "MirrorChyan CDK", self.cdk_edit)
 
         # GitHub Token（2026-10-20）：与 CDK 并排放在一起——两者都是凭据，
         # 都是"改完不立即生效、点动作按钮才落盘"。Password 回显同为防肩窥。
@@ -313,9 +366,10 @@ class UpdateDialog(QDialog):
         self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_edit.setToolTip(
             "GitHub 的匿名 API 配额是 60 次/小时/IP，用尽后下载会失败。\n"
-            f"填写后只用于 api.github.com 的接口请求。申请：{GITHUB_TOKEN_URL}"
+            "填写后只用于 api.github.com 的接口请求，不会随更新包下载发出。\n"
+            f"申请（细粒度令牌，勾 Contents: read）：{GITHUB_TOKEN_URL}"
         )
-        form.addRow("GitHub Token", self.token_edit)
+        self._add_row(form, "GitHub Token", self.token_edit)
 
         # 「代理」行 = 输入框 + 测试按钮，两者贴齐字段列的两端。
         # 复合控件默认带一圈内容边距、且默认按 sizeHint 摆放（不跟着列宽伸展），
@@ -331,14 +385,15 @@ class UpdateDialog(QDialog):
             max(self.proxy_test_btn.sizeHint().width(),
                 self.proxy_test_btn.minimumSizeHint().width())
         )
-        form.addRow("代理", self._proxy_row())
+        self._add_row(form, "代理", self._proxy_row())
 
         self.speed_combo = NoWheelComboBox()
         for value in SPEED_LIMIT_CHOICES:
             self.speed_combo.addItem(_speed_label(value), value)
-        form.addRow("下载限速", self.speed_combo)
+        self._add_row(form, "下载限速", self.speed_combo)
 
         root.addLayout(form)
+        root.addSpacing(BLOCK_GAP)
 
         self.hint_label = QLabel()
         self.hint_label.setWordWrap(True)
@@ -347,12 +402,21 @@ class UpdateDialog(QDialog):
         # 交给 QLabel 直接调系统浏览器（about_dialog.py 同款）。
         self.hint_label.setTextFormat(Qt.TextFormat.RichText)
         self.hint_label.setOpenExternalLinks(True)
+        # 规范 §3：说明是灰色小字，不能和正文一个颜色（否则读起来像第 7 行设置）
+        self.hint_label.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
         root.addWidget(self.hint_label)
 
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        root.addWidget(line)
+        # 分割线：照抄设置页 settingsDivider（1px 实线 + COLOR_BORDER）。
+        # 原来用 QFrame.HLine + Sunken，实测渲染出来是 3px 的凹槽，
+        # 与设置页那条细线完全不是一种东西。
+        root.addSpacing(ROW_SPACING)
+        divider = QFrame()
+        divider.setObjectName("updateDivider")
+        divider.setFrameShape(QFrame.Shape.NoFrame)
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background: {COLOR_BORDER}; border: none;")
+        root.addWidget(divider)
+        root.addSpacing(ROW_SPACING)
 
         # 状态区（对话框下半的"输出区"）放在**固定高度**的滚动容器里：
         # 文案再长也只在这里滚动，绝不撑大窗口、更不反过来压缩上面表单的行高
@@ -405,6 +469,7 @@ class UpdateDialog(QDialog):
         self.status_area.setWidget(status_body)
         root.addWidget(self.status_area, 1)
 
+        root.addSpacing(OUTPUT_GAP)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -416,6 +481,7 @@ class UpdateDialog(QDialog):
         self.progress.setMinimumHeight(self.progress.sizeHint().height())
         self.progress.setEnabled(False)
         root.addWidget(self.progress)
+        root.addSpacing(BLOCK_GAP)
 
         buttons = QHBoxLayout()
         # 左：语义恒定（保存 + 检查）。右：常驻置灰，按状态在"下载 / 安装"间切换。
@@ -428,7 +494,7 @@ class UpdateDialog(QDialog):
         # 宽度钉死成「下载更新 / 安装更新」里较宽的那个：文案会来回换，
         # 不钉死按钮就会跟着一伸一缩（与「测试代理」按钮同一个理由）。
         # 常驻置灰而不是 show/hide：隐藏的控件不参与布局，一露头就得重排
-        # （实测按钮行只需 ~256px，远小于窗口 560px 最小宽，重排虽不至于撑大
+        # （按钮行只需 ~256px，远小于窗口最小宽 840px，重排虽不至于撑大
         # 窗口，但会让按钮左右位置在状态切换时抖动）。
         widest = 0
         for label in (DOWNLOAD_BTN_TEXT, INSTALL_BTN_TEXT):
@@ -470,6 +536,25 @@ class UpdateDialog(QDialog):
         self.channel_combo.currentIndexChanged.connect(self._on_selection_changed)
 
     # -- 布局辅助 ----------------------------------------------------------
+
+    def _add_row(self, form: QFormLayout, text: str, widget: QWidget) -> QLabel:
+        """加一行设置：左侧文本 + 右侧控件（规范 §4）。
+
+        用显式的 :class:`QLabel` 而不是 ``form.addRow("文字", 控件)``，为了三件事：
+
+        1. **能置灰**：标签需要一个 objectName 才能在 ``theme.py`` 里写
+           ``:disabled`` 颜色 —— 全局样式表的 ``color`` 会盖掉禁用态调色板，
+           不显式写就是"控件灰了、文字还亮着"（docs/开发踩坑记录.md 第 2 条）；
+        2. **tooltip 复制**（规范 §9）：鼠标停在文字上也能看到控件说明；
+        3. 记住这些标签，:meth:`_set_form_enabled` 里与控件一起置灰。
+        """
+        label = QLabel(text)
+        label.setObjectName("updateRowLabel")
+        if widget.toolTip():
+            label.setToolTip(widget.toolTip())
+        form.addRow(label, widget)
+        self._row_labels.append(label)
+        return label
 
     def _proxy_row(self) -> QWidget:
         """「代理」行的复合控件：输入框 + 测试按钮。
@@ -562,34 +647,27 @@ class UpdateDialog(QDialog):
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _update_hint(self) -> None:
-        """提示两项凭据存哪、Token 用来做什么、代理/限速对哪些渠道生效。
+        """说明行（规范 §3 的"灰色说明"）：两句话，不再是一大段。
 
-        需求 §14/§29/§30；GitHub Token 一段是 2026-10-20 追加的。
-        文案用富文本（``<br>`` 分行 + 一个外链），因为要放"去哪里申请 Token"
-        这个链接 —— 纯文本长 URL 在窄对话框里会折成一堆碎字。
+        2026-10-20 按设置页规范简化：第一行讲凭证存哪 + 代理/限速的适用范围，
+        第二行给"去哪里申请 GitHub Token"的可点链接。位置留在表单下方、
+        分割线上方 —— 它说的是上面这些字段，分割线之后才是输出区。
+        （"Token 用来绕过 IP 限速"写在输入框的占位文案里：框为空时那段字
+        就是唯一的说明，比堆在这里更贴近用户正在看的地方。）
         """
-        parts: list[str] = []
         # 用构造时定下的 self._android，而不是再调一次 is_android_strict()：
         # 同一页里的运行形态判据只应有一个来源（也便于测试注入）。
         if self._android:
-            parts.append(
-                "CDK 与 GitHub Token 保存在应用私有目录的 settings.json，受安卓沙箱保护。"
-            )
+            storage = "凭证保存在应用私有目录（受安卓沙箱保护）"
         elif cdk_store.keyring_available():
-            parts.append(
-                "系统凭据库可用，CDK 与 GitHub Token 将保存在系统凭据库（keyring），"
-                "不写入配置文件。"
-            )
+            storage = "凭证保存在系统凭据库（keyring），不写入配置文件"
         else:
-            parts.append("系统凭据库不可用，CDK 与 GitHub Token 将明文保存在 settings.json。")
-        parts.append(
-            "GitHub Token 只用于 api.github.com 的接口请求（缓解匿名 60 次/小时/IP 的"
-            "限流），留空即匿名请求。申请："
+            storage = "系统凭据库不可用，凭证将明文保存在 settings.json"
+        self.hint_label.setText(
+            f"{storage}；代理与限速仅对 R2 / GitHub 生效。<br>"
+            "GitHub Token 申请："
             f"<a href='{GITHUB_TOKEN_URL}'>github.com/settings/personal-access-tokens</a>"
-            "（勾选 Contents: read 即可）。"
         )
-        parts.append("代理与限速仅对 Cloudflare R2 / GitHub 生效；MirrorChyan 不使用它们。")
-        self.hint_label.setText("<br>".join(parts))
 
     # -- 表单 ↔ draft ------------------------------------------------------
 
@@ -1128,6 +1206,10 @@ class UpdateDialog(QDialog):
             self.proxy_edit, self.proxy_test_btn, self.speed_combo,
         ):
             widget.setEnabled(enabled)
+        # 文本跟着控件一起置灰（规范 §6：不能只有控件变灰）。
+        # 颜色规则见 ui/theme.py 的 ``QLabel#updateRowLabel:disabled``。
+        for label in self._row_labels:
+            label.setEnabled(enabled)
 
     def output_text(self) -> str:
         """输出区当前全文（供测试断言，也方便日志排查）。"""
