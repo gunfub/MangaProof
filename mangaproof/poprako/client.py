@@ -38,6 +38,7 @@ from mangaproof.poprako.errors import (
     PoprakoValidationError,
 )
 from mangaproof.poprako.models import (
+    Assignment,
     AuthSession,
     Chapter,
     Comic,
@@ -356,6 +357,27 @@ class PoprakoClient:
         data = self._request("GET", f"chapters/{quote(chapter_id, safe='')}/issues")
         rows = data if isinstance(data, list) else []
         return [RemoteIssue.from_api(row) for row in rows if isinstance(row, dict)]
+
+    def chapter_assignments(self, chapter_id: str) -> list[Assignment]:
+        """``GET /assignments?chapter_id=…``：该章节的全部分工（含每个人的角色位）。
+
+        导入权限看的是**这一张表里我自己的 REVIEWER 位**，不是团队角色。
+        """
+        rows = self._paged("assignments", {"chapter_id": chapter_id})
+        return [Assignment.from_api(row) for row in rows]
+
+    def join_chapter(self, chapter_id: str, roles: int) -> Assignment:
+        """``POST /assignments/join``：自助加入章节分工（body 是 snake_case）。
+
+        服务端会校验角色位是否允许自助申请；不满足时抛 403
+        （:class:`PoprakoForbiddenError`）。
+        """
+        data = self._request(
+            "POST",
+            "assignments/join",
+            json_body={"chapter_id": chapter_id, "roles": int(roles)},
+        )
+        return Assignment.from_api(data)
 
     def import_issues(self, chapter_id: str, payload: dict[str, Any]) -> ImportResult:
         """``POST /chapters/{id}/issues/import``：整体替换该章问题。"""

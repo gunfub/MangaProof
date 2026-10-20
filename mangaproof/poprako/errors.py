@@ -86,7 +86,7 @@ def user_message(error: BaseException) -> str:
     if isinstance(error, PoprakoAuthError):
         return "登录已失效，请重新登录"
     if isinstance(error, PoprakoForbiddenError):
-        return "需要该章节的「监制」指派，管理员身份不足以同步"
+        return "需要该章节的「监修」分工（管理员身份不够）；可先点「加入监修分工」"
     if isinstance(error, PoprakoValidationError):
         code = f" / code {error.code}" if error.code is not None else ""
         return f"提交内容被拒绝（HTTP 422{code}），请检查页面映射与预览"

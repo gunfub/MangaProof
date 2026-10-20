@@ -87,6 +87,9 @@ from mangaproof.poprako.last_choice import LastChoice, LastChoiceStore
 from mangaproof.poprako.mapping import align_in_order, auto_match
 from mangaproof.poprako.models import (
     PHASE_LABELS,
+    ROLE_ADMIN,
+    ROLE_REVIEWER,
+    Assignment,
     Chapter,
     Comic,
     Membership,
@@ -139,9 +142,11 @@ NAV_WIDTH = 180
 NAV_PADDING = 4
 NAV_ITEM_VPAD = 8
 HEADER_FONT_QSS = "font-size: 15px; font-weight: bold;"
-#: 默认尺寸：**与主界面同比例**（主窗口 1440×900 = 1.6，这里 960×600 = 1.6）。
+#: 默认尺寸：**与主界面同比例**（主窗口 1440×900 = 1.6，这里 1024×640 = 1.6）。
 #: 2026-10-21 需求方：窗口高度适当加大，比例对齐主界面。
-DEFAULT_DIALOG_SIZE = (960, 600)
+#: 同日再加一行「项目角色」后，目标章节页在 960×600 下会溢出 22px（出现滚动条），
+#: 因此默认尺寸再抬一档——仍然严格 1.6。
+DEFAULT_DIALOG_SIZE = (1024, 640)
 #: 最小尺寸同样是 1.6；再矮目标章节页就要滚动（正文约 434px）
 MINIMUM_DIALOG_SIZE = (864, 540)
 ROW_SPACING = 16
@@ -158,6 +163,8 @@ SCORE_WIDTH = 44
 SCORE_GAP = 8
 #: 映射表「问题」列宽度（固定窄栏，表头与数字都居中）
 ISSUE_COLUMN_WIDTH = 72
+#: 上传阶段数（导入 → 回读校验）；进度条按它分段
+UPLOAD_STEPS = 2
 
 #: 侧栏五项 = 五页；顺序即流程顺序
 PAGES: dict[str, tuple[str, str]] = {
@@ -617,6 +624,11 @@ class PoprakoSyncDialog(QDialog):
         self._chapter: Optional[Chapter] = None
         self._artworks: list[PageArtwork] = []
         self._remote_issues: list[RemoteIssue] = []
+        #: 该章节的全部分工（GET /assignments?chapter_id=…）；随「加载章节信息」一起读
+        self._assignments: list[Assignment] = []
+        #: 我在该章节的分工（None = 没参与）；导入权限看它的 REVIEWER 位
+        self._my_assignment: Optional[Assignment] = None
+        self._assignments_loaded = False
         self._mapping: dict[str, str] = {}
         self._payload: dict = {"pages": []}
         self._report: Optional[PreflightReport] = None
@@ -1032,8 +1044,12 @@ class PoprakoSyncDialog(QDialog):
         self._add_row(rows, "复合图页", self._pages_value)
         self._existing_value = self._info_value()
         self._add_row(rows, "现存问题", self._existing_value)
-        self._role_value = self._info_value()
-        self._add_row(rows, "我的角色", self._role_value)
+        # 角色分两层（2026-10-21 需求方）：团队里的「账号角色」决定能不能自助申请，
+        # 这一章的「项目角色」才是导入权限的依据。
+        self._account_role_value = self._info_value()
+        self._add_row(rows, "账号角色", self._account_role_value)
+        self._project_role_value = self._info_value()
+        self._add_row(rows, "项目角色", self._project_role_value)
 
         self._warn_label = QLabel("")
         self._warn_label.setWordWrap(True)
@@ -1048,6 +1064,12 @@ class PoprakoSyncDialog(QDialog):
         self._clear_all_btn.setAutoDefault(False)
         self._clear_all_btn.clicked.connect(self._on_clear_all_clicked)
         actions.addWidget(self._clear_all_btn)
+
+        # 自助加入本章的「监修」分工：条款见 _join_reviewer_reasons()
+        self._join_btn = QPushButton("加入监修分工")
+        self._join_btn.setAutoDefault(False)
+        self._join_btn.clicked.connect(self._on_join_reviewer_clicked)
+        actions.addWidget(self._join_btn)
 
         self._load_chapter_btn = QPushButton("加载章节信息")
         self._load_chapter_btn.setAutoDefault(False)
@@ -1128,8 +1150,9 @@ class PoprakoSyncDialog(QDialog):
         )
 
         # 与主程序「载入 PSD」的进度条同款：主题默认高度、显示文字（2026-10-21）
+        # 范围固定 0–100：上传成功停在 100%，不再"成功了还是 0%"（2026-10-21 需求方）
         self._progress = QProgressBar()
-        self._progress.setRange(0, 1)
+        self._progress.setRange(0, 100)
         self._progress.setValue(0)
         page.body.addWidget(self._progress)
 
@@ -1479,6 +1502,9 @@ class PoprakoSyncDialog(QDialog):
         self._chapter = None
         self._artworks = []
         self._remote_issues = []
+        self._assignments = []
+        self._my_assignment = None
+        self._assignments_loaded = False
         self._mapping = {}
         self._set_placeholder(self._team_combo, "请先登录")
         self._set_placeholder(self._workset_combo, "请先选择团队")
@@ -1915,15 +1941,21 @@ class PoprakoSyncDialog(QDialog):
         self._chapter = None
         self._artworks = []
         self._remote_issues = []
+        self._assignments = []
+        self._my_assignment = None
+        self._assignments_loaded = False
         self._refresh_chapter_info()
         self._refresh_mapping_table()
         self._refresh_payload()
 
     def _on_chapter_data(self, data: tuple) -> None:
-        chapter, pages, remote_issues = data
+        chapter, pages, remote_issues, assignments = data
         self._chapter = chapter
         self._artworks = list(pages)
         self._remote_issues = list(remote_issues)
+        self._assignments = list(assignments)
+        self._assignments_loaded = True
+        self._sync_my_assignment()
         self._refresh_chapter_info()
         self._ensure_mapping()
         self._refresh_mapping_table()
@@ -1940,8 +1972,17 @@ class PoprakoSyncDialog(QDialog):
                 self._client.chapter(chapter_id),
                 self._client.page_artworks(chapter_id),
                 self._client.issues(chapter_id),
+                self._client.chapter_assignments(chapter_id),
             ),
             self._on_chapter_data,
+        )
+
+    def _sync_my_assignment(self) -> None:
+        """从章节分工里挑出"我"的那一行（没参与就是 None）。"""
+        user_id = self._user.id if self._user is not None else ""
+        self._my_assignment = next(
+            (item for item in self._assignments if user_id and item.user_id == user_id),
+            None,
         )
 
     def _on_clear_all_clicked(self) -> None:
@@ -2057,8 +2098,7 @@ class PoprakoSyncDialog(QDialog):
             self._stage_value.setText("—")
             self._pages_value.setText("—")
             self._existing_value.setText("—")
-            self._role_value.setText(roles_text(self._current_membership().roles)
-                                    if self._current_membership() else "—")
+            self._refresh_role_value()
             self._warn_label.setVisible(False)
             self._refresh_gates()
             return
@@ -2076,11 +2116,12 @@ class PoprakoSyncDialog(QDialog):
         self._refresh_role_value()
 
         warning = ""
-        membership = self._current_membership()
         if chapter.is_published:
             warning = f"⚠ 该章节已发布，{PLATFORM_NAME} 不接受问题导入"
-        elif membership is not None and not membership.is_reviewer:
-            warning = "⚠ 你在该团队没有「监制」指派，上传会被拒绝（管理员身份不够）"
+        elif self._assignments_loaded and not self._is_chapter_reviewer():
+            warning = "⚠ 你在该章节没有「监修」分工，上传会被拒绝（可点「加入监修分工」）"
+        elif not self._assignments_loaded and not self._account_can_reviewer():
+            warning = "⚠ 你的账号没有「监修」角色，也读不到章节分工，上传会被拒绝"
         elif not self._artworks:
             warning = "⚠ 该章节还没有复合图页，请先在平台上传 PSD 复合图"
         self._warn_label.setText(warning)
@@ -2088,12 +2129,82 @@ class PoprakoSyncDialog(QDialog):
         self._refresh_gates()
 
     def _refresh_role_value(self) -> None:
+        """两行角色：账号角色 = 团队角色（决定能否自助申请）；项目角色 = 本章分工。"""
+        membership = self._current_membership()
+        self._account_role_value.setText(
+            roles_text(membership.roles) if membership is not None else "—"
+        )
+
+        if self._chapter is None or not self._assignments_loaded:
+            self._project_role_value.setText("—")
+            self._project_role_value.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+            return
+        if self._my_assignment is None:
+            self._project_role_value.setText("无（未参与）")
+            self._project_role_value.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+            return
+        suffix = "（可导入）" if self._my_assignment.is_reviewer else "（不可导入）"
+        self._project_role_value.setText(
+            f"{roles_text(self._my_assignment.roles)}{suffix}"
+        )
+        self._project_role_value.setStyleSheet(
+            f"color: {COLOR_TEXT if self._my_assignment.is_reviewer else COLOR_WARN};"
+        )
+
+    def _account_can_reviewer(self) -> bool:
+        """账号角色里有没有「监修」或「管理员」（管理员也允许自助加入，2026-10-21 需求方）。"""
+        membership = self._current_membership()
+        return bool(
+            membership is not None and membership.roles & (ROLE_REVIEWER | ROLE_ADMIN)
+        )
+
+    def _is_chapter_reviewer(self) -> bool:
+        """我在**这一章**里是否有监修分工（上传的唯一依据）。"""
+        return bool(self._my_assignment is not None and self._my_assignment.is_reviewer)
+
+    # ================================================================ 加入分工
+
+    def _join_reviewer_reasons(self) -> list[str]:
+        """「加入监修分工」按钮的禁用原因（空列表 = 可点）。"""
+        if self._user is None:
+            return ["请先在「账号」页登录"]
+        if self._chapter is None:
+            return ["请先点「加载章节信息」读取该章节"]
+        if not self._assignments_loaded:
+            # 章节读到了但分工没读到（理论上同批请求，失败会整批失败）：
+            # 不知道当前是否已是监修，先别让点，避免无谓的 409/403
+            return ["章节分工还没读到，请重新点「加载章节信息」"]
+        if self._busy:
+            return [self._busy]
         membership = self._current_membership()
         if membership is None:
-            self._role_value.setText("—")
+            return ["请先选择团队"]
+        if not self._account_can_reviewer():
+            return ["你的账号没有「监修」或「管理员」角色，无法申请该章节的监修分工"]
+        if self._is_chapter_reviewer():
+            return ["你已经是该章节的监修"]
+        return []
+
+    def _on_join_reviewer_clicked(self) -> None:
+        """自助加入本章的「监修」分工，成功后立刻刷新分工与上传门禁。"""
+        if self._chapter is None or self._busy:
             return
-        suffix = "（可导入）" if membership.is_reviewer else "（不可导入）"
-        self._role_value.setText(f"{roles_text(membership.roles)}{suffix}")
+        chapter_id = self._chapter.id
+        self._set_busy("正在加入监修分工…")
+        # 只发一个请求：服务端返回的那一行就是权威结果。若再加入一次"重读分工"，
+        # 一旦重读失败就会把整件事报成失败——而分工其实已经加上了。
+        self._run(
+            lambda: self._client.join_chapter(chapter_id, ROLE_REVIEWER),
+            self._on_joined_reviewer,
+        )
+
+    def _on_joined_reviewer(self, joined: Assignment) -> None:
+        others = [item for item in self._assignments if item.user_id != joined.user_id]
+        self._assignments = others + [joined]
+        self._assignments_loaded = True
+        self._my_assignment = joined
+        self._refresh_chapter_info()
+        self._set_notice("已加入该章节的监修分工，现在可以上传问题了", "ok")
 
     # ================================================================ 映射
 
@@ -2264,7 +2375,19 @@ class PoprakoSyncDialog(QDialog):
         self._settings_dirty = True
         self._refresh_payload()
 
+    def _reset_upload_progress(self) -> None:
+        """负载变了（换章节 / 改映射 / 改保留开关）→ 进度条回 0%。
+
+        否则上一次成功的 100% 会一直挂着，看起来像"这次已经传完了"。
+        """
+        if self._busy:
+            return
+        self._progress.setFormat("%p%")
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+
     def _refresh_payload(self) -> None:
+        self._reset_upload_progress()
         if self._chapter is None or not self._artworks:
             self._payload = {"pages": []}
             self._report = None
@@ -2360,9 +2483,16 @@ class PoprakoSyncDialog(QDialog):
             return ["请先在「目标章节」选择章节"]
         if self._chapter.is_published:
             return ["该章节已发布，Poprako 不接受问题导入"]
-        membership = self._current_membership()
-        if membership is not None and not membership.is_reviewer:
-            return ["你在该团队没有「监制」指派，上传会被拒绝"]
+        if self._assignments_loaded:
+            # 有了章节分工就以它为准：团队角色再高，这一章没分到监修也导不进去
+            if not self._is_chapter_reviewer():
+                return ["你在该章节没有「监修」分工，上传会被拒绝"
+                        "（点「加入监修分工」可自助加入）"]
+        else:
+            # 分工没读到（网络/权限）→ 退回团队角色做提示性预检，最终由服务端裁决
+            membership = self._current_membership()
+            if membership is not None and not membership.is_reviewer:
+                return ["你的账号没有「监修」角色，上传会被拒绝"]
         if not self._artworks:
             return ["该章节还没有复合图页"]
         if self._report is None:
@@ -2398,8 +2528,14 @@ class PoprakoSyncDialog(QDialog):
         chapter_id = self._chapter_combo.currentData()
         self._load_chapter_btn.setEnabled(bool(idle and chapter_id))
         self._load_chapter_btn.setToolTip(
-            "读取该章节的详情、复合图页与现有问题" if chapter_id
+            "读取该章节的详情、复合图页、现有问题与分工" if chapter_id
             else "请先逐级选择团队 / 项目集 / 作品 / 章节"
+        )
+        join_reasons = self._join_reviewer_reasons()
+        self._join_btn.setEnabled(not join_reasons)
+        self._join_btn.setToolTip(
+            "\n".join(join_reasons) if join_reasons
+            else "把自己加入该章节的「监修」分工（团队角色需为监修或管理员）"
         )
         self._proxy_save_btn.setEnabled(not self._busy)
         if not self._busy:
@@ -2443,20 +2579,33 @@ class PoprakoSyncDialog(QDialog):
             return
         self._notice = None
         self._set_busy("正在上传…")
-        self._progress.setRange(0, 0)
+        # 上传 = 导入 + 回读校验两个阶段：进度条按 0/2 走 0% → 50% → 100%
+        self._progress.setFormat("正在导入… %p%")
+        self._progress.setRange(0, UPLOAD_STEPS)
+        self._progress.setValue(0)
         worker = UploadWorker(self._client, self._chapter.id, dict(self._payload))
         self._workers.add(worker)
+        worker.progress.connect(self._on_upload_progress)
         worker.succeeded.connect(
             lambda outcome: self._on_upload_done(worker, outcome)
         )
         worker.failed.connect(lambda message: self._on_upload_failed(worker, message))
+        worker.failed_partial.connect(
+            lambda message: self._on_upload_partial(worker, message)
+        )
         worker.start()
+
+    def _on_upload_progress(self, done: int, total: int, text: str) -> None:
+        self._progress.setRange(0, max(1, total))
+        self._progress.setValue(done)
+        self._progress.setFormat(f"{text} %p%")
 
     def _on_upload_done(self, worker, outcome: UploadOutcome) -> None:
         self._workers.discard(worker)
         self._release_worker(worker)
-        self._progress.setRange(0, 1)
-        self._progress.setValue(0)
+        self._progress.setFormat("%p%")
+        self._progress.setRange(0, 100)
+        self._progress.setValue(100)          # 成功 = 100%，并停在这里
         self._set_busy(None)
 
         result = outcome.result
@@ -2477,10 +2626,21 @@ class PoprakoSyncDialog(QDialog):
             )
         self._refresh_status()
 
+    def _on_upload_partial(self, worker, message: str) -> None:
+        """导入成功、回读校验失败：数据已经在平台上，进度停在"做了一半"。"""
+        self._workers.discard(worker)
+        self._release_worker(worker)
+        self._progress.setFormat("%p%")
+        self._progress.setRange(0, UPLOAD_STEPS)
+        self._progress.setValue(1)
+        self._set_busy(None)
+        self._set_notice(message, "warn")
+
     def _on_upload_failed(self, worker, message: str) -> None:
         self._workers.discard(worker)
         self._release_worker(worker)
-        self._progress.setRange(0, 1)
+        self._progress.setFormat("%p%")
+        self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._set_busy(None)
         self._set_notice(message, "error")

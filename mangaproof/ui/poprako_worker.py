@@ -105,10 +105,18 @@ class UploadOutcome:
 
 
 class UploadWorker(QThread):
-    """导入问题 → 回读校验（需求 §9.4：只有校验通过才算成功）。"""
+    """导入问题 → 回读校验（需求 §9.4：只有校验通过才算成功）。
+
+    ``progress(done, total, text)`` 只报两个阶段（导入 / 回读校验），界面据此把
+    进度条从 0% 推到 100%；**导入成功但回读失败**要单独说清楚——数据其实已经写进
+    平台了，不能让用户以为"整体没传上去"。
+    """
 
     succeeded = Signal(object)
     failed = Signal(str)
+    #: 导入已经成功、但回读校验失败（数据已在平台上，不能按"整体失败"处理）
+    failed_partial = Signal(str)
+    progress = Signal(int, int, str)
 
     def __init__(
         self,
@@ -123,9 +131,9 @@ class UploadWorker(QThread):
         self._payload = payload
 
     def run(self) -> None:  # noqa: D102 —— QThread 约定
+        self.progress.emit(0, 2, "正在导入…")
         try:
             result = self._client.import_issues(self._chapter_id, self._payload)
-            rows = self._client.issues(self._chapter_id)
         except PoprakoError as exc:
             log.info("Poprako 上传失败：%s", type(exc).__name__)
             self.failed.emit(user_message(exc))
@@ -133,6 +141,19 @@ class UploadWorker(QThread):
         except Exception:
             log.exception("Poprako 上传出现未预期异常")
             self.failed.emit("上传失败：内部错误（已记录日志）")
+            return
+
+        # 从这里开始数据**已经写进平台**：之后的失败只能叫"回读校验失败"
+        self.progress.emit(1, 2, "正在回读校验…")
+        try:
+            rows = self._client.issues(self._chapter_id)
+        except PoprakoError as exc:
+            log.info("Poprako 回读校验失败：%s", type(exc).__name__)
+            self.failed_partial.emit(f"已导入，但回读校验失败：{user_message(exc)}")
+            return
+        except Exception:
+            log.exception("Poprako 回读校验出现未预期异常")
+            self.failed_partial.emit("已导入，但回读校验失败：内部错误（已记录日志）")
             return
 
         pages = {row.page_artwork_id for row in rows}

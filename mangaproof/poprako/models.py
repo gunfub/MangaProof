@@ -20,6 +20,7 @@ __all__ = [
     "AuthSession",
     "User",
     "Membership",
+    "Assignment",
     "Workset",
     "Comic",
     "Chapter",
@@ -61,7 +62,7 @@ _ROLE_LABELS: tuple[tuple[int, str], ...] = (
     (ROLE_PROOFREADER, "校对"),
     (ROLE_TYPESETTER, "排版"),
     (ROLE_REDRAWER, "修图"),
-    (ROLE_REVIEWER, "监制"),
+    (ROLE_REVIEWER, "监修"),
     (ROLE_PUBLISHER, "发布"),
     (ROLE_ADMIN, "管理员"),
 )
@@ -71,7 +72,7 @@ _ROLE_LABELS: tuple[tuple[int, str], ...] = (
 # ---------------------------------------------------------------------------
 
 #: 六个阶段的显示名（顺序即位序）
-STAGE_NAMES: tuple[str, ...] = ("供图", "翻译", "校对", "排版 / 修图", "监制", "发布")
+STAGE_NAMES: tuple[str, ...] = ("供图", "翻译", "校对", "排版 / 修图", "监修", "发布")
 
 _PHASE_TOKENS: tuple[str, ...] = ("pending", "active", "completed")
 
@@ -100,7 +101,7 @@ def is_published(stages: int) -> bool:
 
 
 def roles_text(roles: int) -> str:
-    """角色位 → ``"监制 / 校对"``；没有任何角色时返回 ``"—"``。"""
+    """角色位 → ``"监修 / 校对"``；没有任何角色时返回 ``"—"``。"""
     value = _as_int(roles)
     names = [label for bit, label in _ROLE_LABELS if value & bit]
     return " / ".join(names) if names else "—"
@@ -192,6 +193,36 @@ class Membership:
         return cls(
             team_id=_as_str(data.get("team_id")) or _as_str(team.get("id")),
             team_name=_as_str(team.get("name")),
+            roles=_as_int(data.get("roles")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Assignment:
+    """``GET /assignments?chapter_id=…`` / ``POST /assignments/join``：章节分工。
+
+    ``roles`` 是**章节级**的工作角色位（不含 ADMIN 的展示语义），与
+    :class:`Membership` 的团队角色是两套东西：团队里是「监修」，不代表这一章
+    已经分到了监修 —— 导入权限看的是这一行的 ``REVIEWER`` 位。
+    """
+
+    id: str
+    chapter_id: str
+    user_id: str
+    roles: int
+
+    @property
+    def is_reviewer(self) -> bool:
+        """这一章里是否有「监修」分工（上传问题需要它，仅管理员身份不够）。"""
+        return bool(self.roles & ROLE_REVIEWER)
+
+    @classmethod
+    def from_api(cls, raw: Any) -> "Assignment":
+        data = _mapping(raw)
+        return cls(
+            id=_as_str(data.get("id")),
+            chapter_id=_as_str(data.get("chapter_id")),
+            user_id=_as_str(data.get("user_id")),
             roles=_as_int(data.get("roles")),
         )
 

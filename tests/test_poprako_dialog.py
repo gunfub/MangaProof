@@ -34,7 +34,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 import mangaproof.ui.poprako_dialog as dialog_module
 from mangaproof.config.settings import SettingsManager
 from mangaproof.poprako.last_choice import LastChoiceStore
-from mangaproof.poprako.models import Chapter, Membership, PageArtwork, User
+from mangaproof.poprako.models import Assignment, Chapter, Membership, PageArtwork, User
 from mangaproof.review.issue import Issue
 from mangaproof.review.state import FileRecord, TaskState
 from mangaproof.ui.poprako_dialog import (
@@ -131,8 +131,18 @@ def open_dialog(tmp_path: Path, task: TaskState, client=None, factory=None,
     return dialog
 
 
-def make_ready(dialog: PoprakoSyncDialog, *, roles: int = 32, stages: int = 0) -> None:
-    """把对话框摆到"可以上传"的状态（不发任何网络请求）。"""
+def make_ready(
+    dialog: PoprakoSyncDialog,
+    *,
+    roles: int = 32,
+    stages: int = 0,
+    assignment_roles: int | None = None,
+) -> None:
+    """把对话框摆到"可以上传"的状态（不发任何网络请求）。
+
+    ``assignment_roles``：我在该章节的分工角色位；``None`` = 分工还没加载
+    （此时上传门禁退回团队角色，和旧行为一致）。
+    """
     dialog._user = User(id="u_1", qid="123456", nickname="秋叶声生", is_sadmin=False)
     dialog._apply_logged_in(dialog._user)
     dialog._teams = [Membership("t_1", "木叶翻译组", roles)]
@@ -143,6 +153,12 @@ def make_ready(dialog: PoprakoSyncDialog, *, roles: int = 32, stages: int = 0) -
     dialog._team_combo.blockSignals(False)
     dialog._artworks = [make_artwork("pa_1", 0), make_artwork("pa_2", 1)]
     dialog._chapter = make_chapter(stages)
+    if assignment_roles is not None:
+        from mangaproof.poprako.models import Assignment
+
+        dialog._assignments = [Assignment("as_1", "ch_1", "u_1", assignment_roles)]
+        dialog._assignments_loaded = True
+        dialog._sync_my_assignment()
     dialog._mapping = {"001.psd": "pa_1", "002.psd": "pa_2"}
     dialog._refresh_chapter_info()
     dialog._refresh_mapping_table()
@@ -247,10 +263,174 @@ def test_published_chapter_blocks_upload(qapp, tmp_path):
 def test_missing_reviewer_role_blocks_upload(qapp, tmp_path):
     dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
     try:
-        make_ready(dialog, roles=4)               # 只有校对，没有监制
+        make_ready(dialog, roles=4)               # 只有校对，没有监修
         assert dialog._upload_btn.isEnabled() is False
-        assert "监制" in dialog._upload_btn.toolTip()
-        assert "不可导入" in dialog._role_value.text()
+        assert "监修" in dialog._upload_btn.toolTip()
+        # 没读到章节分工时退回团队角色做预检：账号角色要显示出来且不可导入
+        assert dialog._account_role_value.text() == "校对"
+        assert dialog._project_role_value.text() == "—"
+    finally:
+        dialog.done(0)
+
+
+def test_role_rows_show_account_and_project_roles(qapp, tmp_path):
+    """账号角色 = 团队角色；项目角色 = 该章节分工（两行分开显示）。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog, roles=32 | 128)
+        assert dialog._account_role_value.text() == "监修 / 管理员"
+        assert dialog._project_role_value.text() == "—", "还没加载章节信息"
+
+        dialog._assignments = [Assignment("as_1", "ch_1", "u_1", 4)]
+        dialog._assignments_loaded = True
+        dialog._sync_my_assignment()
+        dialog._refresh_role_value()
+        assert dialog._project_role_value.text() == "校对（不可导入）"
+    finally:
+        dialog.done(0)
+
+
+def test_join_reviewer_button_enable_matrix(qapp, tmp_path):
+    """加入监修分工：未加载章节 / 分工里已有监修 → 置灰；加载后没有 → 可点。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog)                       # 团队监修，但还没加载章节信息
+        assert dialog._join_btn.isEnabled() is False
+        assert "加载章节信息" in dialog._join_btn.toolTip()
+
+        dialog._assignments = []                 # 章节分工：没参与
+        dialog._assignments_loaded = True
+        dialog._sync_my_assignment()
+        dialog._refresh_gates()
+        assert dialog._join_btn.isEnabled() is True
+
+        dialog._assignments = [Assignment("as_1", "ch_1", "u_1", 32)]
+        dialog._sync_my_assignment()
+        dialog._refresh_gates()
+        assert dialog._join_btn.isEnabled() is False
+        assert "已经是" in dialog._join_btn.toolTip()
+    finally:
+        dialog.done(0)
+
+
+def test_join_reviewer_requires_account_role_but_admin_is_enough(qapp, tmp_path):
+    """账号角色没有监修/管理员 → 灰；只有管理员 → 也可以申请（2026-10-21 需求方）。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog, roles=4)              # 只有校对
+        dialog._assignments_loaded = True
+        dialog._assignments = []
+        dialog._sync_my_assignment()
+        dialog._refresh_gates()
+        assert dialog._join_btn.isEnabled() is False
+        assert "账号" in dialog._join_btn.toolTip()
+
+        make_ready(dialog, roles=128)            # 只有管理员
+        dialog._assignments_loaded = True
+        dialog._assignments = []
+        dialog._sync_my_assignment()
+        dialog._refresh_gates()
+        assert dialog._join_btn.isEnabled() is True
+    finally:
+        dialog.done(0)
+
+
+def test_join_reviewer_calls_api_and_updates_gate(qapp, tmp_path, monkeypatch):
+    """点按钮 → POST /assignments/join(roles=32) → 刷分工 → 上传门禁放行。"""
+    calls: list[tuple[str, int]] = []
+
+    class _JoinClient(_FakeClient):
+        def join_chapter(self, chapter_id, roles):
+            calls.append((chapter_id, roles))
+            return Assignment("as_1", chapter_id, "u_1", roles)
+
+        def chapter_assignments(self, chapter_id):
+            raise AssertionError("加入成功后不该再重读分工（返回的那一行就是权威结果）")
+
+    def _sync_run(self, fn, on_success, on_error=None):
+        result = fn()
+        self._set_busy(None)
+        on_success(result)
+
+    monkeypatch.setattr(PoprakoSyncDialog, "_run", _sync_run)
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"), client=_JoinClient())
+    try:
+        make_ready(dialog)                       # 团队监修 + 章节已加载（但没分工）
+        dialog._assignments_loaded = True
+        dialog._assignments = []
+        dialog._sync_my_assignment()
+        dialog._refresh_chapter_info()
+        assert dialog._upload_btn.isEnabled() is False, "这一章还没监修分工"
+
+        dialog._on_join_reviewer_clicked()
+
+        assert calls == [("ch_1", 32)], "必须按章节 + 监修位申请"
+        assert dialog._is_chapter_reviewer() is True
+        assert "监修" in dialog._project_role_value.text()
+        assert "已加入" in dialog._status_label.text()
+        assert dialog._upload_btn.isEnabled() is True, "拿到分工后应立刻放行"
+    finally:
+        dialog.done(0)
+
+
+def test_upload_gate_uses_chapter_assignment_not_team_role(qapp, tmp_path):
+    """团队是监修、但这一章没有监修分工 → 仍然不许上传（2026-10-21 门禁变更）。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog, roles=32, assignment_roles=4)    # 章节里只有校对
+        assert dialog._upload_btn.isEnabled() is False
+        assert "加入监修分工" in dialog._upload_btn.toolTip()
+
+        make_ready(dialog, roles=4, assignment_roles=32)    # 反向：章节里有监修
+        assert dialog._upload_btn.isEnabled() is True
+    finally:
+        dialog.done(0)
+
+
+def test_upload_progress_reaches_100_and_resets(qapp, tmp_path):
+    """上传成功停在 100%；负载一变就回 0%（不再"成功了还是 0%"）。"""
+    from mangaproof.poprako.models import ImportResult
+    from mangaproof.ui.poprako_worker import UploadOutcome
+
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog, assignment_roles=32)
+
+        class _Worker:
+            def deleteLater(self):           # noqa: N802（Qt 命名）
+                return None
+
+        dialog._on_upload_progress(1, 2, "正在回读校验…")
+        assert dialog._progress.maximum() == 2
+        assert dialog._progress.value() == 1
+
+        dialog._on_upload_done(_Worker(), UploadOutcome(
+            result=ImportResult(imported_page_count=2, imported_issue_count=0),
+            remote_page_count=2, remote_issue_count=0,
+        ))
+        assert dialog._progress.value() == 100
+        assert dialog._progress.text() == "100%"
+
+        dialog._refresh_payload()            # 等价于"改了映射/换了章节"
+        assert dialog._progress.value() == 0
+    finally:
+        dialog.done(0)
+
+
+def test_upload_partial_failure_keeps_half_progress_and_warns(qapp, tmp_path):
+    """导入成功、回读失败：进度停在 1/2（50%），提示用橙色而不是红字。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog, assignment_roles=32)
+
+        class _Worker:
+            def deleteLater(self):           # noqa: N802（Qt 命名）
+                return None
+
+        dialog._on_upload_partial(_Worker(), "已导入，但回读校验失败：ConnectTimeout")
+        assert dialog._progress.maximum() == 2
+        assert dialog._progress.value() == 1
+        assert "回读校验失败" in dialog._status_label.text()
     finally:
         dialog.done(0)
 
@@ -492,6 +672,16 @@ class _FakeClient(_NoNetworkClient):
 
     def issues(self, chapter_id):
         return []
+
+    def chapter_assignments(self, chapter_id):
+        from mangaproof.poprako.models import Assignment
+
+        return [Assignment("as_1", chapter_id, "u_1", 32)]
+
+    def join_chapter(self, chapter_id, roles):
+        from mangaproof.poprako.models import Assignment
+
+        return Assignment("as_1", chapter_id, "u_1", roles)
 
 
 def test_login_then_manual_lazy_cascade(qapp, tmp_path, monkeypatch):
@@ -1079,7 +1269,8 @@ def test_action_buttons_sit_on_sidebar_bottom(qapp, tmp_path):
         pages = {
             "account": (dialog._logout_btn, dialog._login_btn),
             "proxy": (dialog._proxy_test_btn, dialog._proxy_save_btn),
-            "target": (dialog._clear_all_btn, dialog._load_chapter_btn),
+            "target": (dialog._clear_all_btn, dialog._join_btn,
+                       dialog._load_chapter_btn),
             "upload": (dialog._copy_btn, dialog._export_btn, dialog._upload_btn),
         }
         for key, buttons in pages.items():

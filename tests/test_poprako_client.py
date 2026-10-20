@@ -176,7 +176,7 @@ def test_error_text_never_contains_token():
     [
         (PoprakoNetworkError(), "无法连接"),
         (PoprakoAuthError(401, None), "重新登录"),
-        (PoprakoForbiddenError(403, None), "监制"),
+        (PoprakoForbiddenError(403, None), "监修"),
         (PoprakoValidationError(422, 1001), "HTTP 422"),
         (PoprakoHTTPError("HTTP 404", status=404, code=None), "已不存在"),
         (PoprakoHTTPError("HTTP 429", status=429, code=None), "过于频繁"),
@@ -354,6 +354,70 @@ def test_page_artworks_and_issues_parse_lists():
     assert issues[0].rect is None and issues[0].note == "向左"
 
 
+# ---------------------------------------------------------------- 章节分工（2026-10-21）
+
+
+def test_chapter_assignments_lists_roles():
+    """``GET /assignments?chapter_id=…``：拿到每个人的角色位，能认出自己的监修。"""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["params"] = dict(request.url.params)
+        return envelope([
+            {"id": "as_1", "chapter_id": "ch_1", "user_id": "u_1", "roles": 32},
+            {"id": "as_2", "chapter_id": "ch_1", "user_id": "u_2", "roles": 4},
+        ])
+
+    client = make_client(handler, token="tok-1")
+    rows = client.chapter_assignments("ch_1")
+
+    assert seen["path"].endswith("/assignments")
+    assert seen["params"]["chapter_id"] == "ch_1"
+    assert [row.user_id for row in rows] == ["u_1", "u_2"]
+    assert rows[0].is_reviewer is True
+    assert rows[1].is_reviewer is False
+
+
+def test_join_chapter_posts_snake_case_body():
+    """自助加入分工：body 必须是 ``{chapter_id, roles}``（服务端只认 snake_case）。"""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["method"] = request.method
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"code": 0, "data": {
+            "id": "as_9", "chapter_id": "ch_1", "user_id": "u_1", "roles": 32,
+        }})
+
+    client = make_client(handler, token="tok-1")
+    assignment = client.join_chapter("ch_1", 32)
+
+    assert captured["method"] == "POST"
+    assert captured["path"].endswith("/assignments/join")
+    assert captured["body"] == {"chapter_id": "ch_1", "roles": 32}
+    assert assignment.id == "as_9"
+    assert assignment.is_reviewer is True
+
+
+def test_join_chapter_403_is_forbidden_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"code": 1})
+
+    client = make_client(handler, token="tok-1")
+    with pytest.raises(PoprakoForbiddenError):
+        client.join_chapter("ch_1", 32)
+
+
+def test_assignment_from_api_tolerates_missing_fields():
+    from mangaproof.poprako.models import Assignment
+
+    empty = Assignment.from_api({})
+    assert (empty.id, empty.chapter_id, empty.user_id, empty.roles) == ("", "", "", 0)
+    assert empty.is_reviewer is False
+
+
 # ---------------------------------------------------------------- 重试
 
 
@@ -443,7 +507,7 @@ def test_published_flag_and_stage_phases():
     assert is_published(stages) is True
 
     phases = stage_phases(stages)
-    assert [name for name, _ in phases] == ["供图", "翻译", "校对", "排版 / 修图", "监制", "发布"]
+    assert [name for name, _ in phases] == ["供图", "翻译", "校对", "排版 / 修图", "监修", "发布"]
     assert dict(phases)["校对"] == "active"
     assert dict(phases)["发布"] == "completed"
 
@@ -451,7 +515,7 @@ def test_published_flag_and_stage_phases():
 
 
 def test_roles_text_and_tolerant_parsing():
-    assert roles_text(32 | 4) == "校对 / 监制"
+    assert roles_text(32 | 4) == "校对 / 监修"
     assert roles_text(0) == "—"
 
     page = PageArtwork.from_api({"id": "pa_1"})
