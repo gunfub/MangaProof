@@ -28,6 +28,7 @@ from mangaproof.config.settings import (  # noqa: E402
     DEFAULT_UPDATE_SPEED_LIMIT,
     SPEED_LIMIT_CHOICES,
     UPDATE_CDK_KEY,
+    UPDATE_GITHUB_TOKEN_KEY,
     SettingsManager,
     UpdateSettings,
 )
@@ -126,3 +127,50 @@ def test_cdk_plaintext_is_only_present_when_set(tmp_path: Path):
     manager.save()
     raw = json.loads(path.read_text(encoding="utf-8"))
     assert raw["update"][UPDATE_CDK_KEY] == ""
+
+
+# --- GitHub Token（2026-10-20） ----------------------------------------------
+
+def test_github_token_defaults_to_empty():
+    """需求：新字段默认空 = 匿名请求，不影响老用户。"""
+    assert UpdateSettings().github_token == ""
+    assert UpdateSettings().to_dict()[UPDATE_GITHUB_TOKEN_KEY] == ""
+
+
+def test_github_token_roundtrip_through_dict():
+    s = UpdateSettings(github_token="ghp_abc")
+    raw = s.to_dict()
+    assert raw[UPDATE_GITHUB_TOKEN_KEY] == "ghp_abc"
+    assert UpdateSettings.from_dict(raw) == s
+
+
+def test_github_token_is_stripped_and_type_checked():
+    assert UpdateSettings.from_dict({"github_token": "  ghp_x  "}).github_token == "ghp_x"
+    # 非字符串（手改配置写成数字/布尔）一律当作"没填"，不做 str() 转换
+    for bad in (123, True, None, ["ghp"], {"v": "ghp"}):
+        assert UpdateSettings.from_dict({"github_token": bad}).github_token == ""
+
+
+def test_legacy_settings_without_github_token_key(tmp_path: Path):
+    """旧版 settings.json（update 里没有 github_token）必须能读，补默认空。"""
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps({"update": {"branch": "alpha", "channel": "github"}}), encoding="utf-8"
+    )
+    manager = SettingsManager(path)
+    assert manager.settings.update.github_token == ""
+    assert manager.settings.update.channel == "github"
+
+
+def test_github_token_plaintext_saved_only_when_set(tmp_path: Path):
+    path = tmp_path / "settings.json"
+    manager = SettingsManager(path)
+    manager.settings.update.github_token = "ghp_saved"
+    manager.save()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["update"][UPDATE_GITHUB_TOKEN_KEY] == "ghp_saved"
+
+    manager.settings.update.github_token = ""
+    manager.save()
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["update"][UPDATE_GITHUB_TOKEN_KEY] == "", "清空后配置里不该留痕"

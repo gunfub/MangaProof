@@ -33,10 +33,16 @@ class UnsupportedPlatformError(UpdateError):
 
 
 class NetworkError(UpdateError):
-    """网络层失败（连不上、超时、TLS、被代理拦）。"""
+    """网络层失败（连不上、超时、TLS、被代理拦）。
+
+    ``detail`` 单独留着（已脱敏），供调用方在"回落重试也失败"之类的场景里
+    拼出更完整的说明，而不必再去解析 ``str(exc)`` 的前缀。
+    """
 
     def __init__(self, action: str, detail: str):
-        super().__init__(f"{action}失败：{redact_text(detail)}")
+        self.action = action
+        self.detail = redact_text(detail)
+        super().__init__(f"{action}失败：{self.detail}")
 
 
 class ProxyTestError(NetworkError):
@@ -73,6 +79,30 @@ class MirrorChyanError(UpdateError):
             else:
                 text = self.server_msg or f"MirrorChyan 返回未知错误（code={self.code}）"
         super().__init__(text)
+
+
+class GitHubTokenError(UpdateError):
+    """GitHub Token 被服务端拒绝（401 无效 / 403 无权或配额用尽）。
+
+    这个异常**不会**直接展示给用户：:func:`mangaproof.update.sources.github_plan`
+    会捕获它、记一条提示（进 ``DownloadPlan.notes``），然后自动回落匿名请求
+    （2026-10-20 的需求：无效 token 不能把更新流程卡死）。
+
+    只携带 HTTP 状态与一句可读原因，**绝不携带 token 本身**（需求 §16）。
+    """
+
+    def __init__(self, status: int, detail: str = ""):
+        self.status = int(status)
+        self.server_detail = redact_text(str(detail or ""))
+        super().__init__(self.reason())
+
+    def reason(self) -> str:
+        """给用户看的一句话（不含 token、不含服务端原始 body）。"""
+        if self.status == 401:
+            return "GitHub Token 无效或已过期（HTTP 401）"
+        if self.status == 403:
+            return "GitHub Token 被拒绝（HTTP 403：权限不足或该 Token 配额已用尽）"
+        return f"GitHub Token 不可用（HTTP {self.status}）"
 
 
 class VersionInfoError(UpdateError):

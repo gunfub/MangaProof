@@ -54,6 +54,10 @@ class CheckOutcome:
     filename: str = ""
     filesize: Optional[int] = None
     size_note: str = ""
+    #: 需要额外告知用户的一条提示（2026-10-20）：典型是 GitHub Token 被拒后
+    #: 回落匿名、或大小探测失败的具体原因。存成一句完整的话，更新页直接显示，
+    #: 不做二次拼接（错误文案本来就已脱敏）。
+    notice: str = ""
 
 
 class _AbortableWorker(QThread):
@@ -113,11 +117,22 @@ class UpdateCheckWorker(_AbortableWorker):
     succeeded = Signal(object)      # CheckOutcome
     failed = Signal(object)         # UpdateError
 
-    def __init__(self, *, branch: str, source: str = "r2", proxy: str = "", parent=None):
+    def __init__(
+        self,
+        *,
+        branch: str,
+        source: str = "r2",
+        proxy: str = "",
+        github_token: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self._branch = branch
         self._source = source
         self._proxy = proxy
+        #: GitHub Token：只给 GitHub 渠道的"大小探测"用（与下载阶段同一个函数）。
+        #: 空串 = 匿名请求；被拒时 sources 内部会回落匿名，不会中断检查。
+        self._github_token = github_token
 
     def run(self) -> None:
         try:
@@ -162,6 +177,11 @@ class UpdateCheckWorker(_AbortableWorker):
 
         MirrorChyan 渠道**故意不预取**：那需要 CDK，而 CDK 只能用在
         "立即更新"阶段（§18）。该渠道在点击后再把大小补显到下载界面。
+
+        2026-10-20：GitHub 渠道这次探测**带 GitHub Token**。它不是"版本检测"
+        （检测只由 MirrorChyan 决定），而是下载侧元数据（size/digest），
+        与下载阶段的 ``github_plan()`` 是同一个请求 —— token 在两边必须一致，
+        否则会出现"检查时显示大小、下载时却 403"的割裂。
         """
         from mangaproof.update.version import AppVersion
 
@@ -180,12 +200,19 @@ class UpdateCheckWorker(_AbortableWorker):
             else:
                 plan = sources.github_plan(
                     version=version, target=target, proxy=self._proxy,
-                    with_sha256=True,
+                    with_sha256=True, token=self._github_token,
                 )
                 outcome.filesize = plan.filesize
+                # Token 被拒后回落匿名等提示：这里不显示的话，用户只会看到
+                # "大小获取失败"，分不清是 Token 坏了还是 IP 被限流。
+                if plan.notes:
+                    outcome.notice = "；".join(plan.notes)
         except UpdateError as exc:
             log.info("补齐文件大小失败（可忽略）：%s", exc)
             outcome.size_note = "大小获取失败，将在下载时显示"
+            # 探测失败不影响"有没有新版本"的结论，但原因要给用户看
+            # （典型：匿名配额用尽 → 提示去填 GitHub Token）。
+            outcome.notice = str(exc)
         if outcome.filesize is None and not outcome.size_note:
             outcome.size_note = "大小未知，将在下载时显示"
 
@@ -243,6 +270,11 @@ class UpdateDownloadWorker(_AbortableWorker):
     """
 
     progress = Signal(int, object, object, str)   # 已下载, 总数|None, 速度|None, 阶段
+    #: 下载前/下载中需要用户知道、但不该中断流程的提示（2026-10-20 追加）：
+    #: 典型来源是 ``DownloadPlan.notes`` —— GitHub Token 被拒后回落匿名、
+    #: 服务端未提供 SHA-256（本次跳过校验）等。更新页把它显示在独立提示行里，
+    #: 不塞进 ``progress`` 的文案（那段文字每 100ms 就被进度覆盖一次）。
+    notice = Signal(str)
     succeeded = Signal(object)                    # Path（校验通过后的正式文件）
     failed = Signal(object)                       # UpdateError
 
@@ -257,6 +289,7 @@ class UpdateDownloadWorker(_AbortableWorker):
         proxy: str = "",
         speed_limit_mbps: int = 0,
         cdk: str = "",
+        github_token: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -268,10 +301,17 @@ class UpdateDownloadWorker(_AbortableWorker):
         self._proxy = proxy
         self._speed_limit = speed_limit_mbps
         self._cdk = cdk
+        #: GitHub Token：只用于 github 渠道解析资产元数据；字节下载不带它
+        #: （服务端下发的下载地址是签名短链，无需凭证）。
+        self._github_token = github_token
 
     def run(self) -> None:
         try:
             plan = self._build_plan()
+            # plan.notes 是"下载前就该知道"的提示：先逐条发给界面再开始下载，
+            # 这样即使下载随后失败，用户仍能看到（例如）Token 已被拒这件事。
+            for note in plan.notes:
+                self.notice.emit(note)
             path = download_and_verify(
                 plan,
                 self._dest_dir,
@@ -306,6 +346,7 @@ class UpdateDownloadWorker(_AbortableWorker):
             version=version,
             target=self._target,
             proxy=self._proxy,
+            token=self._github_token,
         )
 
     def _on_progress(

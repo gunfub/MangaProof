@@ -163,6 +163,130 @@ def test_github_plan_missing_asset():
     assert FILENAME in str(exc.value)
 
 
+# --- GitHub Token（2026-10-20） ----------------------------------------------
+
+def sequence_router(responses: list[httpx.Response]):
+    """按调用顺序返回响应（最后一次之后重复最后一个），并记录请求。"""
+    record: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        record.append(request)
+        return responses[min(len(record) - 1, len(responses) - 1)]
+
+    return httpx.MockTransport(handler), record
+
+
+def _has_authorization(request: httpx.Request) -> bool:
+    return any(k.lower() == "authorization" for k in request.headers)
+
+
+def test_github_plan_sends_token_as_bearer_header():
+    """有 token 时，api.github.com 的请求必须带 Authorization。"""
+    transport, record = sequence_router([httpx.Response(200, json=github_payload())])
+    plan = sources.github_plan(
+        version=VERSION, target=TARGET, transport=transport, token="ghp_test"
+    )
+    assert record[0].headers["Authorization"] == "Bearer ghp_test"
+    assert plan.sha256 == SHA
+
+
+def test_github_plan_without_token_sends_no_credentials():
+    """留空 = 匿名请求：请求里不允许出现任何 Authorization。"""
+    transport, record = sequence_router([httpx.Response(200, json=github_payload())])
+    sources.github_plan(version=VERSION, target=TARGET, transport=transport)
+    assert not _has_authorization(record[0])
+
+
+def test_github_plan_invalid_token_falls_back_to_anonymous():
+    """401（Bad credentials）→ 记一条提示 + 自动匿名重试，不让流程卡死。"""
+    transport, record = sequence_router([
+        httpx.Response(401, json={"message": "Bad credentials"}),
+        httpx.Response(200, json=github_payload()),
+    ])
+    plan = sources.github_plan(
+        version=VERSION, target=TARGET, transport=transport, token="ghp_bad"
+    )
+    assert len(record) == 2, "应当自动重试一次"
+    assert _has_authorization(record[0]) and not _has_authorization(record[1])
+    assert plan.sha256 == SHA, "回落后仍应拿到完整计划"
+    assert any("匿名" in n for n in plan.notes), "回退要留下提示给界面"
+
+
+def test_github_plan_forbidden_token_falls_back_and_keeps_reason():
+    """403（无权/配额尽）同样回退，提示里要带状态码。"""
+    transport, record = sequence_router([
+        httpx.Response(403, json={"message": "Resource not accessible by personal access token"}),
+        httpx.Response(200, json=github_payload()),
+    ])
+    plan = sources.github_plan(
+        version=VERSION, target=TARGET, transport=transport, token="ghp_limited"
+    )
+    assert len(record) == 2
+    assert any("403" in n for n in plan.notes)
+
+
+def test_github_plan_fallback_then_rate_limited_reports_both_reasons():
+    """Token 坏了、匿名也被限流 → 一条报错讲清两件事，并指向 R2。"""
+    transport, _ = sequence_router([
+        httpx.Response(401, json={"message": "Bad credentials"}),
+        httpx.Response(403, json={"message": "API rate limit exceeded"}),
+    ])
+    with pytest.raises(NetworkError) as exc:
+        sources.github_plan(
+            version=VERSION, target=TARGET, transport=transport, token="ghp_bad"
+        )
+    text = str(exc.value)
+    assert "Token" in text and "401" in text
+    assert "匿名" in text and "403" in text
+    assert "R2" in text
+
+
+def test_anonymous_rate_limit_hint_points_to_token_field():
+    """匿名 403 的文案必须直接告诉用户"去更新页填 GitHub Token"。"""
+    transport, _ = sequence_router([httpx.Response(403, json={})])
+    with pytest.raises(NetworkError) as exc:
+        sources.github_plan(version=VERSION, target=TARGET, transport=transport)
+    text = str(exc.value)
+    assert "GitHub Token" in text and "60 次/小时" in text
+
+
+def test_github_token_never_reaches_logs(caplog):
+    """需求 §16 的延伸：Token 不进日志（连脱敏前的原文都不行）。"""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="mangaproof.update")
+    token = "ghp_supersecret_do_not_log"
+    transport, _ = sequence_router([
+        httpx.Response(401, json={"message": "Bad credentials"}),
+        httpx.Response(200, json=github_payload()),
+    ])
+    sources.github_plan(version=VERSION, target=TARGET, transport=transport, token=token)
+    assert token not in caplog.text
+
+
+def test_build_plan_passes_token_to_github():
+    transport, record = sequence_router([httpx.Response(200, json=github_payload())])
+    sources.build_plan(
+        source="github", branch="stable", version=VERSION,
+        target=TARGET, transport=transport, token="ghp_via_build",
+    )
+    assert record[0].headers["Authorization"] == "Bearer ghp_via_build"
+
+
+def test_build_plan_ignores_token_for_r2():
+    """R2 渠道没有凭证概念：即使误传 token 也不能出现在请求里。"""
+    manifest_url = detector.r2_url(
+        sources._r2_base(), "stable", detector.sha256_manifest_name(VERSION)
+    )
+    transport, record = router({manifest_url: httpx.Response(200, json={FILENAME: SHA})})
+    sources.build_plan(
+        source="r2", branch="stable", version=VERSION,
+        target=TARGET, transport=transport, token="ghp_should_not_leak",
+    )
+    assert all(not _has_authorization(r) for r in record)
+
+
+
 # --- MirrorChyan -------------------------------------------------------------
 
 def make_release(**kw) -> ReleaseInfo:

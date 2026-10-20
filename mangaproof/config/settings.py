@@ -260,6 +260,12 @@ DEFAULT_UPDATE_SPEED_LIMIT = 0
 #: 与 keyring 的逻辑命名保持一致：service = MangaProof, username = mirrorchyan_cdk。
 UPDATE_CDK_KEY = "mirrorchyan_cdk"
 
+#: GitHub Token 明文的键名（同样只在 keyring 不可用时才出现）。
+#: keyring 逻辑命名：service = MangaProof, username = github_token。
+#: 用途只有一个：缓解 api.github.com 的「60 次/小时/IP」匿名配额，见
+#: mangaproof/update/sources.py 的 github_plan()。
+UPDATE_GITHUB_TOKEN_KEY = "github_token"
+
 # Cloudflare R2 公网前缀（需求 §23）。放在设置之外的原因：它不是用户可调项，
 # 而是发布侧的事实；写在这里便于 UI/下载器共用，且改一处即可。
 R2_PUBLIC_BASE = "https://download.mangaproof.priloba.com"
@@ -638,13 +644,16 @@ class UpdateSettings:
                 "channel": "r2",
                 "proxy": "",
                 "speed_limit": 0,
-                "mirrorchyan_cdk": ""      # 仅 keyring 不可用时才有明文
+                "mirrorchyan_cdk": "",     # 仅 keyring 不可用时才有明文
+                "github_token": ""         # 同上
             }
         }
 
-    ``cdk`` 是**运行时字段**：桌面端优先放系统凭据库（keyring），
-    只有 keyring 实测不可用时才落到这里的明文（§14/§15）。
-    因此它不属于"用户设置"，但必须随设置一起读写，否则迁移逻辑无处落地。
+    ``cdk`` / ``github_token`` 是**运行时字段**：桌面端优先放系统凭据库
+    （keyring），只有 keyring 实测不可用时才落到这里的明文（§14/§15）。
+    因此它们不属于"用户设置"，但必须随设置一起读写，否则存储/迁移逻辑
+    无处落地。两者在界面上的语义完全一致（见 ui/update_dialog.py）：
+    **改完不立即生效，点「保存并检查更新」或「下载更新」时才落盘**。
     """
 
     branch: str = DEFAULT_UPDATE_BRANCH
@@ -652,6 +661,9 @@ class UpdateSettings:
     proxy: str = DEFAULT_UPDATE_PROXY
     speed_limit: int = DEFAULT_UPDATE_SPEED_LIMIT
     cdk: str = ""
+    #: GitHub Token（可选）：只用于 api.github.com 的资产元数据请求，
+    #: 缓解匿名 60 次/小时/IP 的限流；留空即匿名请求。
+    github_token: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """转成 settings.json 里的 ``update`` 对象。"""
@@ -661,6 +673,7 @@ class UpdateSettings:
             "proxy": self.proxy,
             "speed_limit": self.speed_limit,
             UPDATE_CDK_KEY: self.cdk,
+            UPDATE_GITHUB_TOKEN_KEY: self.github_token,
         }
 
     @classmethod
@@ -690,6 +703,9 @@ class UpdateSettings:
         s.cdk = str(raw.get(UPDATE_CDK_KEY, "") or "").strip() if isinstance(
             raw.get(UPDATE_CDK_KEY, ""), str
         ) else ""
+        # GitHub Token 同样只接受字符串：非字符串（误写成数字/布尔）当作"没填"
+        token = raw.get(UPDATE_GITHUB_TOKEN_KEY, "")
+        s.github_token = token.strip() if isinstance(token, str) else ""
         return s
 
 

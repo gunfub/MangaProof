@@ -14,7 +14,11 @@
 
 设计约束（全局，改代码前先读）：
 
-1. **检查阶段零凭据**：检查更新一律使用不带 CDK 的请求，检查函数不得有 cdk 形参（§17）；
+1. **检查阶段零凭据（指 CDK）**：MirrorChyan 检查一律使用**不带 CDK** 的请求，
+   检查函数不得有 cdk 形参（§17）。2026-10-20 补充：GitHub Token 是另一回事
+   —— 它只用于 ``api.github.com`` 的资产元数据请求（检查阶段显示文件/大小、
+   下载阶段解析资产与 digest，同一个函数），不发往 MirrorChyan、R2 或字节下载，
+   也不进入 :func:`mangaproof.update.mirrorchyan.check_update` 的签名；
 2. **CDK 只在"立即更新"阶段使用**（§18/§20），且绝不进日志/traceback/URL 日志（§16）；
 3. **平台专有逻辑运行时导入**，不让 Windows 加载 Linux 依赖、反之亦然（§6）；
 4. **所有耗时操作不得阻塞 GUI**：一律 QThread + Signal（§5）。

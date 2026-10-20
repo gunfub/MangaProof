@@ -11,9 +11,11 @@
     更新分支        [ stable ▼ ]
     更新渠道        [ Cloudflare R2 ▼ ]
     MirrorChyan CDK [                    ]
+    GitHub Token    [                    ]
     代理            [                    ] [ 测试代理 ]
     下载限速        [ 不限速 ▼ ]
     --------------------------------
+    （提示行：凭证被拒后回落匿名等，有内容才显示）
     （状态/进度区）
     [ 保存并检查更新 ] [ 下载更新 ] [ 清理升级缓存 ]        [ 取消 ]
 
@@ -58,6 +60,16 @@
    `MainWindow._install_apk_via_system`）。
    注意 `utils.platform.is_source_run()` 已把 Android 排除在"源码运行"之外 ——
    APK 是打包发行版，若被误判成源码运行，这一页会连下载都禁掉。
+6. **GitHub Token（2026-10-20 追加）与 CDK 同一套语义**：改完**不立即生效**，
+   点「保存并检查更新」或「下载更新」时才落盘；输入过程不置灰、不让已查到的
+   结果失效（置灰策略只认分支/渠道，与旧版一致）。落盘完成后交给后台线程的是
+   **控件里的文本**而不是 ``_draft.github_token`` —— keyring 写成功后 draft 里
+   那个字段会被清空（与 CDK 完全同一个坑，见 :meth:`UpdateDialog._start_download`）。
+   Token 只在 api.github.com 的请求上出现，字节下载不带（服务端签名短链无需凭证）；
+   被拒时由 :mod:`mangaproof.update.sources` 回落匿名，本页只负责把
+   ``DownloadPlan.notes`` / ``CheckOutcome.notice`` 显示到提示行
+   （:meth:`UpdateDialog._show_notice`）——不塞进状态正文，因为那段文字会被
+   每 100ms 一次的进度回调覆盖。
 
 另外两条纯 UI 约定（与设置页保持一致）：
 
@@ -187,6 +199,13 @@ SOURCE_RUN_HINT = (
 #: 这里只留一句，避免长文把 tooltip 撑成一大块。
 SOURCE_RUN_TOOLTIP = "源码运行不提供更新包下载：请在项目目录执行 git pull"
 
+#: GitHub Token 输入框的占位文案。
+#: 说清"只对 GitHub 渠道有意义"与"留空的代价"，避免用户以为它是必填项。
+GITHUB_TOKEN_PLACEHOLDER = "仅 GitHub Release 渠道需要；留空则匿名请求（易被限流）"
+
+#: 申请 GitHub Token 的官方入口（细粒度令牌，勾 Contents: read 即可）。
+GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
+
 
 def _speed_label(value: int) -> str:
     return "不限速" if value == 0 else f"{value} M"
@@ -285,6 +304,19 @@ class UpdateDialog(QDialog):
         self.cdk_edit.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("MirrorChyan CDK", self.cdk_edit)
 
+        # GitHub Token（2026-10-20）：与 CDK 并排放在一起——两者都是凭据，
+        # 都是"改完不立即生效、点动作按钮才落盘"。Password 回显同为防肩窥。
+        # 注意这里**不接** textChanged：按需求，改此项不得置灰「下载更新」、
+        # 也不得让已查到的结果失效（置灰策略只认分支/渠道，保持原状）。
+        self.token_edit = QLineEdit()
+        self.token_edit.setPlaceholderText(GITHUB_TOKEN_PLACEHOLDER)
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_edit.setToolTip(
+            "GitHub 的匿名 API 配额是 60 次/小时/IP，用尽后下载会失败。\n"
+            f"填写后只用于 api.github.com 的接口请求。申请：{GITHUB_TOKEN_URL}"
+        )
+        form.addRow("GitHub Token", self.token_edit)
+
         # 「代理」行 = 输入框 + 测试按钮，两者贴齐字段列的两端。
         # 复合控件默认带一圈内容边距、且默认按 sizeHint 摆放（不跟着列宽伸展），
         # 结果是输入框左边比别的行右 9px、按钮右边比别的行左 9px、整体还短一截。
@@ -311,6 +343,10 @@ class UpdateDialog(QDialog):
         self.hint_label = QLabel()
         self.hint_label.setWordWrap(True)
         self.hint_label.setObjectName("updateHint")
+        # 提示行里带"申请 GitHub Token"的链接：沿用关于页的做法，
+        # 交给 QLabel 直接调系统浏览器（about_dialog.py 同款）。
+        self.hint_label.setTextFormat(Qt.TextFormat.RichText)
+        self.hint_label.setOpenExternalLinks(True)
         root.addWidget(self.hint_label)
 
         line = QFrame()
@@ -334,6 +370,20 @@ class UpdateDialog(QDialog):
         status_layout = QVBoxLayout(status_body)
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(6)
+
+        # 提示行（2026-10-20）：放**输出区顶部**，只承载"需要知道但不该中断流程"
+        # 的提示（GitHub Token 被拒后回落匿名、服务端未给 SHA-256 等）。
+        # 不写进 status_label 的原因：下载进度每 100ms 重写一次正文，
+        # 写正文等于提示只闪 0.1 秒。放在滚动容器里则长度再长也不会撑窗口、
+        # 更不会去压 QFormLayout 的行高（见 _fit_status_height）。
+        self.notice_label = QLabel("")
+        self.notice_label.setObjectName("updateNotice")
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.notice_label.setVisible(False)
+        status_layout.addWidget(self.notice_label)
 
         self.status_label = QLabel("选择分支与渠道后点击「保存并检查更新」。")
         self.status_label.setWordWrap(True)
@@ -444,15 +494,32 @@ class UpdateDialog(QDialog):
         return widget
 
     def _clear_output(self) -> None:
-        """清空下半的"输出区"（状态正文 + 详情行 + 滚动位置）。
+        """清空下半的"输出区"（状态正文 + 提示行 + 详情行 + 滚动位置）。
 
         每次开始一个新动作（检查 / 下载 / 测试代理）都先清一遍：
         否则上一轮的"发现新版本…"会留在下面，用户分不清哪条是这次的结论；
         滚动位置也一并回到顶部，新文案从第一行开始读。
         """
+        self.notice_label.clear()
+        self.notice_label.setVisible(False)
         self.status_label.clear()
         self.detail_label.clear()
         self.detail_label.setVisible(False)
+        self.status_area.verticalScrollBar().setValue(0)
+
+    def _show_notice(self, text: str) -> None:
+        """把一条提示追加到输出区顶部的提示行（只显示，不打断流程）。
+
+        多条提示按行累加（一次下载可能同时有"Token 被拒"与"跳过校验"两条），
+        由 :meth:`_clear_output` 在下一个动作开始时清空。
+        滚动条拉回顶部：提示在正文上方，不拉回去就只能看到正文。
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        existing = self.notice_label.text()
+        self.notice_label.setText(f"{existing}\n{text}" if existing else text)
+        self.notice_label.setVisible(True)
         self.status_area.verticalScrollBar().setValue(0)
 
     def _reset_progress(self) -> None:
@@ -487,6 +554,7 @@ class UpdateDialog(QDialog):
         self._select(self.speed_combo, self._draft.speed_limit)
         self.proxy_edit.setText(self._draft.proxy)
         self.cdk_edit.setText(cdk_store.load_cdk(self._draft))
+        self.token_edit.setText(cdk_store.load_github_token(self._draft))
 
     @staticmethod
     def _select(combo, value) -> None:
@@ -494,18 +562,34 @@ class UpdateDialog(QDialog):
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _update_hint(self) -> None:
-        """提示 CDK 存哪、代理/限速对哪些渠道生效（需求 §14/§29/§30）。"""
+        """提示两项凭据存哪、Token 用来做什么、代理/限速对哪些渠道生效。
+
+        需求 §14/§29/§30；GitHub Token 一段是 2026-10-20 追加的。
+        文案用富文本（``<br>`` 分行 + 一个外链），因为要放"去哪里申请 Token"
+        这个链接 —— 纯文本长 URL 在窄对话框里会折成一堆碎字。
+        """
         parts: list[str] = []
         # 用构造时定下的 self._android，而不是再调一次 is_android_strict()：
         # 同一页里的运行形态判据只应有一个来源（也便于测试注入）。
         if self._android:
-            parts.append("CDK 保存在应用私有目录的 settings.json。应用的私有目录受安卓沙箱保护。")
+            parts.append(
+                "CDK 与 GitHub Token 保存在应用私有目录的 settings.json，受安卓沙箱保护。"
+            )
         elif cdk_store.keyring_available():
-            parts.append("系统凭据库可用，CDK 将保存在系统凭据库（keyring），不写入配置文件。")
+            parts.append(
+                "系统凭据库可用，CDK 与 GitHub Token 将保存在系统凭据库（keyring），"
+                "不写入配置文件。"
+            )
         else:
-            parts.append("系统凭据库不可用，CDK 将明文保存在 settings.json。")
-        parts.append("\n代理与限速仅对 Cloudflare R2 / GitHub 生效；MirrorChyan 不使用它们。")
-        self.hint_label.setText("　".join(parts))
+            parts.append("系统凭据库不可用，CDK 与 GitHub Token 将明文保存在 settings.json。")
+        parts.append(
+            "GitHub Token 只用于 api.github.com 的接口请求（缓解匿名 60 次/小时/IP 的"
+            "限流），留空即匿名请求。申请："
+            f"<a href='{GITHUB_TOKEN_URL}'>github.com/settings/personal-access-tokens</a>"
+            "（勾选 Contents: read 即可）。"
+        )
+        parts.append("代理与限速仅对 Cloudflare R2 / GitHub 生效；MirrorChyan 不使用它们。")
+        self.hint_label.setText("<br>".join(parts))
 
     # -- 表单 ↔ draft ------------------------------------------------------
 
@@ -514,17 +598,23 @@ class UpdateDialog(QDialog):
         self._draft.channel = self.channel_combo.currentData()
         self._draft.speed_limit = int(self.speed_combo.currentData())
         self._draft.proxy = self.proxy_edit.text().strip()
+        self._draft.github_token = self.token_edit.text().strip()
         return self._draft
 
     def _commit(self, *, save_cdk: bool = True) -> None:
         """把 draft 提交到真实设置并发信号（需求 §13：保存由两个动作按钮触发）。
 
         「取消」不调用它 —— 未执行任何动作的修改直接丢弃。
+
+        2026-10-20：GitHub Token 与 CDK 一起提交，语义完全一致；
+        **清空 = 两处都删**（keyring 条目 + settings.json 明文），
+        见 :mod:`mangaproof.update.cdk_store`。
         """
         draft = self._collect_draft()
         if save_cdk:
-            # 写入 keyring 成功时 draft.cdk 会被清空（需求 §14）
+            # 写入 keyring 成功时 draft.cdk / draft.github_token 会被清空（需求 §14）
             cdk_store.save_cdk(draft, self.cdk_edit.text().strip())
+            cdk_store.save_github_token(draft, self.token_edit.text().strip())
         self._settings.update = draft
         self.settings_committed.emit()
 
@@ -788,6 +878,9 @@ class UpdateDialog(QDialog):
             branch=self._draft.branch,
             source=self._draft.channel,
             proxy=self._draft.proxy,
+            # GitHub 渠道的"大小探测"要带 token（与下载阶段同一个请求）。
+            # 必须读控件：_commit() 写 keyring 成功时 draft.github_token 已被清空。
+            github_token=self.token_edit.text().strip(),
             parent=self,
         )
         worker.progress.connect(self.status_label.setText)
@@ -800,6 +893,10 @@ class UpdateDialog(QDialog):
         self._reset_progress()
         self._set_form_enabled(True)
         self._outcome = outcome
+        # GitHub Token 被拒后回落匿名、或大小探测失败的具体原因：写到提示行，
+        # 正文只报结论（"发现新版本 …"），原因读得到但不干扰。
+        if outcome.notice:
+            self._show_notice(outcome.notice)
 
         if outcome.kind == "unsupported":
             self._state = "no_update"
@@ -905,9 +1002,13 @@ class UpdateDialog(QDialog):
             proxy=self._draft.proxy,
             speed_limit_mbps=self._draft.speed_limit,
             cdk=self.cdk_edit.text().strip(),
+            github_token=self.token_edit.text().strip(),
             parent=self,
         )
         worker.progress.connect(self._on_download_progress)
+        # plan.notes（Token 被拒后回落匿名、跳过校验…）走独立提示行，
+        # 不走 progress —— 后者的文案每 100ms 被覆盖一次。
+        worker.notice.connect(self._show_notice)
         worker.succeeded.connect(self._on_download_ok)
         worker.failed.connect(self._on_download_failed)
         self._download_worker = worker
@@ -1023,13 +1124,17 @@ class UpdateDialog(QDialog):
     def _set_form_enabled(self, enabled: bool) -> None:
         for widget in (
             self.branch_combo, self.channel_combo, self.cdk_edit,
+            self.token_edit,
             self.proxy_edit, self.proxy_test_btn, self.speed_combo,
         ):
             widget.setEnabled(enabled)
 
     def output_text(self) -> str:
         """输出区当前全文（供测试断言，也方便日志排查）。"""
-        parts = [self.status_label.text()]
+        parts = [
+            self.notice_label.text() if self.notice_label.isVisible() else "",
+            self.status_label.text(),
+        ]
         if self.detail_label.isVisible() and self.detail_label.text():
             parts.append(self.detail_label.text())
         return "\n".join(p for p in parts if p)
@@ -1067,6 +1172,8 @@ __all__ = [
     "BRANCH_LABELS",
     "CHECK_BTN_TEXT",
     "DOWNLOAD_BTN_TEXT",
+    "GITHUB_TOKEN_PLACEHOLDER",
+    "GITHUB_TOKEN_URL",
     "INSTALL_BTN_TEXT",
     "STALE_SELECTION_HINT",
     "MIRRORCHYAN_NEEDS_CDK",

@@ -38,6 +38,8 @@ from mangaproof.ui.update_dialog import (  # noqa: E402
     CACHE_CLEARED_HINT,
     CHECK_BTN_TEXT,
     DOWNLOAD_BTN_TEXT,
+    GITHUB_TOKEN_PLACEHOLDER,
+    GITHUB_TOKEN_URL,
     INSTALL_BTN_TEXT,
     MIRRORCHYAN_NEEDS_CDK,
     STALE_SELECTION_HINT,
@@ -70,10 +72,17 @@ def _no_keyring_and_temp_cache(monkeypatch, tmp_path):
 
 
 class _SignalStub:
-    """QThread 信号桩：只要能 .connect() 就行。"""
+    """QThread 信号桩：能 .connect() 也算能 .emit()（用例可手动触发回调）。"""
 
-    def connect(self, *_args, **_kwargs) -> None:
-        pass
+    def __init__(self) -> None:
+        self.slots: list = []
+
+    def connect(self, slot) -> None:
+        self.slots.append(slot)
+
+    def emit(self, *args) -> None:
+        for slot in list(self.slots):
+            slot(*args)
 
 
 class _FakeWorker:
@@ -84,6 +93,7 @@ class _FakeWorker:
         self.progress = _SignalStub()
         self.succeeded = _SignalStub()
         self.failed = _SignalStub()
+        self.notice = _SignalStub()             # UpdateDownloadWorker 的提示行信号
         self.finished_with = _SignalStub()      # ProxyTestWorker / CacheClearWorker 用
 
     def start(self) -> None:
@@ -570,6 +580,188 @@ def test_download_button_geometry_is_stable(dialog, fake_workers, tmp_path):
     dlg._on_cache_clicked()                      # 进入清理态
     QApplication.processEvents()
     assert geometry() == before
+
+
+# -- GitHub Token（2026-10-20 追加） ------------------------------------------
+
+def _form_labels(dlg) -> list[str]:
+    """按行序取出表单的标签文本（用于钉住新行的位置）。"""
+    from PySide6.QtWidgets import QFormLayout
+
+    form = _form_layout(dlg)
+    labels: list[str] = []
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+        widget = item.widget() if item is not None else None
+        labels.append(widget.text() if widget is not None else "")
+    return labels
+
+
+def test_github_token_row_sits_between_cdk_and_proxy(dialog):
+    """位置固定：两项凭据挨着，先 CDK 后 Token，再是代理/限速。"""
+    dlg, _ = dialog
+    assert _form_labels(dlg) == [
+        "更新分支", "更新渠道", "MirrorChyan CDK", "GitHub Token", "代理", "下载限速",
+    ]
+
+
+def test_github_token_row_is_password_and_aligned(dialog):
+    """与 CDK 同一形态：Password 回显（防肩窥）、左边界与其他输入行齐平。"""
+    from PySide6.QtWidgets import QLineEdit
+
+    dlg, _ = dialog
+    _laid_out(dlg)
+
+    assert isinstance(dlg.token_edit, QLineEdit)
+    assert dlg.token_edit.echoMode() == QLineEdit.EchoMode.Password
+    assert dlg.token_edit.text() == ""
+    assert dlg.token_edit.placeholderText() == GITHUB_TOKEN_PLACEHOLDER
+
+    token_left, token_right = _box(dlg, dlg.token_edit)
+    cdk_left, cdk_right = _box(dlg, dlg.cdk_edit)
+    proxy_left, _ = _box(dlg, dlg.proxy_edit)
+    assert token_left == cdk_left == proxy_left, "新行左边界要与其他行一致"
+    assert token_right == cdk_right, "新行右边界也要与其他行一致"
+
+
+def test_github_token_is_saved_and_used_by_both_workers(dialog, fake_workers):
+    """检查阶段的大小探测与下载阶段都要拿到 token，并且必须已落盘。"""
+    dlg, manager = dialog
+    _check(dlg, channel="github")
+    assert fake_workers["check"][0].kwargs["github_token"] == ""
+
+    dlg.token_edit.setText("  ghp_new  ")
+    dlg._on_download_clicked()
+
+    assert len(fake_workers["download"]) == 1
+    assert fake_workers["download"][0].kwargs["github_token"] == "ghp_new", \
+        "必须读控件而不是 draft（keyring 写成功时 draft 会被清空）"
+    # 测试环境没有 keyring → 明文落进 settings
+    assert manager.settings.update.github_token == "ghp_new"
+
+    # 下一轮检查同样带上它（假下载线程不会自己结束，手动把状态放回空闲）
+    dlg._state = "idle"
+    dlg._on_check_clicked()
+    assert fake_workers["check"][-1].kwargs["github_token"] == "ghp_new"
+
+
+def test_clearing_github_token_wipes_saved_value(dialog, fake_workers):
+    """界面里清空后保存 = settings 里的明文也要清掉（keyring 由凭据层负责）。"""
+    dlg, manager = dialog
+    dlg.token_edit.setText("ghp_secret")
+    dlg._commit()
+    assert manager.settings.update.github_token == "ghp_secret"
+
+    dlg.token_edit.clear()
+    dlg._commit()
+    assert manager.settings.update.github_token == ""
+
+
+def test_editing_token_does_not_invalidate_result(dialog, fake_workers):
+    """置灰策略保持现状：改 Token 不置灰、不提示重查（与 CDK 完全一致）。
+
+    这条守的是需求方决定：只有**分支/渠道**改动才让检查结果失效。
+    即使将来有人误把 token_edit 接到 _sync_actions 上，这里也会红。
+    """
+    dlg, _ = dialog
+    _laid_out(dlg)
+    _check(dlg)
+    assert dlg.download_btn.isEnabled()
+
+    dlg.token_edit.setText("ghp_typed")
+    dlg._sync_actions()          # 模拟"有人把 textChanged 接了上来"
+
+    assert dlg.download_btn.isEnabled(), "改 Token 不该让下载按钮失效"
+    assert not dlg.detail_label.isVisible(), "也不该弹「结果已失效」"
+    assert dlg.output_text().count(STALE_SELECTION_HINT) == 0
+
+
+def test_token_field_is_disabled_while_busy(dialog, fake_workers):
+    """检查/下载期间表单整体置灰，新控件必须一起（否则能中途改 token）。"""
+    dlg, _ = dialog
+    dlg._on_check_clicked()
+    assert not dlg.token_edit.isEnabled()
+    dlg._check_worker = None
+    _check(dlg, start=False)
+    assert dlg.token_edit.isEnabled()
+
+
+def test_notice_label_shows_appends_and_clears(dialog):
+    """提示行：多条累加、进 output_text、新动作清空。"""
+    from PySide6.QtWidgets import QApplication
+
+    dlg, _ = dialog
+    _laid_out(dlg)
+    assert not dlg.notice_label.isVisible()
+
+    dlg._show_notice("GitHub Token 无效（HTTP 401），已自动改用匿名请求")
+    QApplication.processEvents()
+    assert dlg.notice_label.isVisible()
+    assert "GitHub Token 无效" in dlg.output_text()
+
+    dlg._show_notice("GitHub 未提供 digest，将跳过校验")
+    assert dlg.notice_label.text().count("\n") == 1, "多条提示按行累加"
+    assert "跳过校验" in dlg.output_text()
+
+    dlg._clear_output()
+    assert not dlg.notice_label.isVisible()
+    assert dlg.output_text() == ""
+
+
+def test_check_outcome_notice_goes_to_notice_label(dialog, fake_workers):
+    """检查阶段的大小探测失败/回退原因写到提示行，不顶掉结论正文。"""
+    from PySide6.QtWidgets import QApplication
+
+    dlg, _ = dialog
+    _laid_out(dlg)
+    outcome = _check(dlg)
+
+    outcome.notice = "GitHub Token 被拒绝（HTTP 403），已自动改用匿名请求"
+    dlg._on_check_ok(outcome)
+    QApplication.processEvents()
+
+    assert dlg.notice_label.isVisible()
+    assert "Token 被拒绝" in dlg.notice_label.text()
+    assert "发现新版本" in dlg.status_label.text()
+
+
+def test_download_worker_notice_reaches_the_notice_label(dialog, fake_workers):
+    """下载线程的 notice 信号确实接到了提示行（而不是被吞掉）。"""
+    from PySide6.QtWidgets import QApplication
+
+    dlg, _ = dialog
+    _laid_out(dlg)
+    _check(dlg, channel="github")
+    dlg._on_download_clicked()
+
+    worker = fake_workers["download"][0]
+    worker.notice.emit("GitHub Token 无效或已过期（HTTP 401），已自动改用匿名请求")
+    QApplication.processEvents()
+
+    assert dlg.notice_label.isVisible()
+    assert "已自动改用匿名请求" in dlg.notice_label.text()
+
+
+def test_new_action_clears_notice(dialog, fake_workers):
+    dlg, _ = dialog
+    _laid_out(dlg)
+    _check(dlg)
+    dlg._show_notice("上一轮留下的提示")
+    assert dlg.notice_label.isVisible()
+
+    dlg._on_check_clicked()
+    assert not dlg.notice_label.isVisible()
+    assert "上一轮留下的提示" not in dlg.output_text()
+
+
+def test_hint_mentions_token_and_storage(dialog):
+    """提示行必须说清两件事：Token 存哪、留空/申请的后果。"""
+    dlg, _ = dialog
+    text = dlg.hint_label.text()
+    assert "GitHub Token" in text
+    assert GITHUB_TOKEN_URL in text
+    assert "keyring" in text or "settings.json" in text
+    assert dlg.hint_label.openExternalLinks() is True
 
 
 # -- 清理升级缓存（主程序侧；需求 §36/§37） ------------------------------------

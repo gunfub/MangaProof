@@ -159,6 +159,9 @@ QScrollBar::handle:horizontal {{ background: {COLOR_BORDER}; border-radius: 5px;
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 QMessageBox {{ background-color: {COLOR_BG_MAIN}; }}
 QLabel#hintLabel {{ color: {COLOR_WARN}; }}
+/* 更新页的提示行（GitHub Token 被拒后回落匿名等）：与 hintLabel 同为警告色，
+   但它是独立 objectName —— 提示行常驻在输出区顶部，不参与动态隐藏/布局变化 */
+QLabel#updateNotice {{ color: {COLOR_WARN}; }}
 /* 设置页每行的文本：控件被禁用时文本一起置灰（见 ui/settings_dialog.py 的 SettingsRow） */
 QLabel#settingsRowLabel:disabled {{ color: {COLOR_TEXT_DIM}; }}
 QToolTip {{ background-color: {COLOR_BG_PANEL}; color: {COLOR_TEXT}; border: 1px solid {COLOR_BORDER}; }}
