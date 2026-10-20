@@ -313,6 +313,22 @@ def test_commit_applies_draft_and_signals(dialog):
     assert manager.settings.update.speed_limit == 20
 
 
+def test_commit_does_not_touch_poprako_settings(dialog):
+    """更新与监制同步的代理**互不影响**：提交 update 段不得动 poprako 段。
+
+    两者各自住在 settings.json 的顶层键里（``update`` / ``poprako``），
+    提交只替换自己那一段；这条用例防止以后有人图省事整份 Settings 重建。
+    """
+    dlg, manager = dialog
+    manager.settings.poprako.proxy = "http://127.0.0.1:7897"
+    dlg.proxy_edit.setText("http://127.0.0.1:7890")
+
+    dlg._commit(save_cdk=False)
+
+    assert manager.settings.update.proxy == "http://127.0.0.1:7890"
+    assert manager.settings.poprako.proxy == "http://127.0.0.1:7897"
+
+
 def test_no_update_text_matches_requirement(qapp, tmp_path, monkeypatch):
     """需求 §32 的"无更新"文案。"""
     from mangaproof.ui.update_worker import CheckOutcome

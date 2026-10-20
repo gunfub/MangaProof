@@ -807,6 +807,20 @@ def test_proxy_save_persists_and_rebuilds_client(qapp, tmp_path):
         dialog.done(0)
 
 
+def test_proxy_save_does_not_touch_update_settings(qapp, tmp_path):
+    """自更新的代理是另一个顶层键：保存 Poprako 代理不许动它。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._manager.settings.update.proxy = "http://127.0.0.1:7890"
+        dialog._proxy_edit.setText("http://127.0.0.1:7897")
+        dialog._on_proxy_save_clicked()
+
+        assert dialog._poprako.proxy == "http://127.0.0.1:7897"
+        assert dialog._manager.settings.update.proxy == "http://127.0.0.1:7890"
+    finally:
+        dialog.done(0)
+
+
 def test_proxy_save_empty_means_direct(qapp, tmp_path):
     dialog = open_dialog(tmp_path, make_task("001.psd"))
     try:
