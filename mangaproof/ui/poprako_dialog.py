@@ -110,7 +110,12 @@ from mangaproof.ui.theme import (
     COLOR_TEXT_DIM,
     COLOR_WARN,
 )
-from mangaproof.ui.widgets import NoWheelComboBox, ToggleSwitch
+from mangaproof.ui.widgets import (
+    PROXY_PLACEHOLDER,
+    NoWheelComboBox,
+    NoWheelListWidget,
+    ToggleSwitch,
+)
 from mangaproof.utils.platform import is_android_strict
 
 log = logging.getLogger("mangaproof.ui.poprako_dialog")
@@ -573,8 +578,12 @@ class PoprakoSyncDialog(QDialog):
     NAV_ORDER = ("account", "proxy", "target", "mapping", "upload")
 
     def _make_nav_list(self, object_name: str, font) -> QListWidget:
-        """侧栏列表：无边框、透明底；条目样式与旧版逐字一致（左对齐不变）。"""
-        widget = QListWidget()
+        """侧栏列表：无边框、透明底；条目样式与旧版逐字一致（左对齐不变）。
+
+        用 :class:`NoWheelListWidget`：条目固定 5 条、永远不需要滚动，
+        滚轮在侧栏上什么都不该发生（``ScrollBarAlwaysOff`` 只藏条，藏不住滚动）。
+        """
+        widget = NoWheelListWidget()
         widget.setObjectName(object_name)
         widget.setUniformItemSizes(True)
         widget.setFrameShape(QFrame.Shape.NoFrame)
@@ -752,9 +761,9 @@ class PoprakoSyncDialog(QDialog):
         rows = page.enable_scroll()
 
         self._proxy_edit = QLineEdit(self._poprako.proxy)
-        self._proxy_edit.setPlaceholderText(
-            "留空 = 直连；例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
-        )
+        # 占位文字与「检查更新」的代理输入框**逐字一致**（共用 PROXY_PLACEHOLDER，
+        # 2026-10-20 需求方）：两处说的是同一件事，不许各写一套说法。
+        self._proxy_edit.setPlaceholderText(PROXY_PLACEHOLDER)
         self._proxy_edit.setToolTip(
             "留空表示直连（与更新功能的代理设置同口径）；支持 http / https / socks5，"
             "可带账号密码：http://user:pass@host:port（会明文保存在 settings.json）"
@@ -986,16 +995,18 @@ class PoprakoSyncDialog(QDialog):
         return page
 
     def _fit_nav_heights(self) -> None:
-        """列表高度按条目数固定（5 项不需要滚动）。
+        """两个列表的高度 = 各自内容的精确高度（条目固定 5 项，永不滚动）。
 
-        流程组多算 2px：它自己有 1px 上下边框，边框会挤占可视高度。
+        高度**不能**写成「行数 × 行高」：QListWidget 自己还有一圈 frame 内缩
+        （``frameWidth()``，实测 2 / 3px，上下各吃一次），漏掉它内容就比 viewport
+        高 4px。滚动条被 ``ScrollBarAlwaysOff`` 藏起来，所以表面看不出来，
+        但滚轮/触控板照样推得动列表 —— 表现为侧栏标题整体错位、最后一项被裁
+        （2026-10-20 需求方反馈"侧栏大标题在滚动"）。
+        这里按实测行高 + frame 算，``verticalScrollBar().maximum()`` 必为 0。
         """
-        settings_rows = self._settings_nav.count()
-        workflow_rows = self._workflow_nav.count()
-        self._settings_nav.setFixedHeight(settings_rows * self._nav_row_height)
-        self._workflow_nav.setFixedHeight(
-            workflow_rows * self._nav_row_height + 2
-        )
+        for widget in (self._settings_nav, self._workflow_nav):
+            content = sum(widget.sizeHintForRow(row) for row in range(widget.count()))
+            widget.setFixedHeight(content + 2 * widget.frameWidth())
 
     @staticmethod
     def _new_combo() -> QComboBox:
@@ -1134,6 +1145,10 @@ class PoprakoSyncDialog(QDialog):
             QTimer.singleShot(0, self._startup)
 
     def _startup(self) -> None:
+        # 窗口已经出现、样式也 polish 过了：再校一次侧栏高度。
+        # 正常情况下与构造时同值（不会动）；换平台样式导致 frameWidth 变化时，
+        # 靠这一次把"藏起来的滚动条 + 仍能滚"挡在用户看见之前。
+        self._fit_nav_heights()
         log.info("监制数据同步：开始校验登录状态")
         token = load_token(self._poprako)
         if not token:

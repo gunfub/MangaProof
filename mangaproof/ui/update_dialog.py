@@ -136,7 +136,7 @@ from mangaproof.update.errors import UpdateError
 from mangaproof.update.humanize import human_size, human_speed
 from mangaproof.update.models import CheckResult
 from mangaproof.utils.platform import is_android_strict, is_source_run
-from mangaproof.ui.widgets import NoWheelComboBox
+from mangaproof.ui.widgets import PROXY_PLACEHOLDER, NoWheelComboBox
 
 log = logging.getLogger("mangaproof.ui.update_dialog")
 
@@ -378,7 +378,9 @@ class UpdateDialog(QDialog):
         # 结果是输入框左边比别的行右 9px、按钮右边比别的行左 9px、整体还短一截。
         # 对策：内容边距归零 + 水平方向声明 Expanding（见 _proxy_row）。
         self.proxy_edit = QLineEdit()
-        self.proxy_edit.setPlaceholderText("留空表示不使用代理；支持 http(s):// 与 socks5://")
+        # 占位文字与「监制数据同步 → 代理」共用同一句（PROXY_PLACEHOLDER），
+        # 两处灰字必须逐字一致（2026-10-20 需求方）。
+        self.proxy_edit.setPlaceholderText(PROXY_PLACEHOLDER)
         self.proxy_test_btn = QPushButton("测试代理")
         self.proxy_test_btn.clicked.connect(self._on_test_proxy)
         # 宽度钉死：文字在「测试代理 / 测试中…」之间来回换，不钉死输入框就会

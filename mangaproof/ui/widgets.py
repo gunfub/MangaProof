@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 gunfub
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""通用小部件。
+"""通用小部件 + 跨对话框共用的界面文案。
 
 - :class:`NoWheelComboBox`：不响应滚轮的下拉框；
+- :class:`NoWheelListWidget`：不响应滚轮的列表（条目数固定的导航列表）；
 - :class:`ToggleSwitch`：胶囊形状的开关（点击切换，滑块只是视觉）。
 """
 
@@ -18,7 +19,12 @@ from PySide6.QtCore import (
     Qt,
 )
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QComboBox, QSizePolicy
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QComboBox,
+    QListWidget,
+    QSizePolicy,
+)
 
 from mangaproof.ui.theme import (
     COLOR_ACCENT,
@@ -26,6 +32,11 @@ from mangaproof.ui.theme import (
     COLOR_BORDER,
     COLOR_TEXT_DIM,
 )
+
+#: 代理输入框的占位文案：「设置 → 检查更新」与「监制数据同步 → 代理」共用同一句
+#: （2026-10-20 需求方：两处灰字必须一致，不许各写一套说法）。
+#: 改文案只改这里 —— 两处都直接引用本常量，不会再漂。
+PROXY_PLACEHOLDER = "留空表示不使用代理；支持 http(s):// 与 socks5://"
 
 
 class NoWheelComboBox(QComboBox):
@@ -45,6 +56,20 @@ class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event) -> None:   # noqa: N802（Qt 命名）
         event.ignore()
+
+
+class NoWheelListWidget(QListWidget):
+    """任何情况下都不响应滚轮的列表（条目数固定的导航列表用）。
+
+    ``setVerticalScrollBarPolicy(ScrollBarAlwaysOff)`` 只是**把滚动条藏起来**：
+    列表内容只要比 viewport 高一点点（例如定高时忘了算列表自身的 frame 内缩），
+    滚轮/触控板仍然推得动它 —— 看不到条，却能把标题整行顶出视野、底部空出一行。
+    本类把滚轮直接吃掉：不上滚、不下滚，也**不冒泡**给父级
+    （侧栏上的滚轮不该顺带把右侧内容一起滚了）。
+    """
+
+    def wheelEvent(self, event) -> None:   # noqa: N802（Qt 命名）
+        event.accept()
 
 
 # ---------------------------------------------------------------------------

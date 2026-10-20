@@ -1109,6 +1109,53 @@ def test_sidebar_selection_is_exclusive_between_groups(qapp, tmp_path):
         dialog.done(0)
 
 
+def test_sidebar_lists_cannot_scroll(qapp, tmp_path):
+    """侧栏 5 项定高：滚动范围必须为 0，滚轮也不能把内容推走。
+
+    回归（2026-10-20 需求方："侧栏大标题在滚动"）：``ScrollBarAlwaysOff``
+    只是把条藏起来，定高若漏算列表自身的 frame 内缩，内容就比 viewport 高
+    4px —— 滚轮照样推得动（``ScrollPerItem``，一次跳一整行），表现为标题
+    整体错位、最后一项被裁。
+    """
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        from mangaproof.ui.widgets import NoWheelListWidget
+
+        dialog.show()
+        qapp.processEvents()
+        for widget in (dialog._settings_nav, dialog._workflow_nav):
+            assert isinstance(widget, NoWheelListWidget), "侧栏要用不吃滚轮的列表"
+            content = sum(widget.sizeHintForRow(row) for row in range(widget.count()))
+            assert widget.verticalScrollBar().maximum() == 0, "侧栏不该有可滚动的余地"
+            assert widget.viewport().height() >= content, "条目要完整放得下"
+
+            before = widget.visualItemRect(widget.item(0))
+            center = QPointF(widget.viewport().rect().center())
+            event = QWheelEvent(
+                center, center, QPoint(0, 0), QPoint(0, -120),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.NoScrollPhase, False,
+            )
+            QApplication.sendEvent(widget.viewport(), event)
+            qapp.processEvents()
+            assert widget.visualItemRect(widget.item(0)) == before, "滚轮不得推动侧栏"
+            assert event.isAccepted(), "滚轮要就地吃掉，不许冒泡给父级"
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_placeholder_is_shared_with_update_dialog(qapp, tmp_path):
+    """代理输入框的空态灰字与「检查更新」的代理输入框逐字一致（共用常量）。"""
+    from mangaproof.ui.widgets import PROXY_PLACEHOLDER
+
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        assert dialog._proxy_edit.placeholderText() == PROXY_PLACEHOLDER
+        assert PROXY_PLACEHOLDER == "留空表示不使用代理；支持 http(s):// 与 socks5://"
+    finally:
+        dialog.done(0)
+
+
 def _open_dialog_without_task(tmp_path):
     manager = SettingsManager(tmp_path / "settings.json")
     manager.save()

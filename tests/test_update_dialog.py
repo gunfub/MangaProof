@@ -994,6 +994,19 @@ def test_combos_ignore_wheel(dialog):
         assert combo.currentIndex() == before, "滚轮不该改变下拉框选中项"
 
 
+def test_proxy_placeholder_is_shared_with_sync_dialog(dialog):
+    """「代理」输入框的空态灰字与「监制数据同步 → 代理」逐字一致（2026-10-20）。
+
+    两处说的是同一件事（留空 = 直连），各写一套说法只会让用户以为支持的范围不同；
+    所以共用 ``ui.widgets.PROXY_PLACEHOLDER``，这条用例把"真的接上常量"钉住。
+    """
+    from mangaproof.ui.widgets import PROXY_PLACEHOLDER
+
+    dlg, _ = dialog
+    assert dlg.proxy_edit.placeholderText() == PROXY_PLACEHOLDER
+    assert PROXY_PLACEHOLDER == "留空表示不使用代理；支持 http(s):// 与 socks5://"
+
+
 def test_proxy_row_aligns_with_other_rows(dialog):
     """「代理」行两端与其他输入行严格对齐（曾经左缩 9px、右缩 9px）。
 
