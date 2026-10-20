@@ -38,8 +38,11 @@ from mangaproof.poprako.models import Chapter, Membership, PageArtwork, User
 from mangaproof.review.issue import Issue
 from mangaproof.review.state import FileRecord, TaskState
 from mangaproof.ui.poprako_dialog import (
+    BOTTOM_MARGIN,
+    BUTTON_GAP,
     DEFAULT_DIALOG_SIZE,
     GUTTER,
+    ISSUE_COLUMN_WIDTH,
     MINIMUM_DIALOG_SIZE,
     NAV_WIDTH,
     ROW_SPACING,
@@ -169,13 +172,29 @@ def test_window_geometry_matches_settings_spec(qapp, tmp_path):
         assert (dialog.width(), dialog.height()) == DEFAULT_DIALOG_SIZE
         assert (dialog.minimumWidth(), dialog.minimumHeight()) == MINIMUM_DIALOG_SIZE
         margins = dialog.layout().contentsMargins()
+        # 2026-10-21：底部留白收窄到 16（= 侧栏底到状态行的间距），状态文字才居中
         assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
-            GUTTER, GUTTER, GUTTER, GUTTER,
+            GUTTER, GUTTER, GUTTER, BOTTOM_MARGIN,
         )
+        assert dialog.layout().spacing() == BOTTOM_MARGIN
         assert dialog._sidebar.width() == NAV_WIDTH
         account_page = dialog._page_widgets["account"]
         assert account_page.rows is not None
         assert account_page.rows.spacing() == ROW_SPACING
+    finally:
+        dialog.done(0)
+
+
+def test_window_ratio_matches_main_window(qapp, tmp_path):
+    """默认尺寸与主界面同比例（主窗口 1440×900 = 1.6 → 960×600）。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        width, height = DEFAULT_DIALOG_SIZE
+        assert width * 5 == height * 8, "默认尺寸必须是 1.6（宽:高 = 8:5）"
+        assert width * 900 == height * 1440, "与主窗口 1440×900 同比例"
+        assert width > 860 and height > 560, "比旧尺寸（860×560）更高更大"
+        min_width, min_height = MINIMUM_DIALOG_SIZE
+        assert min_width * 900 == min_height * 1440, "最小尺寸保持同一比例"
     finally:
         dialog.done(0)
 
@@ -983,6 +1002,193 @@ def test_rebuild_defers_closing_client_while_workers_run(qapp, tmp_path):
         assert dialog._retired_clients == []
     finally:
         dialog._workers.clear()
+        dialog.done(0)
+
+
+# ---------------------------------------------------------------- 版式（2026-10-21）
+
+
+def _show(dialog, qapp) -> None:
+    dialog.show()
+    for _ in range(3):
+        qapp.processEvents()
+
+
+def _rect(dialog, widget):
+    top_left = widget.mapTo(dialog, widget.rect().topLeft())
+    return top_left.x(), top_left.y(), widget.width(), widget.height()
+
+
+def _rows_of(dialog, key):
+    rows = dialog._page_widgets[key].rows
+    return [rows.itemAt(i).widget() for i in range(rows.count())]
+
+
+def test_rows_keep_natural_height_and_uniform_gap(qapp, tmp_path):
+    """行高只由内容决定、行距恒为 16（不能被子布局拉伸，也不能有额外 addSpacing）。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        _show(dialog, qapp)
+        for key in ("account", "proxy", "target"):
+            dialog._select_page(key)
+            qapp.processEvents()
+            row_widgets = [w for w in _rows_of(dialog, key) if isinstance(w, _Row)]
+            for row in row_widgets:
+                assert row.height() == row.sizeHint().height(), f"{key}: 行被拉伸"
+
+        # 账号 / 目标章节两页里行与行是连续的（中间没有别的控件）
+        dialog._select_page("target")
+        qapp.processEvents()
+        row_widgets = [w for w in _rows_of(dialog, "target") if isinstance(w, _Row)]
+        for upper, lower in zip(row_widgets, row_widgets[1:]):
+            _, y1, _, h1 = _rect(dialog, upper)
+            _, y2, _, _ = _rect(dialog, lower)
+            assert y2 - (y1 + h1) == ROW_SPACING
+    finally:
+        dialog.done(0)
+
+
+def test_fill_controls_share_one_column_per_page(qapp, tmp_path):
+    """每页各自一条字段列（设置页同款）：同页内输入框/下拉框左缘必须一致。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        _show(dialog, qapp)
+        columns: dict[str, int] = {}
+        for key in ("account", "proxy", "target"):
+            dialog._select_page(key)
+            qapp.processEvents()
+            xs = {_rect(dialog, w.control)[0]
+                  for w in _rows_of(dialog, key)
+                  if isinstance(w, _Row) and w.expand}
+            assert len(xs) == 1, f"{key} 页填充控件左缘不一致：{sorted(xs)}"
+            columns[key] = xs.pop()
+        assert columns["account"] > columns["target"], (
+            "字段列按本页最长标签算：账号页的「服务器地址」比目标页的「项目集」宽"
+        )
+    finally:
+        dialog.done(0)
+
+
+def test_action_buttons_sit_on_sidebar_bottom(qapp, tmp_path):
+    """四页的动作按钮：底边 = 侧栏下边缘，两两间隙 = 设置页 确定/取消 的 6px。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        _show(dialog, qapp)
+        _, sidebar_y, _, sidebar_h = _rect(dialog, dialog._sidebar)
+        sidebar_bottom = sidebar_y + sidebar_h
+        pages = {
+            "account": (dialog._logout_btn, dialog._login_btn),
+            "proxy": (dialog._proxy_test_btn, dialog._proxy_save_btn),
+            "target": (dialog._clear_all_btn, dialog._load_chapter_btn),
+            "upload": (dialog._copy_btn, dialog._export_btn, dialog._upload_btn),
+        }
+        for key, buttons in pages.items():
+            dialog._select_page(key)
+            qapp.processEvents()
+            for button in buttons:
+                x, y, w, h = _rect(dialog, button)
+                assert y + h == sidebar_bottom, f"{key}: 按钮底边没贴侧栏底"
+            for left, right in zip(buttons, buttons[1:]):
+                lx, _ly, lw, _lh = _rect(dialog, left)
+                rx, _ry, _rw, _rh = _rect(dialog, right)
+                assert rx - (lx + lw) == BUTTON_GAP, f"{key}: 按钮间隙不是 6"
+    finally:
+        dialog.done(0)
+
+
+def test_mapping_table_fills_to_sidebar_and_columns_are_even(qapp, tmp_path):
+    """映射表：底边 = 侧栏下边缘；两侧列等宽、问题列固定且居中。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog)
+        _show(dialog, qapp)
+        dialog._select_page("mapping")
+        qapp.processEvents()
+
+        _, sidebar_y, _, sidebar_h = _rect(dialog, dialog._sidebar)
+        _, table_y, _, table_h = _rect(dialog, dialog._table)
+        assert table_y + table_h == sidebar_y + sidebar_h
+
+        table = dialog._table
+        assert table.columnWidth(0) == table.columnWidth(2), "本地 PSD 与复合图页应等宽"
+        assert table.columnWidth(1) == ISSUE_COLUMN_WIDTH
+        header_item = table.horizontalHeaderItem(1)
+        assert header_item.textAlignment() & Qt.AlignmentFlag.AlignHCenter
+    finally:
+        dialog.done(0)
+
+
+def test_mapping_summaries_live_in_the_bottom_bar(qapp, tmp_path):
+    """两行摘要与状态文字同一行、底边对齐；只有映射页显示。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog)
+        _show(dialog, qapp)
+        dialog._select_page("mapping")
+        qapp.processEvents()
+
+        assert dialog._mapping_summary.isVisible()
+        assert dialog._remote_summary.isVisible()
+        _, sy, _, sh = _rect(dialog, dialog._status_label)
+        _, ry, _, rh = _rect(dialog, dialog._remote_summary)
+        assert ry + rh == sy + sh, "摘要底边要和状态文字底边齐平"
+        assert dialog._mapping_summary.parentWidget() is dialog._summary_box
+
+        dialog._select_page("account")
+        qapp.processEvents()
+        assert not dialog._summary_box.isVisible(), "只有映射页需要这两行摘要"
+    finally:
+        dialog.done(0)
+
+
+def test_comic_score_prefix_in_combo(qapp, tmp_path):
+    """匹配率进下拉框：排序时写入 _SCORE_ROLE，未排序时为空（不显示 0%）。"""
+    from mangaproof.poprako.models import Comic
+    from mangaproof.poprako.title_match import RankedComic
+
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._poprako.rank_comics = True
+        dialog._on_comics([
+            RankedComic(Comic("c1", "某漫画", "", 1, False), 0.9447, (0, 3)),
+            RankedComic(Comic("c2", "某漫画 第二部", "", 1, False), 0.78, (0, 3)),
+        ])
+        assert dialog._comic_combo.itemData(1, dialog_module._SCORE_ROLE) == pytest.approx(0.9447)
+        assert dialog._comic_combo.itemData(0, dialog_module._SCORE_ROLE) is None, "占位项没有分数"
+
+        dialog._poprako.rank_comics = False
+        dialog._on_comics(dialog._plain_entries([
+            Comic("c1", "某漫画", "", 1, False),
+        ]))
+        assert dialog._comic_combo.itemData(1, dialog_module._SCORE_ROLE) is None, (
+            "没排序时不能显示 0%"
+        )
+    finally:
+        dialog.done(0)
+
+
+def test_percent_rounds_half_up():
+    assert dialog_module._percent_text(0.9447) == "94%"
+    assert dialog_module._percent_text(0.945) == "95%", "四舍五入，不是银行的五成双"
+    assert dialog_module._percent_text(1.0) == "100%"
+    assert dialog_module._percent_text(0.0) == "0%"
+
+
+def test_progress_bars_use_theme_default_style(qapp, tmp_path):
+    """两个进度条都要和主程序载入 PSD 的 QProgressDialog 同款（默认高度 + 显示文字）。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        _show(dialog, qapp)
+        assert dialog._progress.isTextVisible()
+        assert dialog._progress.height() > 20, "不再压成 6px 细条"
+
+        progress_dialog = dialog_module._ProgressDialog(dialog)
+        try:
+            assert progress_dialog._bar.isTextVisible()
+            assert progress_dialog._bar.height() > 20, "不再压成 10px 细条"
+        finally:
+            progress_dialog.close()
+    finally:
         dialog.done(0)
 
 

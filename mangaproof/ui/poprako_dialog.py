@@ -26,6 +26,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -56,7 +57,9 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionComboBox,
     QStyleOptionViewItem,
+    QStylePainter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -136,12 +139,27 @@ NAV_WIDTH = 180
 NAV_PADDING = 4
 NAV_ITEM_VPAD = 8
 HEADER_FONT_QSS = "font-size: 15px; font-weight: bold;"
-DEFAULT_DIALOG_SIZE = (860, 560)
-MINIMUM_DIALOG_SIZE = (720, 440)
+#: 默认尺寸：**与主界面同比例**（主窗口 1440×900 = 1.6，这里 960×600 = 1.6）。
+#: 2026-10-21 需求方：窗口高度适当加大，比例对齐主界面。
+DEFAULT_DIALOG_SIZE = (960, 600)
+#: 最小尺寸同样是 1.6；再矮目标章节页就要滚动（正文约 434px）
+MINIMUM_DIALOG_SIZE = (864, 540)
 ROW_SPACING = 16
 ROW_LABEL_GAP = 10
+#: 底部条离窗口下边缘的留白（与侧栏底到状态行的间距相同 → 状态文字落在正中）
+BOTTOM_MARGIN = 16
+#: 底部条高度 = 两行 18px 摘要 + 2px 间隔（固定值，切页时侧栏高度不跳）
+BOTTOM_ROW_HEIGHT = 38
+#: 同一动作行里两个按钮的间隙（= 设置页「确定 / 取消」实测间隙）
+BUTTON_GAP = 6
+#: 作品下拉里"匹配率"预留区宽度（百分数右对齐，后面紧跟作品名）
+SCORE_WIDTH = 44
+#: 匹配率与作品名之间的间距
+SCORE_GAP = 8
+#: 映射表「问题」列宽度（固定窄栏，表头与数字都居中）
+ISSUE_COLUMN_WIDTH = 72
 
-#: 侧栏四项 = 四页；顺序即流程顺序
+#: 侧栏五项 = 五页；顺序即流程顺序
 PAGES: dict[str, tuple[str, str]] = {
     "account": ("账号", "登录 Poprako；密码不保存，令牌优先存系统凭据库"),
     "proxy": ("代理", "连接方式：留空表示直连；测试只做临时连接，保存后才生效"),
@@ -163,6 +181,57 @@ LAST_SUFFIX = "（上次）"
 MIN_PROGRESS_VISIBLE = 0.45
 
 
+class _ElidedLabel(QLabel):
+    """单行文字：宽度不够时右侧省略，完整文本放 tooltip（底部条摘要用）。
+
+    底部条要和状态文字同一行，横向空间有限；摘要偶尔很长，宁可省略也不能
+    把状态文字挤没或把窗口撑宽。
+    """
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__("", parent)
+        self._full = ""
+        self._updating = False
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:   # noqa: N802（Qt 命名）
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._apply_elided()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def sizeHint(self) -> QSize:            # noqa: N802（Qt 命名）
+        """按**完整文本**报宽度：布局据此分空间，再由 _apply_elided 决定显示多少。"""
+        metrics = QFontMetrics(self.font())
+        return QSize(metrics.horizontalAdvance(self._full) + 2, metrics.height())
+
+    def minimumSizeHint(self) -> QSize:     # noqa: N802（Qt 命名）
+        metrics = QFontMetrics(self.font())
+        return QSize(40, metrics.height())
+
+    def resizeEvent(self, event) -> None:   # noqa: N802（Qt 命名）
+        super().resizeEvent(event)
+        self._apply_elided()
+
+    def _apply_elided(self) -> None:
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            metrics = QFontMetrics(self.font())
+            QLabel.setText(
+                self,
+                metrics.elidedText(self._full, Qt.TextElideMode.ElideRight,
+                                   max(0, self.width())),
+            )
+        finally:
+            self._updating = False
+
+
 class _Row(QWidget):
     """一行：左文本（统一左对齐）+ 右控件（填充型或右对齐型）。"""
 
@@ -173,6 +242,10 @@ class _Row(QWidget):
         self.label.setObjectName("settingsRowLabel")   # 复用主题里的置灰规则
         self.control = control
         self.expand = expand
+        # 竖向**固定**：行高只由内容决定。默认的 Preferred 策略会让
+        # QVBoxLayout 把剩余空间平摊给每一行（账号页曾因此 30→37、行距 53/69 混着），
+        # 于是"各项之间的竖向间隔"看起来不统一。
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -263,6 +336,9 @@ class _Page(QWidget):
         rows.setContentsMargins(0, 0, 0, 0)
         rows.setSpacing(ROW_SPACING)
         content_layout.addLayout(rows)
+        # 行高固定后，内容往往比视口矮：必须显式加一条尾部弹簧，否则
+        # QVBoxLayout 会把整块行"居中"在视口里（首行离页头空出一大截）。
+        content_layout.addStretch(1)
         scroll.setWidget(content)
 
         self.body.addWidget(scroll, 1)
@@ -284,7 +360,15 @@ class _Page(QWidget):
 
 
 def _align_fields(rows: QVBoxLayout) -> None:
-    """把本页填充型行的文本补到等宽（= 字段列对齐到本页最长标签）。"""
+    """把本页填充型行的文本补到等宽（= 字段列对齐到本页最长标签）。
+
+    **只算本页**（与设置页 `_align_page_fields` 完全同一套做法：每页各自一条）。
+
+    宽度取 ``label.sizeHint().width()`` 而不是 ``QFontMetrics.horizontalAdvance()``：
+    后者在窗口 polish 之前量到的是旧字体的宽度（实测「服务器地址」36，而标签最终
+    需要 39），于是最长的那一行会长出 3px、其余行停在最小宽度 —— 这正是
+    2026-10-21 之前输入框左缘 277/274/274 对不齐的原因。
+    """
     fill_rows: list[_Row] = []
     for index in range(rows.count()):
         widget = rows.itemAt(index).widget()
@@ -292,16 +376,16 @@ def _align_fields(rows: QVBoxLayout) -> None:
             fill_rows.append(widget)
     if not fill_rows:
         return
-    width = 0
-    for row in fill_rows:
-        metrics = QFontMetrics(row.label.font())
-        width = max(width, metrics.horizontalAdvance(row.label.text()))
+    width = max(row.label.sizeHint().width() for row in fill_rows)
     for row in fill_rows:
         row.label.setMinimumWidth(width)
 
 
 #: 下拉项里存"高亮区间"的自定义角色
 _SPANS_ROLE = int(Qt.ItemDataRole.UserRole) + 21
+
+#: 下拉项里存"与任务名的匹配度"（0.0–1.0）的自定义角色；None = 没排序、不显示百分数
+_SCORE_ROLE = int(Qt.ItemDataRole.UserRole) + 22
 
 
 def _rich_title(text: str, span: Optional[tuple[int, int]],
@@ -321,12 +405,55 @@ def _rich_title(text: str, span: Optional[tuple[int, int]],
     return "".join(parts)
 
 
+def _percent_text(score: float) -> str:
+    """匹配度 → 百分数文案：**四舍五入到个位**（0.945 → 95%，不用银行的四舍六入五成双）。"""
+    value = max(0.0, min(1.0, float(score)))
+    return f"{int(math.floor(value * 100 + 0.5))}%"
+
+
+def _paint_scored_text(painter, rect, font, text: str,
+                       span: Optional[tuple[int, int]],
+                       score: Optional[float],
+                       base_color: str,
+                       reserve: bool = False) -> None:
+    """画一行「94% 作品名」：百分数在 ``SCORE_WIDTH`` 的预留区里**右对齐**，
+    作品名紧跟着**左对齐**；命中字仍旧标绿（2026-10-21 需求方）。
+
+    ``score=None``（占位项 / 未排序）时不画百分数；``reserve=True`` 时仍让出
+    那一段，占位项的名字才能和真实作品名对齐。
+    """
+    painter.save()
+    painter.setClipRect(rect)
+    left = rect.left()
+    if score is not None or reserve:
+        if score is not None:
+            color = "#ffffff" if base_color == "#ffffff" else COLOR_PASS
+            painter.setPen(QColor(color))
+            painter.drawText(
+                QRectF(left, rect.top(), SCORE_WIDTH, rect.height()).toRect(),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                _percent_text(score),
+            )
+        left += SCORE_WIDTH + SCORE_GAP
+
+    document = QTextDocument()
+    document.setDefaultFont(font)
+    document.setDocumentMargin(0)
+    document.setHtml(_rich_title(text, span, base_color=base_color))
+    width = max(10, int(rect.right() - left))
+    document.setTextWidth(width)
+    top = rect.top() + max(0.0, (rect.height() - document.size().height()) / 2.0)
+    painter.translate(left, top)
+    document.drawContents(painter, QRectF(0, 0, width, rect.height()))
+    painter.restore()
+
+
 class _MatchDelegate(QStyledItemDelegate):
-    """下拉行富文本渲染：命中的那几个字标绿，其余保持主题文字色。
+    """下拉行富文本渲染：「匹配率 + 名字」，命中字标绿。
 
     QComboBox 的默认 delegate 只画纯文本，所以要自己画：先用 ``CE_ItemViewItem``
-    交给样式系统画背景/选中态（**不带文字**），再用 ``QTextDocument`` 把富文本
-    画到同一矩形里。
+    交给样式系统画背景/选中态（**不带文字**），再把「百分数 + 富文本标题」
+    画到同一矩形里（2026-10-21：匹配率从下面单独一行挪到名字前面）。
     """
 
     def paint(self, painter, option, index) -> None:   # noqa: D102（Qt 命名）
@@ -338,28 +465,59 @@ class _MatchDelegate(QStyledItemDelegate):
 
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
         span = index.data(_SPANS_ROLE)
+        score = index.data(_SCORE_ROLE)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
         base_color = "#ffffff" if selected else COLOR_TEXT
-        markup = _rich_title(text, span if isinstance(span, tuple) else None,
-                             base_color=base_color)
-
-        document = QTextDocument()
-        document.setDefaultFont(opt.font)
-        document.setDocumentMargin(0)
-        document.setHtml(markup)
-        width = max(10, opt.rect.width() - 12)
-        document.setTextWidth(width)
-
-        painter.save()
-        painter.setClipRect(opt.rect)
-        painter.translate(opt.rect.left() + 6, opt.rect.top() + 3)
-        document.drawContents(painter, QRectF(0, 0, width, opt.rect.height()))
-        painter.restore()
+        _paint_scored_text(
+            painter,
+            opt.rect.adjusted(6, 0, -6, 0),
+            opt.font,
+            text,
+            span if isinstance(span, tuple) else None,
+            float(score) if isinstance(score, (int, float)) else None,
+            base_color,
+            reserve=bool(getattr(self, "scored", False)),
+        )
 
     def sizeHint(self, option, index) -> QSize:        # noqa: D102（Qt 命名）
         size = super().sizeHint(option, index)
+        if getattr(self, "scored", False):
+            size.setWidth(size.width() + SCORE_WIDTH + SCORE_GAP)
         size.setHeight(max(24, size.height()))
         return size
+
+
+class _MatchCombo(NoWheelComboBox):
+    """作品下拉：**收起时**也画「94% 名字」。
+
+    ``setItemDelegate`` 只作用于展开的列表；收起后的脸面由 ``QComboBox`` 用样式
+    自己画纯文本。既然匹配度已经并进这一行，收起时也必须看得到 —— 否则选完
+    作品，匹配率就"消失"了。
+    """
+
+    def paintEvent(self, event) -> None:               # noqa: N802（Qt 命名）
+        painter = QStylePainter(self)
+        opt = QStyleOptionComboBox()
+        self.initStyleOption(opt)
+        text = opt.currentText
+        opt.currentText = ""                           # 文字自己画
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, opt)
+
+        rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox, opt,
+            QStyle.SubControl.SC_ComboBoxEditField, self,
+        )
+        index = self.currentIndex()
+        span = self.itemData(index, _SPANS_ROLE) if index >= 0 else None
+        score = self.itemData(index, _SCORE_ROLE) if index >= 0 else None
+        base_color = COLOR_TEXT if self.isEnabled() else COLOR_TEXT_DIM
+        _paint_scored_text(
+            painter, rect, self.font(), text,
+            span if isinstance(span, tuple) else None,
+            float(score) if isinstance(score, (int, float)) else None,
+            base_color,
+            reserve=bool(self.property("scored")),
+        )
 
 
 class _ProgressDialog(QDialog):
@@ -370,7 +528,7 @@ class _ProgressDialog(QDialog):
         self.setWindowTitle("正在整理作品列表")
         self.setModal(True)
         self.setFixedWidth(420)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(170)      # 进度条回到主题默认高度（28px）后留够空间
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(GUTTER, GUTTER, GUTTER, GUTTER)
@@ -380,10 +538,10 @@ class _ProgressDialog(QDialog):
         self._label.setWordWrap(True)
         layout.addWidget(self._label)
 
+        # 与主程序「载入 PSD」的 QProgressDialog 同一种样式：主题默认高度 + 显示文字，
+        # 不再自己压成 10px 细条（2026-10-21 需求方：两个进度条统一）
         self._bar = QProgressBar()
         self._bar.setRange(0, 0)
-        self._bar.setTextVisible(False)
-        self._bar.setFixedHeight(10)
         layout.addWidget(self._bar)
 
         hint = QLabel("完成后即可选择作品；这一步不会修改任何数据。")
@@ -500,8 +658,9 @@ class PoprakoSyncDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(GUTTER, GUTTER, GUTTER, GUTTER)
-        root.setSpacing(10)
+        # 底部留白 = 侧栏底到状态行的间距，状态文字才落在这块空间的正中
+        root.setContentsMargins(GUTTER, GUTTER, GUTTER, BOTTOM_MARGIN)
+        root.setSpacing(BOTTOM_MARGIN)
 
         body = QHBoxLayout()
         body.setSpacing(GUTTER)
@@ -562,22 +721,45 @@ class PoprakoSyncDialog(QDialog):
             lambda row: self._on_nav_group_changed(self._workflow_nav, row)
         )
         self._fit_nav_heights()
-        # ---- 底部：状态行 + 关闭 ----
+        # ---- 底部条：状态行 + 映射页两行摘要 + 关闭 ----
+        # 行高固定 BOTTOM_ROW_HEIGHT：切页时侧栏高度不跳；整行在
+        # 「侧栏下边缘 → 窗口下边缘」之间居中（上下各 BOTTOM_MARGIN）。
         bottom = QHBoxLayout()
-        bottom.setSpacing(12)
-        self._status_label = QLabel("")
+        bottom.setSpacing(GUTTER)
+        # 用 _ElidedLabel：底部条与映射摘要分空间，窗口窄时宁可省略也别硬切
+        self._status_label = _ElidedLabel("")
         self._status_label.setObjectName("syncStatus")
-        self._status_label.setWordWrap(False)
-        self._status_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        self._status_label.setFixedHeight(BOTTOM_ROW_HEIGHT)
+        self._status_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self._style_status(COLOR_TEXT_DIM)
-        bottom.addWidget(self._status_label, 1)
+        bottom.addWidget(self._status_label, 3)
+
+        # 映射页的两行摘要：与状态文字同一行（2026-10-21 需求方），底边对齐；
+        # 放在底部条而不是页面里，表格才能一直伸到侧栏下边缘。
+        self._mapping_summary = _ElidedLabel("")
+        self._remote_summary = _ElidedLabel("")
+        for label in (self._mapping_summary, self._remote_summary):
+            label.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+            label.setFixedHeight(18)
+        summaries = QVBoxLayout()
+        summaries.setContentsMargins(0, 0, 0, 0)
+        summaries.setSpacing(2)
+        summaries.addWidget(self._mapping_summary)
+        summaries.addWidget(self._remote_summary)
+        self._summary_box = QWidget()
+        self._summary_box.setLayout(summaries)
+        self._summary_box.setFixedHeight(BOTTOM_ROW_HEIGHT)
+        self._summary_box.setMaximumWidth(460)
+        self._summary_box.setVisible(False)
+        bottom.addWidget(self._summary_box, 2,
+                         Qt.AlignmentFlag.AlignBottom)
 
         self._close_btn = QPushButton("关闭")
         self._close_btn.setAutoDefault(False)
         self._close_btn.clicked.connect(self.reject)
-        bottom.addWidget(self._close_btn, 0)
+        bottom.addWidget(self._close_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addLayout(bottom)
 
         self._select_page("account")
@@ -675,6 +857,7 @@ class PoprakoSyncDialog(QDialog):
             self._ensure_teams_loaded()
         if key == "mapping":
             self._refresh_mapping_summary()
+        self._summary_box.setVisible(key == "mapping")
         self._refresh_status()
 
     def _on_nav_group_changed(self, widget: QListWidget, row: int) -> None:
@@ -741,7 +924,6 @@ class PoprakoSyncDialog(QDialog):
         self._keep_switch.toggled.connect(self._on_keep_signed_in_toggled)
         self._add_row(rows, "保持登录", self._keep_switch)
 
-        rows.addSpacing(ROW_SPACING)
         self._account_status = QLabel("未登录")
         self._account_status.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
         self._add_row(rows, "状态", self._account_status)
@@ -751,6 +933,7 @@ class PoprakoSyncDialog(QDialog):
         self._add_row(rows, "令牌", self._token_hint)
 
         actions = QHBoxLayout()
+        actions.setSpacing(BUTTON_GAP)
         actions.addStretch(1)
         self._logout_btn = QPushButton("退出登录")
         self._logout_btn.setAutoDefault(False)
@@ -760,7 +943,8 @@ class PoprakoSyncDialog(QDialog):
         self._login_btn.setAutoDefault(False)
         self._login_btn.clicked.connect(self._on_login_clicked)
         actions.addWidget(self._login_btn)
-        rows.addLayout(actions)
+        # 动作行固定在滚动区下方：底边与侧栏下边缘对齐（2026-10-21 需求方）
+        page.body.addLayout(actions)
         _align_fields(rows)
 
     # -- 页 2：代理 --------------------------------------------------------
@@ -792,7 +976,7 @@ class PoprakoSyncDialog(QDialog):
         rows.addWidget(self._proxy_hint)
 
         actions = QHBoxLayout()
-        actions.setSpacing(8)
+        actions.setSpacing(BUTTON_GAP)
         actions.addStretch(1)
         self._proxy_test_btn = QPushButton("测试连接")
         self._proxy_test_btn.setAutoDefault(False)
@@ -803,7 +987,7 @@ class PoprakoSyncDialog(QDialog):
         self._proxy_save_btn.setAutoDefault(False)
         self._proxy_save_btn.clicked.connect(self._on_proxy_save_clicked)
         actions.addWidget(self._proxy_save_btn)
-        rows.addLayout(actions)
+        page.body.addLayout(actions)
 
         _align_fields(rows)
 
@@ -822,23 +1006,17 @@ class PoprakoSyncDialog(QDialog):
         self._workset_combo.currentIndexChanged.connect(self._on_workset_changed)
         self._add_row(rows, "项目集", self._workset_combo, expand=True)
 
-        self._comic_combo = self._new_combo()
+        # 作品下拉：匹配率直接画在名字前面（折叠时也画），不再单独占一行
+        self._comic_combo = self._new_combo(_MatchCombo)
         self._comic_combo.currentIndexChanged.connect(self._on_comic_changed)
-        self._comic_combo.view().setItemDelegate(_MatchDelegate(self._comic_combo.view()))
+        self._match_delegate = _MatchDelegate(self._comic_combo.view())
+        self._comic_combo.view().setItemDelegate(self._match_delegate)
         self._add_row(rows, "作品", self._comic_combo, expand=True)
-
-        # 选中作品的"匹配说明"：与下拉行同一套富文本，匹配片段标绿
-        self._comic_match = QLabel("")
-        self._comic_match.setTextFormat(Qt.TextFormat.RichText)
-        self._comic_match.setWordWrap(True)
-        self._comic_match.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
-        self._add_row(rows, "", self._comic_match, expand=True)
 
         self._chapter_combo = self._new_combo()
         self._chapter_combo.currentIndexChanged.connect(self._on_chapter_changed)
         self._add_row(rows, "章节", self._chapter_combo, expand=True)
 
-        rows.addSpacing(ROW_SPACING)
         self._rank_switch = ToggleSwitch()
         self._rank_switch.setChecked(bool(self._poprako.rank_comics))
         self._rank_switch.setToolTip(
@@ -848,7 +1026,6 @@ class PoprakoSyncDialog(QDialog):
         self._rank_switch.toggled.connect(self._on_rank_toggled)
         self._add_row(rows, "按名称匹配度排序作品", self._rank_switch)
 
-        rows.addSpacing(ROW_SPACING)
         self._stage_value = self._info_value()
         self._add_row(rows, "阶段", self._stage_value)
         self._pages_value = self._info_value()
@@ -865,7 +1042,7 @@ class PoprakoSyncDialog(QDialog):
         rows.addWidget(self._warn_label)
 
         actions = QHBoxLayout()
-        actions.setSpacing(8)
+        actions.setSpacing(BUTTON_GAP)
         actions.addStretch(1)
         self._clear_all_btn = QPushButton("清空所有选择")
         self._clear_all_btn.setAutoDefault(False)
@@ -912,22 +1089,19 @@ class PoprakoSyncDialog(QDialog):
         self._table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._table.setAlternatingRowColors(False)
         self._table.verticalHeader().setDefaultSectionSize(30)
+        # 列宽（2026-10-21 需求方）：本地 PSD / 对应复合图页各占一半，
+        # 中间的「问题」列固定窄栏并居中。
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self._table.setColumnWidth(2, 240)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._table.setColumnWidth(1, ISSUE_COLUMN_WIDTH)
+        header_item = self._table.horizontalHeaderItem(1)
+        if header_item is not None:
+            header_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         page.body.addWidget(self._table, 1)
-
-        self._mapping_summary = QLabel("")
-        self._mapping_summary.setWordWrap(True)
-        self._mapping_summary.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
-        page.body.addWidget(self._mapping_summary)
-
-        self._remote_summary = QLabel("")
-        self._remote_summary.setWordWrap(True)
-        self._remote_summary.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
-        page.body.addWidget(self._remote_summary)
+        # 两行摘要不在这里 —— 它们在底部条（见 _build_ui），
+        # 这样表格才能一直伸到侧栏下边缘。
 
     # -- 页 4：预览与上传 --------------------------------------------------
 
@@ -953,11 +1127,10 @@ class PoprakoSyncDialog(QDialog):
             _Row("未映射的远端页保留现有问题", self._preserve_switch)
         )
 
+        # 与主程序「载入 PSD」的进度条同款：主题默认高度、显示文字（2026-10-21）
         self._progress = QProgressBar()
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
-        self._progress.setTextVisible(False)
-        self._progress.setFixedHeight(6)
         page.body.addWidget(self._progress)
 
         self._preview = QPlainTextEdit()
@@ -970,7 +1143,7 @@ class PoprakoSyncDialog(QDialog):
         page.body.addWidget(self._preview, 1)
 
         actions = QHBoxLayout()
-        actions.setSpacing(8)
+        actions.setSpacing(BUTTON_GAP)
         actions.addStretch(1)
         self._copy_btn = QPushButton("复制")
         self._copy_btn.setAutoDefault(False)
@@ -1019,8 +1192,8 @@ class PoprakoSyncDialog(QDialog):
             widget.setFixedHeight(content + 2 * widget.frameWidth())
 
     @staticmethod
-    def _new_combo() -> QComboBox:
-        combo = NoWheelComboBox()
+    def _new_combo(cls=NoWheelComboBox) -> QComboBox:
+        combo = cls()
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         combo.setMinimumContentsLength(16)
         return combo
@@ -1153,7 +1326,6 @@ class PoprakoSyncDialog(QDialog):
         self._set_placeholder(self._workset_combo, "请先选择团队")
         self._set_placeholder(self._comic_combo, "请先选择项目集")
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._comic_match.setText("")
         self._rank_switch.setChecked(bool(self._poprako.rank_comics))
         self._refresh_mapping_summary()
         self._refresh_status()
@@ -1312,7 +1484,6 @@ class PoprakoSyncDialog(QDialog):
         self._set_placeholder(self._workset_combo, "请先选择团队")
         self._set_placeholder(self._comic_combo, "请先选择项目集")
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._comic_match.setText("")
         self._refresh_chapter_info()
         self._refresh_mapping_table()
         self._refresh_payload()
@@ -1504,7 +1675,6 @@ class PoprakoSyncDialog(QDialog):
         self._set_placeholder(self._workset_combo, "请先选择团队")
         self._set_placeholder(self._comic_combo, "请先选择项目集")
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._refresh_comic_match()
         self._reset_chapter_state()
         if not self._teams:
             self._set_notice("该账号还没有加入任何团队", "warn")
@@ -1520,7 +1690,6 @@ class PoprakoSyncDialog(QDialog):
         self._chapters = []
         self._set_placeholder(self._comic_combo, "请先选择项目集")
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._refresh_comic_match()
         self._reset_chapter_state()
         self._persist_last_choice()
 
@@ -1551,7 +1720,6 @@ class PoprakoSyncDialog(QDialog):
         )
         self._set_placeholder(self._comic_combo, "请先选择项目集")
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._refresh_comic_match()
         self._reset_chapter_state()
         if not self._worksets:
             self._set_notice("该团队下没有项目集", "warn")
@@ -1565,7 +1733,6 @@ class PoprakoSyncDialog(QDialog):
         self._comic_entries = []
         self._chapters = []
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._refresh_comic_match()
         self._reset_chapter_state()
         self._persist_last_choice()
 
@@ -1664,10 +1831,19 @@ class PoprakoSyncDialog(QDialog):
             "请选择作品",
         )
         # 占位项占 index 0，作品从 1 开始
+        ranked = bool(self._poprako.rank_comics)
+        # 排序时连"请选择作品"这类占位项也让出匹配率那一段，名字才对齐
+        self._match_delegate.scored = ranked
+        self._comic_combo.setProperty("scored", ranked)
+        self._comic_combo.update()
         for index, entry in enumerate(self._comic_entries, start=1):
             if index >= self._comic_combo.count():
                 break
             self._comic_combo.setItemData(index, entry.span, _SPANS_ROLE)
+            # 没排序时不写分数：_plain_entries 的 score 恒为 0.0，写进去会全变 "0%"
+            self._comic_combo.setItemData(
+                index, float(entry.score) if ranked else None, _SCORE_ROLE
+            )
             if entry.score:
                 tip = f"与任务名「{self._task_title()}」的匹配度 {entry.score:.2f}"
             else:
@@ -1675,7 +1851,6 @@ class PoprakoSyncDialog(QDialog):
             self._comic_combo.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
 
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._refresh_comic_match()
         self._reset_chapter_state()
 
         if not self._comics:
@@ -1694,7 +1869,6 @@ class PoprakoSyncDialog(QDialog):
         comic_id = self._comic_combo.currentData()
         self._chapters = []
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._refresh_comic_match()
         self._reset_chapter_state()
         self._persist_last_choice()
 
@@ -1709,26 +1883,6 @@ class PoprakoSyncDialog(QDialog):
             self._on_chapters,
             lambda: self._set_placeholder(self._chapter_combo, "读取失败，请重新选择作品"),
         )
-
-    def _refresh_comic_match(self) -> None:
-        """作品行下方那行说明：把匹配到的字标绿（方案 B）。"""
-        comic_id = self._comic_combo.currentData()
-        entry = None
-        if comic_id:
-            entry = next(
-                (item for item in self._comic_entries if item.comic.id == comic_id), None
-            )
-        if entry is None:
-            self._comic_match.setText("")
-            return
-
-        highlighted = _rich_title(
-            entry.comic.title, entry.span, base_color=COLOR_TEXT_DIM
-        )
-        if entry.score:
-            self._comic_match.setText(f"匹配度 {entry.score:.2f}：{highlighted}")
-        else:
-            self._comic_match.setText(highlighted)
 
     def _on_chapters(self, chapters: list) -> None:
         self._chapters = list(chapters)
@@ -1814,7 +1968,6 @@ class PoprakoSyncDialog(QDialog):
         self._set_placeholder(self._workset_combo, "请先选择团队")
         self._set_placeholder(self._comic_combo, "请先选择项目集")
         self._set_placeholder(self._chapter_combo, "请先选择作品")
-        self._refresh_comic_match()
         self._refresh_role_value()
         self._reset_chapter_state()
         self._set_notice("已清空选择", "info")
