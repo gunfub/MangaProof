@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from mangaproof.config import paths
+from mangaproof.poprako import API_BASE_URL as _POPRAKO_API_BASE_URL
 from mangaproof.utils.platform import is_android_strict
 
 log = logging.getLogger("mangaproof.config.settings")
@@ -709,6 +710,82 @@ class UpdateSettings:
         return s
 
 
+# ---------------------------------------------------------------------------
+# 监制数据同步（Poprako）：顶层 "poprako" 对象
+# ---------------------------------------------------------------------------
+
+#: Poprako 生产 API 基址（与 mangaproof/poprako/__init__.py 保持一致；
+#: 这里引用它而不是再抄一遍字符串，避免两处漂移）
+DEFAULT_POPRAKO_BASE_URL = _POPRAKO_API_BASE_URL
+
+
+@dataclass
+class PoprakoSettings:
+    """Poprako 平台设置（需求 §11.1）。
+
+    存储位置：``settings.json`` 的顶层 ``"poprako"`` 对象。平台各占一个顶层键，
+    互不干扰——这也是"一个平台一个独立模块"在存储层上的体现。
+
+    ``token`` 是**运行时字段**：桌面端优先放系统凭据库（keyring），只有 keyring
+    实测不可用时才落到这里的明文（与 CDK / GitHub Token 同一策略）。界面上不显示、
+    不编辑它，只负责显示"令牌存哪"。
+    """
+
+    base_url: str = DEFAULT_POPRAKO_BASE_URL
+    token: str = ""
+    user_id: str = ""
+    qid: str = ""
+    nickname: str = ""
+    keep_signed_in: bool = True
+    preserve_unmapped: bool = True
+    last_team_id: str = ""
+    last_workset_id: str = ""
+    last_comic_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "base_url": self.base_url,
+            "token": self.token,
+            "user_id": self.user_id,
+            "qid": self.qid,
+            "nickname": self.nickname,
+            "keep_signed_in": self.keep_signed_in,
+            "preserve_unmapped": self.preserve_unmapped,
+            "last_team_id": self.last_team_id,
+            "last_workset_id": self.last_workset_id,
+            "last_comic_id": self.last_comic_id,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> "PoprakoSettings":
+        """非法值一律回落默认（与项目既有风格一致），未知键忽略。"""
+        settings = cls()
+        if not isinstance(raw, dict):
+            return settings
+
+        base_url = raw.get("base_url", DEFAULT_POPRAKO_BASE_URL)
+        if isinstance(base_url, str) and base_url.strip().lower().startswith(
+            ("http://", "https://")
+        ):
+            settings.base_url = base_url.strip()
+        # 其余情况保持默认：写坏的地址会让所有请求发不出去，回默认比报错更稳
+
+        for field_name in (
+            "token", "user_id", "qid", "nickname",
+            "last_team_id", "last_workset_id", "last_comic_id",
+        ):
+            value = raw.get(field_name, "")
+            if isinstance(value, str):
+                setattr(settings, field_name, value.strip())
+
+        for flag in ("keep_signed_in", "preserve_unmapped"):
+            value = raw.get(flag)
+            if isinstance(value, bool):
+                setattr(settings, flag, value)
+
+        return settings
+
+
 @dataclass
 class Settings:
     """运行时设置对象。"""
@@ -749,6 +826,8 @@ class Settings:
     ui_scale: float = DEFAULT_UI_SCALE
     # 自更新设置（需求 §11~§15）：分支/渠道/代理/限速 + keyring 不可用时的明文 CDK
     update: UpdateSettings = field(default_factory=UpdateSettings)
+    # 监制数据同步（1.2.0）：Poprako 平台设置；平台各占一个顶层键
+    poprako: PoprakoSettings = field(default_factory=PoprakoSettings)
 
     # -- 派生查询 ----------------------------------------------------------
 
@@ -1033,6 +1112,8 @@ class SettingsManager:
         # 自更新设置（需求 §13）：顶层 "update" 对象；缺键/非法值一律回落默认，
         # 因此旧版 settings.json 无需迁移即可直接读。
         s.update = UpdateSettings.from_dict(raw.get("update"))
+        # 监制数据同步（1.2.0）：顶层 "poprako" 对象；缺键/非法值回落默认
+        s.poprako = PoprakoSettings.from_dict(raw.get("poprako"))
 
         return s
 
@@ -1066,6 +1147,7 @@ class SettingsManager:
                     "memory_policy": self.settings.memory_policy,
                     "ui_scale": self.settings.ui_scale,
                     "update": self.settings.update.to_dict(),
+                    "poprako": self.settings.poprako.to_dict(),
                 }
                 tmp = self._path.with_suffix(".json.tmp")
                 with open(tmp, "w", encoding="utf-8") as f:

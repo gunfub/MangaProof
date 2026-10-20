@@ -439,6 +439,14 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        # 顶栏第二项（1.2.0）：文件右边、设置左边。每个平台一条**独立**子项
+        # ——平台之间不共享界面代码（docs/1.2.0开发需求.md §4）；接入第二个平台
+        # 时在这里加一条同级 action + 一个打开方法即可，不动本平台的任何文件。
+        sync_menu = menubar.addMenu("监制数据同步(&T)")
+        self.action_sync_poprako = QAction("同步到 Poprako…", self)
+        self.action_sync_poprako.triggered.connect(self._open_poprako_sync)
+        sync_menu.addAction(self.action_sync_poprako)
+
         settings_menu = menubar.addMenu("设置(&S)")
         settings_action = QAction("设置…", self)
         # triggered 会带 checked 参数 → 用 lambda 显式调用（open_settings_dialog 有 intro 形参）
@@ -476,6 +484,23 @@ class MainWindow(QMainWindow):
 
     def _show_app_license(self) -> None:
         dialog = AppLicenseDialog(self)
+        dialog.exec()
+
+    def _open_poprako_sync(self) -> None:
+        """「监制数据同步 → 同步到 Poprako…」（1.2.0）。
+
+        对话框负责全部界面与网络；主窗口只做三件事：拿任务/目录/设置构造它、
+        在它改过绑定后保存任务、在它改过平台设置后落盘 settings.json。
+        """
+        if self.task is None or self._base_dir is None:
+            return
+        from mangaproof.ui.poprako_dialog import PoprakoSyncDialog
+
+        dialog = PoprakoSyncDialog(
+            self.task, self._base_dir, self.settings, parent=self
+        )
+        dialog.settings_committed.connect(self._save_settings)
+        dialog.binding_changed.connect(self.save_task)
         dialog.exec()
 
     def _show_update_dialog(self) -> None:
@@ -2778,6 +2803,7 @@ class MainWindow(QMainWindow):
         self.action_save.setEnabled(has_task)
         self.action_renumber.setEnabled(has_task)
         self.action_report.setEnabled(has_task)
+        self.action_sync_poprako.setEnabled(has_task)
         self.action_redraw.setEnabled(has_task)
         self.action_compare.setEnabled(has_task)
         self.action_recenter.setEnabled(has_task)

@@ -389,7 +389,11 @@ def test_menu_bar_attribute_only_on_android(monkeypatch, qapp):
 
 
 def test_main_window_has_file_settings_about_menus(qapp, tmp_path):
-    """文件/设置/关于 三个菜单及其动作必须存在（Android 上可见性靠上面的属性）。"""
+    """文件/监制数据同步/设置/关于 四个菜单及其动作必须存在。
+
+    Android 上可见性靠 ``AA_DontUseNativeMenuBar``；顺序也钉住——「监制数据同步」
+    必须在文件右边、设置左边（1.2.0 需求 §3.1）。
+    """
     from mangaproof.ui.main_window import MainWindow
 
     manager = SettingsManager(tmp_path / "settings.json")
@@ -398,20 +402,25 @@ def test_main_window_has_file_settings_about_menus(qapp, tmp_path):
     try:
         menubar = window.menuBar()
         titles = [a.text() for a in menubar.actions()]
-        assert titles == ["文件(&F)", "设置(&S)", "关于"]
-        assert not any("&" in title for title in titles[2:]), \
-            "顶栏第三项不许再带助记符（2026-09-25：解除 Alt+H 且不设新绑定）"
+        assert titles == ["文件(&F)", "监制数据同步(&T)", "设置(&S)", "关于"]
+        assert "&" not in titles[3], \
+            "「关于」不许带助记符（2026-09-25：解除 Alt+H 且不设新绑定）"
 
         file_menu = menubar.actions()[0].menu()
         file_actions = [a.text() for a in file_menu.actions()]
         assert "最近打开" in file_actions
         assert "退出" in file_actions
 
-        settings_menu = menubar.actions()[1].menu()
+        sync_menu = menubar.actions()[1].menu()
+        assert [a.text() for a in sync_menu.actions()] == ["同步到 Poprako…"]
+        # 没有打开任务时子项置灰（1.2.0 需求 §3.4）
+        assert window.action_sync_poprako.isEnabled() is False
+
+        settings_menu = menubar.actions()[2].menu()
         assert [a.text() for a in settings_menu.actions()] == ["设置…"]
 
         # 改名只动菜单标题：下辖四个动作一个不少、文案不变（功能不受影响）
-        about_menu = menubar.actions()[2].menu()
+        about_menu = menubar.actions()[3].menu()
         assert [a.text() for a in about_menu.actions()] == [
             "关于 MangaProof", "检查更新…", "许可证…", "第三方许可…",
         ]

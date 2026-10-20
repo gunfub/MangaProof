@@ -83,6 +83,9 @@ class TaskState:
     files: List[FileRecord] = field(default_factory=list)
     reviews: Dict[str, str] = field(default_factory=dict)  # "<file>|<layer_id>" -> status
     issues: List[Issue] = field(default_factory=list)
+    #: 各平台自己的同步绑定（1.2.0）：``{"poprako": {...}}``。
+    #: 平台只读写自己那个子键；旧版本读到新文件忽略未知键，新版本读到旧文件为空。
+    integrations: Dict[str, dict] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
 
@@ -225,6 +228,11 @@ class TaskState:
             "files": [f.to_dict() for f in self.files],
             "reviews": dict(self.reviews),
             "issues": [i.to_dict() for i in self.issues],
+            "integrations": {
+                str(name): dict(value)
+                for name, value in self.integrations.items()
+                if isinstance(value, dict)
+            },
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -245,6 +253,13 @@ class TaskState:
             str(k): str(v) for k, v in reviews.items() if v in LAYER_STATUSES
         }
         task.issues = [Issue.from_dict(m) for m in (raw.get("issues") or [])]
+        integrations = raw.get("integrations") or {}
+        if isinstance(integrations, dict):
+            task.integrations = {
+                str(name): dict(value)
+                for name, value in integrations.items()
+                if isinstance(value, dict)
+            }
         task.created_at = str(raw.get("created_at") or "")
         task.updated_at = str(raw.get("updated_at") or "")
         return task
