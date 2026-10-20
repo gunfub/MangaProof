@@ -26,7 +26,12 @@ import pytest
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from mangaproof.poprako.client import PAGE_LIMIT, PoprakoClient  # noqa: E402
+from mangaproof.poprako.client import (  # noqa: E402
+    PAGE_LIMIT,
+    PROXY_TEST_URL,
+    PoprakoClient,
+    create_client,
+)
 from mangaproof.poprako.errors import (  # noqa: E402
     PoprakoAuthError,
     PoprakoError,
@@ -380,6 +385,55 @@ def test_transport_error_exhausted_raises_network_error():
     assert calls["n"] == 2
 
 
+def test_default_retries_are_two():
+    """2026-10-20 调参：传输层失败默认重试 2 次（共 3 次尝试），退避线性。"""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectTimeout("slow", request=request)
+
+    client = make_client(handler, token="tok-1")      # 用默认 max_retries，retry_delay=0
+    with pytest.raises(PoprakoNetworkError):
+        client.chapter("ch_1")
+    assert calls["n"] == 3
+
+
+def test_network_error_knows_whether_it_used_a_proxy():
+    """异常要能说清走的是代理还是直连（决定提示文案）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("slow", request=request)
+
+    direct = make_client(handler, token="tok-1")
+    with pytest.raises(PoprakoNetworkError) as direct_exc:
+        direct.chapter("ch_1")
+    assert direct_exc.value.via_proxy is False
+
+    proxied = make_client(handler, token="tok-1", proxy="http://127.0.0.1:7897")
+    with pytest.raises(PoprakoNetworkError) as proxy_exc:
+        proxied.chapter("ch_1")
+    assert proxy_exc.value.via_proxy is True
+    assert "当前为直连" not in user_message(proxy_exc.value)
+
+
+def test_create_client_honours_the_two_argument_contract():
+    """UI 注入用的工厂契约 ``(base_url, proxy)``：代理必须走关键字参数接上。"""
+    client = create_client("https://api.example.test/api/v1", "http://127.0.0.1:7897")
+    try:
+        assert client.base_url == "https://api.example.test/api/v1"
+        assert client.proxy == "http://127.0.0.1:7897"
+        assert client.token == "", "第二个位置参数不是 token"
+    finally:
+        client.close()
+
+    plain = create_client("https://api.example.test/api/v1", "")
+    try:
+        assert plain.proxy == ""
+    finally:
+        plain.close()
+
+
 # ---------------------------------------------------------------- 模型辅助
 
 
@@ -575,23 +629,40 @@ def fake_probe(monkeypatch):
     return _FakeProbeClient
 
 
-def test_probe_connection_success_reports_status(fake_probe):
+def test_probe_connection_success_reports_status_and_latency(fake_probe):
     from mangaproof.poprako.client import probe_connection
 
-    ok, message = probe_connection("http://127.0.0.1:7897", timeout=1.0)
+    ok, message, elapsed_ms = probe_connection("http://127.0.0.1:7897", timeout=1.0)
 
     assert ok is True
     assert "HTTP 204" in message
-    assert "google.com" in message
+    # 2026-10-20：探针改打 Poprako 自己的站点，不再打谷歌
+    assert "poprako.com" in message
+    assert "google" not in message
+    assert "ms" in message and "代理可用" in message
+    assert elapsed_ms >= 0
+    assert fake_probe.last_url == PROXY_TEST_URL
     assert fake_probe.last_kwargs["proxy"] == "http://127.0.0.1:7897"
     assert fake_probe.last_kwargs["trust_env"] is False
+
+
+def test_probe_connection_allows_direct(fake_probe):
+    """留空 = 测直连：用来回答"不设代理到底通不通"。"""
+    from mangaproof.poprako.client import probe_connection
+
+    ok, message, _elapsed_ms = probe_connection("", timeout=1.0)
+
+    assert ok is True
+    assert message.startswith("直连可用")
+    assert "poprako.com" in message
+    assert fake_probe.last_kwargs["proxy"] is None
 
 
 def test_probe_connection_treats_any_http_response_as_reachable(fake_probe):
     from mangaproof.poprako.client import probe_connection
 
     fake_probe.response = httpx.Response(403)
-    ok, message = probe_connection("socks5://127.0.0.1:1080", timeout=1.0)
+    ok, message, _elapsed_ms = probe_connection("socks5://127.0.0.1:1080", timeout=1.0)
 
     assert ok is True
     assert "HTTP 403" in message
@@ -601,15 +672,17 @@ def test_probe_connection_reports_network_error(fake_probe):
     from mangaproof.poprako.client import probe_connection
 
     fake_probe.error = httpx.ConnectTimeout("timed out")
-    ok, message = probe_connection("http://127.0.0.1:7897", timeout=1.0)
+    ok, message, elapsed_ms = probe_connection("http://127.0.0.1:7897", timeout=1.0)
 
     assert ok is False
     assert "ConnectTimeout" in message
+    assert "s）" in message, "失败也要说清等了多久"
+    assert elapsed_ms >= 0
 
 
-def test_probe_connection_rejects_empty_or_invalid_proxy():
+def test_probe_connection_rejects_invalid_proxy():
     from mangaproof.poprako.client import probe_connection
 
-    assert probe_connection("")[0] is False
-    ok, message = probe_connection("127.0.0.1:7897")
+    ok, message, elapsed_ms = probe_connection("127.0.0.1:7897")
     assert ok is False and "协议" in message
+    assert elapsed_ms == 0, "地址都不合法，没有发请求，不该有耗时"

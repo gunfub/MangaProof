@@ -66,7 +66,13 @@ from PySide6.QtWidgets import (
 from mangaproof import APP_NAME
 from mangaproof.config.settings import PoprakoSettings
 from mangaproof.poprako import PLATFORM_NAME
-from mangaproof.poprako.client import PoprakoClient, mask_proxy, validate_proxy
+from mangaproof.poprako.client import (
+    SLOW_PROBE_MS,
+    PoprakoClient,
+    create_client,
+    mask_proxy,
+    validate_proxy,
+)
 from mangaproof.poprako.convert import PreflightReport, build_payload
 from mangaproof.poprako.credentials import (
     clear_token,
@@ -425,9 +431,13 @@ class PoprakoSyncDialog(QDialog):
         self._task_open = task is not None and self._base_dir is not None
         self._settings = settings
         self._poprako: PoprakoSettings = settings.poprako
-        self._client_factory = client_factory or PoprakoClient
-        # 工厂签名 (base_url, proxy)：代理是平台级设置，客户端跟着它构造
+        # 工厂契约固定为 ``(base_url, proxy)`` 两个**位置**参数（见 client.ClientFactory）。
+        # 默认用 create_client 适配器：PoprakoClient 的第二个位置参数是 token，
+        # 直接拿类当工厂会让代理串落进 token、代理静默失效（2026-10-20 修）。
+        self._client_factory = client_factory or create_client
         self._client = self._client_factory(self._poprako.base_url, self._poprako.proxy)
+        #: 已经换下来、但可能还有线程在用的旧客户端；等它们收尾后再 close
+        self._retired_clients: list = []
         self._android = is_android_strict()
 
         self._files = (
@@ -774,8 +784,8 @@ class PoprakoSyncDialog(QDialog):
         self._add_row(rows, "当前生效", self._proxy_current)
 
         self._proxy_hint = QLabel(
-            "「测试连接」只用输入框里的地址访问谷歌，不会保存；"
-            "点「保存」后才写入设置并用于后续请求。"
+            "「测试连接」只用输入框里的地址访问 poprako.com（留空则测直连）并显示延迟，"
+            "不会保存；点「保存」后才写入设置、重建客户端并自动验证一次。"
         )
         self._proxy_hint.setWordWrap(True)
         self._proxy_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
@@ -1030,24 +1040,38 @@ class PoprakoSyncDialog(QDialog):
 
     # ================================================================ 异步
 
-    def _run(self, fn: Callable[[], object], on_success: Callable[[object], None]) -> None:
+    def _run(self, fn: Callable[[], object], on_success: Callable[[object], None],
+             on_error: Optional[Callable[[], None]] = None) -> None:
         """把一个无参可调用放到后台线程，成功后回主线程处理。
+
+        ``on_error``：失败时先把界面状态复位（占位文字 / 加载中标记），再显示错误。
+        失败后必须能**再试一次**——一次超时不该把这个页面锁死。
 
         测试里直接把本方法替换成同步执行即可，无需起线程。
         """
         worker = CallWorker(fn)
         self._workers.add(worker)
         worker.succeeded.connect(lambda result: self._on_call_done(worker, on_success, result))
-        worker.failed.connect(lambda message: self._on_call_failed(worker, message))
+        worker.failed.connect(
+            lambda message: self._on_call_failed(worker, message, on_error)
+        )
         worker.start()
 
     def _on_call_done(self, worker, on_success, result) -> None:
+        self._workers.discard(worker)
         self._release_worker(worker)
         self._set_busy(None)
         on_success(result)
 
-    def _on_call_failed(self, worker, message: str) -> None:
+    def _on_call_failed(self, worker, message: str,
+                        on_error: Optional[Callable[[], None]] = None) -> None:
+        self._workers.discard(worker)
         self._release_worker(worker)
+        # 任何一级读取失败都要把"加载中"标记放下，否则 _ensure_teams_loaded 永远
+        # 认为还在加载，团队列表再也读不出来（一次超时 = 这个页面废掉）
+        self._teams_loading = False
+        if on_error is not None:
+            on_error()
         self._set_busy(None)
         self._set_notice(message, "error")
 
@@ -1062,6 +1086,9 @@ class PoprakoSyncDialog(QDialog):
         self._busy = text
         if text:
             self._notice = None
+        else:
+            # 一次操作收尾：该关的旧客户端这时才关（见 _retire_client）
+            self._drain_retired()
         self._refresh_status()
         self._refresh_gates()
 
@@ -1295,38 +1322,75 @@ class PoprakoSyncDialog(QDialog):
     # ================================================================ 代理
 
     def _refresh_proxy_row(self) -> None:
+        """「当前生效」显示**客户端实际用的那条链路**，不是设置里的字符串。
+
+        两者不一致只有一种可能：保存值没被客户端接受（代理串非法 / 构造失败）。
+        以前这里直接显示设置值，于是"代理根本没接上"在界面上看不出来。
+        """
         saved = (self._poprako.proxy or "").strip()
-        self._proxy_current.setText(saved or "直连")
+        effective = (getattr(self._client, "proxy", "") or "").strip()
+        if saved and not effective:
+            self._proxy_current.setText("直连（保存的代理未生效）")
+            self._proxy_current.setStyleSheet(f"color: {COLOR_WARN};")
+            self._proxy_current.setToolTip(validate_proxy(saved)[1] or "")
+            return
+        self._proxy_current.setText(effective or "直连")
+        self._proxy_current.setToolTip("")
         self._proxy_current.setStyleSheet(
-            f"color: {COLOR_TEXT if saved else COLOR_TEXT_DIM};"
+            f"color: {COLOR_TEXT if effective else COLOR_TEXT_DIM};"
         )
 
     def _on_proxy_test_clicked(self) -> None:
-        """只测不存：用输入框里的地址访问谷歌，不碰 settings。"""
+        """只测不存：用输入框里的地址访问 poprako.com，不碰 settings。
+
+        留空也可以测 —— 那就是测**直连**，用来回答"不设代理到底通不通"。
+        """
         value, error = validate_proxy(self._proxy_edit.text())
         if error:
             self._set_notice(error, "warn")
             return
-        if not value:
-            self._set_notice("留空表示直连，不需要测试代理", "warn")
-            return
 
         self._proxy_test_btn.setEnabled(False)
         self._proxy_test_btn.setText("测试中…")
-        self._set_notice("正在通过代理访问谷歌…", "info")
+        self._set_notice("正在测试连接（poprako.com）…", "info")
+        self._start_probe(value, mode="test")
+
+    def _start_probe(self, value: str, *, mode: str) -> None:
+        """起一个只读探针；``mode`` 只决定结果怎么措辞（测试 / 保存后自检）。"""
         worker = ProxyProbeWorker(value)
         self._workers.add(worker)
         worker.finished_with.connect(
-            lambda ok, message: self._on_proxy_tested(worker, ok, message)
+            lambda ok, message, elapsed: self._on_proxy_tested(
+                worker, ok, message, elapsed, mode
+            )
         )
         worker.start()
 
-    def _on_proxy_tested(self, worker, ok: bool, message: str) -> None:
+    def _on_proxy_tested(self, worker, ok: bool, message: str,
+                         elapsed_ms: int = 0, mode: str = "test") -> None:
         self._workers.discard(worker)
         self._release_worker(worker)
         self._proxy_test_btn.setEnabled(True)
         self._proxy_test_btn.setText("测试连接")
-        self._set_notice(("✓ " if ok else "✗ ") + message, "ok" if ok else "error")
+
+        if mode == "save":
+            if ok:
+                saved = self._poprako.proxy or ""
+                # 含账号密码时把遮罩后的地址一起写出来（状态行绝不回显密码）
+                extra = (
+                    f"（{mask_proxy(saved)}，含账号密码，已明文存入 settings.json）"
+                    if "@" in saved else ""
+                )
+                self._set_notice(f"✓ 已保存并生效 · {message}{extra}", "ok")
+            else:
+                self._set_notice(f"已保存，但{message}", "warn")
+            return
+
+        slow = ok and elapsed_ms >= SLOW_PROBE_MS
+        self._set_notice(
+            ("✓ " if ok else "✗ ") + message,
+            "warn" if slow else ("ok" if ok else "error"),
+        )
 
     def _on_proxy_save_clicked(self) -> None:
         """保存并立即生效（用户决策：点保存才真的保存与使用）。"""
@@ -1335,39 +1399,66 @@ class PoprakoSyncDialog(QDialog):
             self._set_notice(error, "warn")
             return
 
-        changed = value != (self._poprako.proxy or "")
         self._poprako.proxy = value
         self._settings_dirty = True
         self.settings_committed.emit()        # 立即写 settings.json
-        self._rebuild_client()
+        problems = self._rebuild_client()
         self._refresh_proxy_row()
+        if problems:
+            self._set_notice("；".join(problems), "error")
+            return
 
-        if not value:
-            self._set_notice("已保存：直连", "ok")
-        elif "@" in value:
-            self._set_notice(
-                f"已保存并生效：{mask_proxy(value)}（含账号密码，明文存于 settings.json）",
-                "warn",
-            )
-        else:
-            self._set_notice(
-                f"已保存并生效：{mask_proxy(value)}" if changed else "设置未变化",
-                "ok" if changed else "info",
-            )
+        self._set_notice("已保存，正在验证连接（poprako.com）…", "info")
 
-    def _rebuild_client(self) -> None:
-        """按当前 base_url + proxy 重建客户端，保留已登录令牌。"""
+        # 代理换了一条链路：把"上次没读成功"的懒加载状态复位，回到目标章节页会自动重试
+        if not self._teams_loaded:
+            self._teams_loading = False
+            self._ensure_teams_loaded()
+
+        # 保存后立刻自检一次并显示延迟 —— "生效"不靠界面声明，靠一次真实往返证明
+        self._start_probe(value, mode="save")
+
+    def _rebuild_client(self) -> list:
+        """按当前 base_url + proxy 重建客户端，保留已登录令牌。
+
+        :returns: 问题说明列表（空 = 成功）。构造失败时**保留旧客户端**并把话
+            交给界面，不再让异常冒到 Qt。
+        """
         token = self._client.token
         old = self._client
-        self._client = self._client_factory(self._poprako.base_url, self._poprako.proxy)
-        self._client.token = token
         try:
-            old.close()
-        except Exception:      # pragma: no cover —— 关闭失败不影响新客户端
-            pass
+            client = self._client_factory(self._poprako.base_url, self._poprako.proxy)
+        except Exception as exc:      # pragma: no cover —— 构造失败极罕见
+            log.exception("Poprako 客户端重建失败")
+            return [f"代理设置已保存，但客户端重建失败：{exc}"]
+        client.token = token
+        self._client = client
+        self._retire_client(old)
         log.info(
             "Poprako 客户端已重建（代理=%s）", mask_proxy(self._poprako.proxy) or "直连"
         )
+        return []
+
+    def _retire_client(self, client) -> None:
+        """换下来的旧客户端：有线程可能在用，等它跑完再关（否则请求会抛 client closed）。"""
+        if any(worker.isRunning() for worker in self._workers):
+            self._retired_clients.append(client)
+        else:
+            self._close_client(client)
+
+    def _close_client(self, client) -> None:
+        try:
+            client.close()
+        except Exception:      # pragma: no cover —— 关闭失败不影响新客户端
+            pass
+
+    def _drain_retired(self) -> None:
+        """没有线程在跑了 → 关掉所有换下来的旧客户端。"""
+        if any(worker.isRunning() for worker in self._workers):
+            return
+        for client in self._retired_clients:
+            self._close_client(client)
+        self._retired_clients.clear()
 
     # ================================================================ 层级（逐级懒加载）
 
@@ -1388,7 +1479,11 @@ class PoprakoSyncDialog(QDialog):
     def _load_teams(self) -> None:
         self._teams_loading = True
         self._set_busy("正在读取团队…")
-        self._run(self._client.my_teams, self._on_teams)
+        self._run(
+            self._client.my_teams,
+            self._on_teams,
+            lambda: self._set_placeholder(self._team_combo, "读取失败，请重新进入本页"),
+        )
 
     def _on_teams(self, teams: list) -> None:
         self._teams_loading = False
@@ -1439,7 +1534,9 @@ class PoprakoSyncDialog(QDialog):
         self._set_placeholder(self._workset_combo, "正在读取项目集…")
         self._set_busy("正在读取项目集…")
         self._run(
-            lambda: self._client.worksets(membership.team_id), self._on_worksets
+            lambda: self._client.worksets(membership.team_id),
+            self._on_worksets,
+            lambda: self._set_placeholder(self._workset_combo, "读取失败，请重新选择团队"),
         )
 
     def _on_worksets(self, worksets: list) -> None:
@@ -1607,7 +1704,11 @@ class PoprakoSyncDialog(QDialog):
 
         self._set_placeholder(self._chapter_combo, "正在读取章节…")
         self._set_busy("正在读取章节…")
-        self._run(lambda: self._client.chapters(comic_id), self._on_chapters)
+        self._run(
+            lambda: self._client.chapters(comic_id),
+            self._on_chapters,
+            lambda: self._set_placeholder(self._chapter_combo, "读取失败，请重新选择作品"),
+        )
 
     def _refresh_comic_match(self) -> None:
         """作品行下方那行说明：把匹配到的字标绿（方案 B）。"""
@@ -2275,6 +2376,12 @@ class PoprakoSyncDialog(QDialog):
         if progress is not None:
             progress.accept()
 
+        # 换下来还没关的旧客户端：没有线程在跑才关；还有线程在用就留给 GC，
+        # 免得把别人脚下的连接抽走（那些线程已被 adopt，结果也没人看）
+        if not any(worker.isRunning() for worker in self._workers):
+            for client in self._retired_clients:
+                self._close_client(client)
+        self._retired_clients.clear()
         for worker in list(self._workers):
             if worker.isRunning():
                 adopt_worker(worker)

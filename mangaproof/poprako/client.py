@@ -13,8 +13,8 @@
   所以异常只带状态码与业务 code，中文文案由 :func:`mangaproof.poprako.errors.user_message`
   在展示层拼；
 - 分页：``offset`` + ``limit``，本客户端固定 ``limit=100``；
-- 重试：只对传输层错误（连不上 / 读超时）重试 1 次。导入是"整体替换"语义，
-  重试安全；4xx 一律不重试。
+- 重试：只对传输层错误（连不上 / 读超时）重试 2 次（线性退避 0.6 s / 1.2 s）。
+  导入是"整体替换"语义，重试安全；4xx 一律不重试。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from urllib.parse import quote
 import httpx
 
 from mangaproof import __version__
-from mangaproof.poprako import API_BASE_URL
+from mangaproof.poprako import API_BASE_URL, SITE_URL
 from mangaproof.poprako.errors import (
     PoprakoAuthError,
     PoprakoError,
@@ -57,20 +57,28 @@ PAGE_LIMIT = 100
 #: 分页安全上限：超过就说明服务端行为异常，直接失败而不是死循环。
 MAX_PAGES = 20
 
-#: 传输层错误的重试间隔（秒）
-RETRY_DELAY = 0.8
+#: 传输层错误的重试间隔（秒）：第 n 次重试等 ``RETRY_DELAY × n``（线性退避）
+RETRY_DELAY = 0.6
 
-#: 默认超时：(连接, 读)
-DEFAULT_TIMEOUT = (10.0, 30.0)
+#: 默认重试次数（只对传输层错误：连不上 / 读超时）。导入是"整体替换"语义，重试安全
+DEFAULT_MAX_RETRIES = 2
+
+#: 默认超时：(连接, 读)。连接 5 s：代理挂掉时 5 s 内就报错，不必干等 10 s；
+#: 读 20 s：整章导入的响应通常远小于此。
+DEFAULT_TIMEOUT = (5.0, 20.0)
+
+#: 探针"较慢"阈值（毫秒）：超过就在文案里标出来（只影响提示，不影响判定）
+SLOW_PROBE_MS = 1500
 
 _UNSET = object()
 
 #: 代理允许的协议（httpx 只认这三个；socks5 由 httpx[socks] 提供）
 PROXY_SCHEMES = ("http", "https", "socks5")
 
-#: 代理测试目标：**谷歌**。任何 HTTP 响应都算链路通（被墙/被劫持会超时或异常），
-#: 因此"能拿到状态码"就说明代理确实在转发请求（用户决策 2026-10-20）。
-PROXY_TEST_URL = "https://www.google.com/generate_204"
+#: 代理测试目标：**Poprako 自己的站点**（2026-10-20 需求方，不再打谷歌）。
+#: 拿得到任何 HTTP 响应就算链路通（401/403/404 也算）；代理是否可用只由
+#: "能否把请求送到 Poprako"决定，与能不能访问谷歌无关。
+PROXY_TEST_URL = f"{SITE_URL}/"
 
 #: 代理地址长度上限（防止把整段 JSON 粘进来）
 _PROXY_MAX_LEN = 300
@@ -145,32 +153,58 @@ def probe_connection(
     *,
     timeout: float = 10.0,
     transport: Optional[httpx.BaseTransport] = None,
-) -> tuple[bool, str]:
-    """用候选代理访问谷歌，**不读写任何设置**（需求：测试只做临时连接）。
+) -> tuple[bool, str, int]:
+    """用候选代理（留空 = 直连）访问 **poprako.com**，并量出往返延迟。
 
-    :returns: ``(是否连通, 说明文本)``
+    **不读写任何设置**（需求：测试只做临时连接）。判定标准只有一条：
+    能不能经这条链路拿到 HTTP 响应（401/403/404 也算通）——不要求 200。
+
+    走的客户端与业务请求**同一个构造函数**（:func:`_build_http_client`）：
+    同一个 UA、同样 ``trust_env=False``、同样的超时口径，"测的就是用的"。
+
+    :returns: ``(是否连通, 说明文本, 往返毫秒)``；连不上时毫秒是"等了多久才失败"。
     """
     value, error = validate_proxy(proxy)
     if error:
-        return False, error
-    if not value:
-        return False, "留空表示直连，不需要测试代理"
+        return False, error, 0
 
+    label = "代理" if value else "直连"
+    started = time.perf_counter()
     try:
-        with httpx.Client(
-            timeout=httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=timeout),
-            follow_redirects=False,
-            trust_env=False,
-            proxy=value,
-            headers={"User-Agent": f"MangaProof/{__version__}"},
-            transport=transport,
+        with _build_http_client(
+            (timeout, timeout),
+            {"User-Agent": f"MangaProof/{__version__}"},
+            transport,
+            value,
         ) as client:
             response = client.get(PROXY_TEST_URL)
-        return True, f"代理可用（{PROXY_TEST_URL} → HTTP {response.status_code}）"
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        slow = "（较慢）" if elapsed_ms >= SLOW_PROBE_MS else ""
+        return True, (
+            f"{label}可用（poprako.com → HTTP {response.status_code}，"
+            f"{elapsed_ms} ms）{slow}"
+        ), elapsed_ms
     except httpx.HTTPError as exc:
-        return False, f"代理不可用：{type(exc).__name__}: {exc}"
+        elapsed = time.perf_counter() - started
+        return False, (
+            f"{label}不可用：{type(exc).__name__}: {exc}（{elapsed:.1f} s）"
+        ), int(elapsed * 1000)
     except Exception as exc:  # pragma: no cover —— 代理串非法等
-        return False, f"代理不可用：{exc}"
+        elapsed = time.perf_counter() - started
+        return False, f"{label}不可用：{exc}", int(elapsed * 1000)
+
+
+#: 构造客户端的契约：``(base_url, proxy)`` 两个位置参数。
+#:
+#: UI 层只认这个契约（方便测试注入假客户端）；**不要**直接拿
+#: :class:`PoprakoClient` 当工厂——它的第二个位置参数是 ``token``，
+#: ``proxy`` 是关键字参数（曾因此让代理静默失效，见 docs/开发踩坑记录.md）。
+ClientFactory = Callable[[str, str], "PoprakoClient"]
+
+
+def create_client(base_url: str, proxy: str = "") -> "PoprakoClient":
+    """按 :data:`ClientFactory` 契约构造客户端（代理走关键字参数）。"""
+    return PoprakoClient(base_url, proxy=proxy)
 
 
 class PoprakoClient:
@@ -183,7 +217,7 @@ class PoprakoClient:
         *,
         proxy: str = "",
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
-        max_retries: int = 1,
+        max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = RETRY_DELAY,
         transport: Optional[httpx.BaseTransport] = None,
         user_agent: Optional[str] = None,
@@ -371,13 +405,15 @@ class PoprakoClient:
                         method, path, type(exc).__name__, attempt, self._max_retries,
                     )
                     if self._retry_delay:
-                        time.sleep(self._retry_delay)
+                        # 线性退避：第 1 次等 0.6 s、第 2 次等 1.2 s
+                        time.sleep(self._retry_delay * attempt)
                     continue
                 log.warning(
                     "Poprako %s %s 传输失败（%s），已重试 %d 次",
                     method, path, type(exc).__name__, self._max_retries,
                 )
-                raise PoprakoNetworkError() from exc
+                # via_proxy：让错误文案能说清"这次是直连还是走代理"（见 errors.user_message）
+                raise PoprakoNetworkError(via_proxy=bool(self._proxy)) from exc
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         log.info("Poprako %s %s → HTTP %d (%d ms)", method, path, response.status_code, elapsed_ms)

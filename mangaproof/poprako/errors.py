@@ -34,10 +34,16 @@ class PoprakoError(Exception):
 
 
 class PoprakoNetworkError(PoprakoError):
-    """连不上 / 超时 / 传输层错误（已按策略重试过）。"""
+    """连不上 / 超时 / 传输层错误（已按策略重试过）。
 
-    def __init__(self) -> None:
+    ``via_proxy`` 记录**这次请求走的是哪条链路**（取客户端实际生效的代理，
+    不是设置里的字符串）：直连失败 → 提示去「代理」页设代理；代理失败 →
+    提示查代理本身。文案见 :func:`user_message`。
+    """
+
+    def __init__(self, *, via_proxy: bool = False) -> None:
         super().__init__("网络请求失败")
+        self.via_proxy = bool(via_proxy)
 
 
 class PoprakoAuthError(PoprakoError):
@@ -71,7 +77,12 @@ class PoprakoHTTPError(PoprakoError):
 def user_message(error: BaseException) -> str:
     """把异常翻译成一句能直接显示给用户的中文（需求 §9.5 的失败矩阵）。"""
     if isinstance(error, PoprakoNetworkError):
-        return "无法连接 api.poprako.com（请检查网络或代理）；整体替换是幂等的，可安全重试"
+        if error.via_proxy:
+            return ("无法连接 api.poprako.com（请检查网络或代理）；"
+                    "整体替换是幂等的，可安全重试")
+        # 直连失败时给出**可操作**的下一步：这次根本没走代理，去代理页设一个
+        return ("无法连接 api.poprako.com（当前为直连，可在「代理」页设置代理后重试）；"
+                "整体替换是幂等的，可安全重试")
     if isinstance(error, PoprakoAuthError):
         return "登录已失效，请重新登录"
     if isinstance(error, PoprakoForbiddenError):

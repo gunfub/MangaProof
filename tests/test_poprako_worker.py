@@ -88,7 +88,20 @@ def test_worker_reports_network_error_in_chinese(qapp):
     client = _Client([], error=PoprakoNetworkError())
     _progress, rows, errors = _run(ComicsLoadWorker(client, "w_1", "某漫画"))
     assert rows == []
-    assert errors == ["无法连接 api.poprako.com（请检查网络或代理）；整体替换是幂等的，可安全重试"]
+    # 直连失败 → 文案直接给出下一步（去代理页）
+    assert errors == [
+        "无法连接 api.poprako.com（当前为直连，可在「代理」页设置代理后重试）；"
+        "整体替换是幂等的，可安全重试"
+    ]
+
+
+def test_worker_network_error_via_proxy_keeps_generic_hint(qapp):
+    """走代理失败时不该再劝用户"去设代理"——应该去查代理本身。"""
+    client = _Client([], error=PoprakoNetworkError(via_proxy=True))
+    _progress, rows, errors = _run(ComicsLoadWorker(client, "w_1", "某漫画"))
+    assert errors == [
+        "无法连接 api.poprako.com（请检查网络或代理）；整体替换是幂等的，可安全重试"
+    ]
 
 
 def test_worker_wraps_unexpected_exception(qapp):

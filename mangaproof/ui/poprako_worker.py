@@ -142,9 +142,13 @@ class UploadWorker(QThread):
 
 
 class ProxyProbeWorker(QThread):
-    """用候选代理访问谷歌，**只测不存**（需求：测试不落盘）。"""
+    """用候选代理（留空 = 直连）访问 poprako.com，**只测不存**（需求：测试不落盘）。
 
-    finished_with = Signal(bool, str)     # 是否连通, 说明文本
+    ``finished_with(是否连通, 说明文本, 往返毫秒)``：延迟由客户端量出来，
+    界面据此上色（慢连接转橙），不再自己猜。
+    """
+
+    finished_with = Signal(bool, str, int)     # 是否连通, 说明文本, 毫秒
 
     def __init__(self, proxy: str, parent: Optional[object] = None):
         super().__init__(parent)
@@ -152,12 +156,13 @@ class ProxyProbeWorker(QThread):
 
     def run(self) -> None:  # noqa: D102 —— QThread 约定
         try:
-            ok, message = probe_connection(self._proxy)
+            ok, message, elapsed_ms = probe_connection(self._proxy)
         except Exception as exc:      # pragma: no cover —— probe_connection 已兜底
-            ok, message = False, f"代理测试失败：{exc}"
+            ok, message, elapsed_ms = False, f"代理测试失败：{exc}", 0
         # 日志只记遮罩后的地址（代理可能带账号密码）
-        log.info("Poprako 代理测试：%s（%s）", "成功" if ok else "失败", mask_proxy(self._proxy))
-        self.finished_with.emit(ok, message)
+        log.info("Poprako 代理测试：%s（%s，%d ms）",
+                 "成功" if ok else "失败", mask_proxy(self._proxy), elapsed_ms)
+        self.finished_with.emit(ok, message, elapsed_ms)
 
 
 class ComicsLoadWorker(QThread):

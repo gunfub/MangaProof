@@ -480,7 +480,7 @@ def test_login_then_manual_lazy_cascade(qapp, tmp_path, monkeypatch):
 
     这是 2026-10-20 决策：不再"自动选第一项一路加载到底"。
     """
-    def _sync_run(self, fn, on_success):
+    def _sync_run(self, fn, on_success, on_error=None):
         result = fn()
         self._set_busy(None)
         on_success(result)
@@ -549,7 +549,7 @@ def test_startup_with_cached_token_only_verifies(qapp, tmp_path, monkeypatch):
     """有缓存令牌：/users/me 校验 → 已登录；进入目标页才拉团队（回归：曾漏写回调）。"""
     monkeypatch.setattr(dialog_module, "load_token", lambda settings: "tok-1")
 
-    def _sync_run(self, fn, on_success):
+    def _sync_run(self, fn, on_success, on_error=None):
         result = fn()
         self._set_busy(None)
         on_success(result)
@@ -705,17 +705,21 @@ def test_menu_handler_reports_constructor_failure(qapp, tmp_path, monkeypatch):
 # ---------------------------------------------------------------- 代理页
 
 
+#: 假探针的默认结果：(连通, 文案, 毫秒)
+PROBE_OK = (True, "代理可用（poprako.com → HTTP 200，354 ms）", 354)
+
+
 class _FakeProbeWorker:
     """替身探测线程：start() 时同步发出预设结果（不起线程、不联网）。"""
 
     last: "_FakeProbeWorker | None" = None
-    result: tuple[bool, str] = (True, "代理可用（https://www.google.com/generate_204 → HTTP 204）")
+    result: tuple[bool, str, int] = PROBE_OK
 
     def __init__(self, proxy: str, parent=None):
         from PySide6.QtCore import QObject, Signal
 
         class _Signal(QObject):
-            finished_with = Signal(bool, str)
+            finished_with = Signal(bool, str, int)
 
         self._emitter = _Signal()
         self.finished_with = self._emitter.finished_with
@@ -725,8 +729,19 @@ class _FakeProbeWorker:
     def start(self) -> None:
         self.finished_with.emit(*type(self).result)
 
+    def isRunning(self) -> bool:        # noqa: N802（Qt 命名）
+        return False
+
     def deleteLater(self) -> None:      # noqa: N802（Qt 命名）
         return None
+
+
+@pytest.fixture(autouse=True)
+def _never_run_real_probe(monkeypatch):
+    """保存会顺手自检一次 → 所有用例都必须用假探针，绝不真的起线程/联网。"""
+    _FakeProbeWorker.result = PROBE_OK
+    _FakeProbeWorker.last = None
+    monkeypatch.setattr(dialog_module, "ProxyProbeWorker", _FakeProbeWorker)
 
 
 def test_proxy_page_exists_with_test_and_save(qapp, tmp_path):
@@ -745,9 +760,7 @@ def test_proxy_test_does_not_save(qapp, tmp_path, monkeypatch):
     dialog = open_dialog(tmp_path, make_task("001.psd"))
     try:
         monkeypatch.setattr(dialog_module, "ProxyProbeWorker", _FakeProbeWorker)
-        _FakeProbeWorker.result = (
-            True, "代理可用（https://www.google.com/generate_204 → HTTP 204）"
-        )
+        _FakeProbeWorker.result = PROBE_OK
         dialog._proxy_edit.setText("http://127.0.0.1:7897")
         dialog._on_proxy_test_clicked()
 
@@ -763,7 +776,9 @@ def test_proxy_test_reports_failure(qapp, tmp_path, monkeypatch):
     dialog = open_dialog(tmp_path, make_task("001.psd"))
     try:
         monkeypatch.setattr(dialog_module, "ProxyProbeWorker", _FakeProbeWorker)
-        _FakeProbeWorker.result = (False, "代理不可用：ConnectTimeout: timed out")
+        _FakeProbeWorker.result = (
+            False, "代理不可用：ConnectTimeout: timed out（10.0 s）", 10000,
+        )
         dialog._proxy_edit.setText("http://127.0.0.1:9")
         dialog._on_proxy_test_clicked()
         assert "✗" in dialog._status_label.text()
@@ -827,6 +842,133 @@ def test_proxy_masked_when_saving_credentials(qapp, tmp_path):
         assert "secret" not in dialog._status_label.text(), "状态行不得回显代理密码"
         assert "***@" in dialog._status_label.text()
     finally:
+        dialog.done(0)
+
+
+def test_proxy_actually_reaches_the_real_client(qapp, tmp_path):
+    """回归（2026-10-20）：代理串曾被当成 ``token`` 位置参数，客户端永远直连。
+
+    这里用**真实** ``PoprakoClient``（不注入工厂、不发请求）验证接线：
+    构造与重建之后，客户端拿到的 proxy 都必须等于设置值，token 不能被顶掉。
+    """
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    manager.settings.poprako.proxy = "http://127.0.0.1:7897"
+    dialog = PoprakoSyncDialog(
+        make_task("001.psd"), tmp_path, manager.settings,
+        last_store=LastChoiceStore(tmp_path / "poprako_last.json"),
+    )
+    try:
+        assert dialog._client.proxy == "http://127.0.0.1:7897"
+        assert dialog._client.token == "", "代理串不许再落到 token 上"
+
+        dialog._client.token = "tok-1"
+        dialog._poprako.proxy = "socks5://127.0.0.1:1080"
+        assert dialog._rebuild_client() == []
+        assert dialog._client.proxy == "socks5://127.0.0.1:1080"
+        assert dialog._client.token == "tok-1", "重建必须保住令牌"
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_row_shows_effective_value_not_settings(qapp, tmp_path):
+    """「当前生效」显示客户端真正在用的链路；设置值没被接受时必须说出来。"""
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    manager.settings.poprako.proxy = "http://127.0.0.1:7897"
+    dialog = PoprakoSyncDialog(
+        make_task("001.psd"), tmp_path, manager.settings,
+        # 工厂无视代理 → 模拟"保存值没生效"
+        client_factory=lambda base, proxy: _NoNetworkClient(base, ""),
+        last_store=LastChoiceStore(tmp_path / "poprako_last.json"),
+    )
+    try:
+        assert dialog._proxy_current.text() == "直连（保存的代理未生效）"
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_save_runs_a_self_check_with_latency(qapp, tmp_path):
+    """保存后自动探一次：状态行要给出真实往返与延迟，而不是只说"生效了"。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._proxy_edit.setText("http://127.0.0.1:7897")
+        dialog._on_proxy_save_clicked()
+
+        text = dialog._status_label.text()
+        assert text.startswith("✓ 已保存并生效")
+        assert "poprako.com" in text and "354 ms" in text
+        assert _FakeProbeWorker.last is not None, "保存要顺手起一次探针"
+        assert _FakeProbeWorker.last.proxy == "http://127.0.0.1:7897"
+    finally:
+        dialog.done(0)
+
+
+def test_slow_probe_turns_status_orange(qapp, tmp_path):
+    """延迟超过阈值只改提示颜色/措辞，不改"可用"的判定。"""
+    from mangaproof.ui.theme import COLOR_WARN
+
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        _FakeProbeWorker.result = (
+            True, "代理可用（poprako.com → HTTP 200，2100 ms）（较慢）", 2100,
+        )
+        dialog._proxy_edit.setText("http://127.0.0.1:7897")
+        dialog._on_proxy_test_clicked()
+
+        assert "✓" in dialog._status_label.text()
+        assert "（较慢）" in dialog._status_label.text()
+        assert COLOR_WARN in dialog._status_label.styleSheet()
+    finally:
+        dialog.done(0)
+
+
+def test_team_load_failure_resets_and_can_retry(qapp, tmp_path, monkeypatch):
+    """一次超时不该把「目标章节」页锁死：失败要复位加载标记，下次进入能重试。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        class _Worker:
+            def deleteLater(self):      # noqa: N802（Qt 命名）
+                return None
+
+        dialog._user = User(id="u_1", qid="123456", nickname="秋叶声生", is_sadmin=False)
+        dialog._current_key = "target"
+        dialog._teams_loading = True
+
+        dialog._on_call_failed(_Worker(), "无法连接 api.poprako.com")
+
+        assert dialog._teams_loading is False, "失败后必须允许重新加载"
+        calls: list[int] = []
+        monkeypatch.setattr(dialog, "_load_teams", lambda: calls.append(1))
+        dialog._ensure_teams_loaded()
+        assert calls == [1], "再进一次目标页要真的重试"
+    finally:
+        dialog.done(0)
+
+
+def test_rebuild_defers_closing_client_while_workers_run(qapp, tmp_path):
+    """换下来的旧客户端不能立刻 close：后台线程可能正拿它发请求。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        closed: list[int] = []
+        dialog._client.close = lambda: closed.append(1)
+
+        class _Busy:
+            def isRunning(self):        # noqa: N802（Qt 命名）
+                return True
+
+        dialog._workers.add(_Busy())
+        dialog._poprako.proxy = "http://127.0.0.1:7897"
+        dialog._rebuild_client()
+        assert closed == [], "还有线程在跑，旧客户端不许当场关"
+        assert len(dialog._retired_clients) == 1
+
+        dialog._workers.clear()
+        dialog._drain_retired()
+        assert closed == [1], "线程收尾后要把旧客户端关掉"
+        assert dialog._retired_clients == []
+    finally:
+        dialog._workers.clear()
         dialog.done(0)
 
 
