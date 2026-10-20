@@ -471,6 +471,7 @@ def test_login_cascades_to_chapter_and_auto_mapping(qapp, tmp_path, monkeypatch)
     try:
         dialog.show()
         QApplication.processEvents()
+        QApplication.processEvents()   # 启动流程在事件循环下一拍
         assert dialog._user is None, "没有缓存令牌时应停在与未登录"
 
         dialog._qid_edit.setText("123456")
@@ -503,6 +504,7 @@ def test_startup_with_cached_token_verifies_and_loads_teams(qapp, tmp_path, monk
     try:
         dialog.show()
         QApplication.processEvents()
+        QApplication.processEvents()   # 启动流程在事件循环下一拍
 
         assert dialog._client.token == "tok-1"
         assert dialog._user is not None and dialog._user.nickname == "秋叶声生"
@@ -559,5 +561,71 @@ def test_main_window_menu_opens_dialog(qapp, tmp_path, monkeypatch):
 
         assert opened["nav"] == ["账号", "目标章节", "页面映射", "预览与上传"]
         assert "监制数据同步" in opened["title"]
+    finally:
+        window.close()
+
+
+# ---------------------------------------------------------------- 入口容错
+
+
+class _RecordingBox:
+    """替身 QMessageBox：只记录调用，不弹真窗口。"""
+
+    calls: list[tuple[str, str]] = []
+
+    @classmethod
+    def information(cls, _parent, _title, text, *args, **kwargs):   # noqa: D401
+        cls.calls.append(("info", str(text)))
+        return None
+
+    @classmethod
+    def critical(cls, _parent, _title, text, *args, **kwargs):      # noqa: D401
+        cls.calls.append(("critical", str(text)))
+        return None
+
+
+def test_menu_handler_without_task_shows_hint(qapp, tmp_path, monkeypatch):
+    """没有任务时给一句提示，而不是静默什么都不做。"""
+    from mangaproof.ui import main_window as mw_module
+
+    _RecordingBox.calls = []
+    monkeypatch.setattr(mw_module, "QMessageBox", _RecordingBox)
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    window = mw_module.MainWindow(manager)
+    try:
+        window.task = None
+        window._base_dir = None
+        window._open_poprako_sync()
+        assert _RecordingBox.calls
+        assert _RecordingBox.calls[-1][0] == "info"
+        assert "请先打开一个任务" in _RecordingBox.calls[-1][1]
+    finally:
+        window.close()
+
+
+def test_menu_handler_reports_constructor_failure(qapp, tmp_path, monkeypatch):
+    """构造抛异常时必须弹框（含异常类型），而不是"点了没反应"。"""
+    from mangaproof.ui import main_window as mw_module
+
+    _RecordingBox.calls = []
+    monkeypatch.setattr(mw_module, "QMessageBox", _RecordingBox)
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("构造失败测试")
+
+    monkeypatch.setattr(PoprakoSyncDialog, "__init__", boom)
+
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    window = mw_module.MainWindow(manager)
+    try:
+        window.task = make_task("001.psd")
+        window._base_dir = tmp_path
+        window._open_poprako_sync()
+        assert _RecordingBox.calls
+        kind, text = _RecordingBox.calls[-1]
+        assert kind == "critical"
+        assert "RuntimeError" in text and "构造失败测试" in text
     finally:
         window.close()

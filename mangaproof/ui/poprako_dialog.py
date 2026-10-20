@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -326,9 +326,11 @@ class PoprakoSyncDialog(QDialog):
         self._last_page_count = 0
         self._last_issue_count = 0
 
+        log.info("监制数据同步：开始构造对话框（文件 %d 个）", len(self._files))
         self._build_ui()
         self._load_binding()
         self._prefill()
+        log.info("监制数据同步：对话框构造完成")
 
     # ================================================================ 构建界面
 
@@ -745,12 +747,19 @@ class PoprakoSyncDialog(QDialog):
         self._refresh_gates()
 
     def showEvent(self, event) -> None:   # noqa: N802（Qt 命名）
+        """窗口**先出现**，再去做令牌校验/拉层级。
+
+        校验要用系统凭据库（可能慢、甚至弹系统认证），网络也可能慢；如果放在
+        构造或 showEvent 里同步跑，用户看到的是"点了没反应"。这里用
+        ``singleShot(0)`` 把启动流程挪到事件循环下一拍。
+        """
         super().showEvent(event)
         if not self._startup_done:
             self._startup_done = True
-            self._startup()
+            QTimer.singleShot(0, self._startup)
 
     def _startup(self) -> None:
+        log.info("监制数据同步：开始校验登录状态")
         token = load_token(self._poprako)
         if not token:
             self._apply_logged_out()

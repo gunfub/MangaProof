@@ -493,17 +493,47 @@ class MainWindow(QMainWindow):
 
         对话框负责全部界面与网络；主窗口只做三件事：拿任务/目录/设置构造它、
         在它改过绑定后保存任务、在它改过平台设置后落盘 settings.json。
-        """
-        if self.task is None or self._base_dir is None:
-            return
-        from mangaproof.ui.poprako_dialog import PoprakoSyncDialog
 
-        dialog = PoprakoSyncDialog(
-            self.task, self._base_dir, self.settings, parent=self
+        **这里刻意"什么都记、什么都弹"**：入口曾经因为客户端构造抛异常而
+        "点了没反应"（异常落在 Qt 槽里，用户端只看得到菜单合上）。所以：
+        进入/构造/关闭各写一条日志，任何异常都弹一个带类型与消息的框并写
+        traceback —— 再有问题就能凭一份日志定位，而不是靠猜。
+        """
+        log.info(
+            "监制数据同步：点击入口（task=%s, base_dir=%s）",
+            self.task is not None, self._base_dir,
         )
+        if self.task is None or self._base_dir is None:
+            QMessageBox.information(
+                self, "监制数据同步", "请先打开一个任务（PSD 或文件夹）后再同步。"
+            )
+            return
+
+        try:
+            from mangaproof.ui.poprako_dialog import PoprakoSyncDialog
+
+            dialog = PoprakoSyncDialog(
+                self.task, self._base_dir, self.settings, parent=self
+            )
+            log.info("监制数据同步：对话框已构造，准备显示")
+        except Exception as exc:      # noqa: BLE001 —— 兜住一切，别让点击静默失败
+            log.exception("监制数据同步：对话框构造失败")
+            QMessageBox.critical(
+                self,
+                "监制数据同步",
+                "打开同步窗口失败，已记录到日志。\n\n"
+                f"{type(exc).__name__}: {exc}\n\n"
+                "日志文件：logs/mangaproof.log",
+            )
+            return
+
         dialog.settings_committed.connect(self._save_settings)
         dialog.binding_changed.connect(self.save_task)
-        dialog.exec()
+        try:
+            dialog.exec()
+        except Exception:             # pragma: no cover —— 事件循环异常仅记录
+            log.exception("监制数据同步：对话框运行期异常")
+        log.info("监制数据同步：对话框已关闭")
 
     def _show_update_dialog(self) -> None:
         """「关于 → 检查更新…」：打开更新页面（需求 §10/§11）。
