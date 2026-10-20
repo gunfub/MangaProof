@@ -25,6 +25,7 @@ local_samples/
 
 # 测试产物
 tests/data/out/
+_shot/
 
 # PyInstaller 构建产物
 build/
