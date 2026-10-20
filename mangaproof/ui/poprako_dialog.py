@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QTextDocument
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -100,6 +100,7 @@ from mangaproof.ui.poprako_worker import (
 )
 from mangaproof.ui.theme import (
     COLOR_BG_HOVER,
+    COLOR_BG_MAIN,
     COLOR_BG_PANEL,
     COLOR_BG_SELECTED,
     COLOR_BORDER,
@@ -398,8 +399,8 @@ class PoprakoSyncDialog(QDialog):
 
     def __init__(
         self,
-        task: TaskState,
-        base_dir: Path,
+        task: Optional[TaskState],
+        base_dir: Optional[Path],
         settings,
         *,
         client_factory: Optional[Callable[[str, str], PoprakoClient]] = None,
@@ -412,8 +413,11 @@ class PoprakoSyncDialog(QDialog):
         self.resize(*DEFAULT_DIALOG_SIZE)
         self.setMinimumSize(*MINIMUM_DIALOG_SIZE)
 
+        # 允许"没有打开任务"：登录与代理设置必须随时可用（2026-10-20 决策）；
+        # 没有任务时只把 目标章节 / 页面映射 / 预览与上传 三页置灰。
         self._task = task
-        self._base_dir = Path(base_dir)
+        self._base_dir = Path(base_dir) if base_dir is not None else None
+        self._task_open = task is not None and self._base_dir is not None
         self._settings = settings
         self._poprako: PoprakoSettings = settings.poprako
         self._client_factory = client_factory or PoprakoClient
@@ -421,10 +425,15 @@ class PoprakoSyncDialog(QDialog):
         self._client = self._client_factory(self._poprako.base_url, self._poprako.proxy)
         self._android = is_android_strict()
 
-        self._files = [record.relative_path for record in task.files]
+        self._files = (
+            [record.relative_path for record in task.files] if task is not None else []
+        )
         self._issue_counts: dict[str, int] = {}
-        for issue in task.issues:
-            self._issue_counts[issue.file] = self._issue_counts.get(issue.file, 0) + 1
+        if task is not None:
+            for issue in task.issues:
+                self._issue_counts[issue.file] = (
+                    self._issue_counts.get(issue.file, 0) + 1
+                )
 
         # 运行时状态
         self._user: Optional[User] = None
@@ -462,8 +471,12 @@ class PoprakoSyncDialog(QDialog):
         self._last_page_count = 0
         self._last_issue_count = 0
 
-        log.info("监制数据同步：开始构造对话框（文件 %d 个）", len(self._files))
+        log.info(
+            "监制数据同步：开始构造对话框（任务=%s，文件 %d 个）",
+            self._task_open, len(self._files),
+        )
         self._build_ui()
+        self._apply_task_availability()
         self._load_binding()
         self._prefill()
         log.info("监制数据同步：对话框构造完成")
@@ -478,41 +491,44 @@ class PoprakoSyncDialog(QDialog):
         body = QHBoxLayout()
         body.setSpacing(GUTTER)
 
-        self.nav_list = QListWidget()
-        self.nav_list.setObjectName("syncNav")
-        self.nav_list.setFixedWidth(NAV_WIDTH)
-        self.nav_list.setUniformItemSizes(True)
-        self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.nav_list.setStyleSheet(
+        # ---- 侧栏：外层框 + 两个列表（"同步流程"三项单独一个内嵌框） ----
+        # 不加序号、不加箭头：分组只靠容器表达（2026-10-20 决策），
+        # 顺序由上下排列与既有门禁行为体现；两个列表的条目样式完全相同，
+        # 所以组内文字与「账号 / 代理」左缘严格对齐。
+        self._sidebar = QFrame()
+        self._sidebar.setObjectName("syncNavFrame")
+        self._sidebar.setFixedWidth(NAV_WIDTH)
+        self._sidebar.setStyleSheet(
             f"""
-            QListWidget#syncNav {{
+            QFrame#syncNavFrame {{
                 background: {COLOR_BG_PANEL};
                 border: 1px solid {COLOR_BORDER};
                 border-radius: 6px;
-                padding: {NAV_PADDING}px;
-                outline: none;
-                {HEADER_FONT_QSS}
-            }}
-            QListWidget#syncNav::item {{
-                padding: {NAV_ITEM_VPAD}px 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }}
-            QListWidget#syncNav::item:selected {{
-                background: {COLOR_BG_SELECTED};
-                color: white;
-            }}
-            QListWidget#syncNav::item:hover {{
-                background: {COLOR_BG_HOVER};
             }}
             """
         )
-        header_font = self.nav_list.font()
+        side_layout = QVBoxLayout(self._sidebar)
+        side_layout.setContentsMargins(NAV_PADDING, NAV_PADDING, NAV_PADDING, NAV_PADDING)
+        side_layout.setSpacing(4)
+
+        header_font = self._sidebar.font()
         header_font.setPixelSize(15)
         header_font.setBold(True)
-        self.nav_list.setFont(header_font)
         self._nav_row_height = QFontMetrics(header_font).height() + 2 * NAV_ITEM_VPAD
-        body.addWidget(self.nav_list)
+
+        self._settings_nav = self._make_nav_list("syncNav", header_font)
+        self._workflow_nav = self._make_nav_list("syncNavGroup", header_font)
+        # 流程组自带 1px 边框，可视区比"账号/代理"这组内缩 1px；
+        # 把上组视口也右移 1px，保证两组文字左缘严格对齐（截图核对过）
+        self._settings_nav.setViewportMargins(1, 0, 0, 0)
+        self._sidebar_layout = side_layout
+        side_layout.addWidget(self._settings_nav)
+        side_layout.addWidget(self._workflow_nav)
+        side_layout.addStretch(1)
+        body.addWidget(self._sidebar)
+
+        self._nav_items: dict[str, QListWidgetItem] = {}
+        self._current_key = "account"
 
         self.stack = QStackedWidget()
         body.addWidget(self.stack, 1)
@@ -524,6 +540,13 @@ class PoprakoSyncDialog(QDialog):
         self._build_target_page()
         self._build_mapping_page()
         self._build_upload_page()
+        self._settings_nav.currentRowChanged.connect(
+            lambda row: self._on_nav_group_changed(self._settings_nav, row)
+        )
+        self._workflow_nav.currentRowChanged.connect(
+            lambda row: self._on_nav_group_changed(self._workflow_nav, row)
+        )
+        self._fit_nav_heights()
         # ---- 底部：状态行 + 关闭 ----
         bottom = QHBoxLayout()
         bottom.setSpacing(12)
@@ -542,9 +565,137 @@ class PoprakoSyncDialog(QDialog):
         bottom.addWidget(self._close_btn, 0)
         root.addLayout(bottom)
 
-        self.nav_list.currentRowChanged.connect(self._on_nav_changed)
-        self.nav_list.setCurrentRow(0)
+        self._select_page("account")
 
+
+    #: 流程页（放进内嵌框的那三项）与页面 key 的顺序
+    WORKFLOW_KEYS = ("target", "mapping", "upload")
+    NAV_ORDER = ("account", "proxy", "target", "mapping", "upload")
+
+    def _make_nav_list(self, object_name: str, font) -> QListWidget:
+        """侧栏列表：无边框、透明底；条目样式与旧版逐字一致（左对齐不变）。"""
+        widget = QListWidget()
+        widget.setObjectName(object_name)
+        widget.setUniformItemSizes(True)
+        widget.setFrameShape(QFrame.Shape.NoFrame)
+        widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        widget.setFont(font)
+        if object_name == "syncNavGroup":
+            # 流程三项的"框"：深一档底色 + 与外框同样 1px 细边 + 圆角
+            panel = (
+                f"background: {COLOR_BG_MAIN};"
+                f" border: 1px solid {COLOR_BORDER};"
+                " border-radius: 5px;"
+            )
+        else:
+            panel = "background: transparent; border: none;"
+        widget.setStyleSheet(
+            f"""
+            QListWidget#{object_name} {{
+                {panel}
+                outline: none;
+                {HEADER_FONT_QSS}
+            }}
+            QListWidget#{object_name}::item {{
+                padding: {NAV_ITEM_VPAD}px 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QListWidget#{object_name}::item:selected {{
+                background: {COLOR_BG_SELECTED};
+                color: white;
+            }}
+            QListWidget#{object_name}::item:hover {{
+                background: {COLOR_BG_HOVER};
+            }}
+            """
+        )
+        return widget
+
+    def _nav_titles(self) -> list[str]:
+        """侧栏全部标题（按显示顺序），供测试与无障碍检查使用。"""
+        titles: list[str] = []
+        for widget in (self._settings_nav, self._workflow_nav):
+            for row in range(widget.count()):
+                titles.append(widget.item(row).text())
+        return titles
+
+    def _current_page_key(self) -> str:
+        return self._current_key
+
+    def _select_page(self, key: str) -> None:
+        """按 key 选中某页（同时保证两个列表互斥高亮）。"""
+        if key not in self.NAV_ORDER:
+            return
+        widget = self._workflow_nav if key in self.WORKFLOW_KEYS else self._settings_nav
+        row = -1
+        for index in range(widget.count()):
+            if widget.item(index).data(Qt.ItemDataRole.UserRole) == key:
+                row = index
+                break
+        if row < 0:
+            return
+        other = self._settings_nav if widget is self._workflow_nav else self._workflow_nav
+        other.blockSignals(True)
+        other.setCurrentRow(-1)
+        other.clearSelection()
+        other.blockSignals(False)
+        widget.blockSignals(True)
+        widget.setCurrentRow(row)
+        widget.blockSignals(False)
+        self._show_page(key)
+
+    def _show_page(self, key: str) -> None:
+        self._current_key = key
+        self.stack.setCurrentIndex(self.NAV_ORDER.index(key))
+        if key == "proxy":
+            self._refresh_proxy_row()
+        if key == "target":
+            self._ensure_teams_loaded()
+        if key == "mapping":
+            self._refresh_mapping_summary()
+        self._refresh_status()
+
+    def _on_nav_group_changed(self, widget: QListWidget, row: int) -> None:
+        if row < 0:
+            return
+        other = self._workflow_nav if widget is self._settings_nav else self._settings_nav
+        if other.currentRow() >= 0:
+            other.blockSignals(True)
+            other.setCurrentRow(-1)
+            other.clearSelection()
+            other.blockSignals(False)
+        item = widget.item(row)
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if key:
+            self._show_page(str(key))
+
+    def _apply_task_availability(self) -> None:
+        """没有打开任务时：只把流程三页置灰，账号 / 代理照常可用。"""
+        enabled = self._task_open
+        for key in self.WORKFLOW_KEYS:
+            item = self._nav_items.get(key)
+            if item is not None:
+                flags = item.flags()
+                if enabled:
+                    item.setFlags(flags | Qt.ItemFlag.ItemIsEnabled)
+                    item.setToolTip("")
+                    item.setData(Qt.ItemDataRole.ForegroundRole, None)
+                else:
+                    item.setFlags(flags & ~Qt.ItemFlag.ItemIsEnabled)
+                    item.setToolTip("请先打开一个任务（PSD 或文件夹）")
+                    # QSS 不改变条目文字颜色，禁用态要显式调暗，否则看起来仍可点
+                    item.setForeground(QColor(COLOR_TEXT_DIM))
+            page = self._page_widgets.get(key)
+            if page is not None:
+                page.setEnabled(enabled)
+        if not enabled:
+            for key in self.WORKFLOW_KEYS:
+                page = self._page_widgets.get(key)
+                if page is not None:
+                    page.setToolTip("请先打开一个任务（PSD 或文件夹）")
 
     # -- 页 1：账号 --------------------------------------------------------
 
@@ -825,12 +976,26 @@ class PoprakoSyncDialog(QDialog):
         item = QListWidgetItem(title)
         item.setData(Qt.ItemDataRole.UserRole, key)
         item.setSizeHint(QSize(0, self._nav_row_height))
-        self.nav_list.addItem(item)
+        target = self._workflow_nav if key in self.WORKFLOW_KEYS else self._settings_nav
+        target.addItem(item)
+        self._nav_items[key] = item
 
         page = _Page(title, hint, self._nav_row_height)
         self.stack.addWidget(page)
         self._page_widgets[key] = page
         return page
+
+    def _fit_nav_heights(self) -> None:
+        """列表高度按条目数固定（5 项不需要滚动）。
+
+        流程组多算 2px：它自己有 1px 上下边框，边框会挤占可视高度。
+        """
+        settings_rows = self._settings_nav.count()
+        workflow_rows = self._workflow_nav.count()
+        self._settings_nav.setFixedHeight(settings_rows * self._nav_row_height)
+        self._workflow_nav.setFixedHeight(
+            workflow_rows * self._nav_row_height + 2
+        )
 
     @staticmethod
     def _new_combo() -> QComboBox:
@@ -851,17 +1016,6 @@ class PoprakoSyncDialog(QDialog):
         row = _Row(text, control, expand)
         rows.addWidget(row)
         return row
-
-    def _on_nav_changed(self, index: int) -> None:
-        self.stack.setCurrentIndex(max(0, index))
-        if index == 1:
-            self._refresh_proxy_row()
-        if index == 2:
-            # 懒加载第一级：只有真的要看这一页才请求团队
-            self._ensure_teams_loaded()
-        if index == 3:
-            self._refresh_mapping_summary()
-        self._refresh_status()
 
     # ================================================================ 异步
 
@@ -927,6 +1081,8 @@ class PoprakoSyncDialog(QDialog):
         return text if len(text) <= limit else text[: limit - 1] + "…"
 
     def _context_summary(self) -> str:
+        if not self._task_open:
+            return "未打开任务：可先登录、设置代理"
         parts: list[str] = []
         if self._user is not None:
             parts.append(f"已登录 {self._user.nickname or self._user.qid}")
@@ -1206,7 +1362,9 @@ class PoprakoSyncDialog(QDialog):
         这是"懒加载"的第一级：打开窗口、登录成功都不再自动请求层级数据，
         每个列表只在用户真的要选的时候拉一次（2026-10-20 决策）。
         """
-        if self.nav_list.currentRow() != 2:
+        if not self._task_open:
+            return                      # 没有任务时流程三页本来就置灰
+        if self._current_key != "target":
             return                      # 只有"目标章节"页可见时才值得发请求
         if self._user is None or self._teams_loaded or self._teams_loading or self._busy:
             return
@@ -1582,7 +1740,9 @@ class PoprakoSyncDialog(QDialog):
         return text[: -len(LAST_SUFFIX)] if text.endswith(LAST_SUFFIX) else text
 
     def _task_title(self) -> str:
-        """当前任务对应的作品名（与返修单默认名同一套规则）。"""
+        """当前任务对应的作品名（与返修单默认名同一套规则）。无任务时为空串。"""
+        if not self._task_open or self._task is None or self._base_dir is None:
+            return ""
         psd_name = self._task.files[0].file_name if self._task.files else ""
         return task_display_name(self._task.task_type, self._base_dir, psd_name)
 
@@ -1912,13 +2072,15 @@ class PoprakoSyncDialog(QDialog):
         self._set_notice(f"已导出：{Path(path).name}", "ok")
 
     def _export_stem(self) -> str:
-        name = self._task.task_name or "mangaproof"
+        name = (self._task.task_name if self._task is not None else "") or "mangaproof"
         return name.replace("/", "_").replace("\\", "_")
 
     # ================================================================ 门禁
 
     def _gate_reasons(self) -> list[str]:
         """上传按钮禁用的原因（空列表 = 可上传）。"""
+        if not self._task_open:
+            return ["未打开任务：请先打开 PSD 或文件夹"]
         if self._busy:
             return [self._busy]
         if self._user is None:
@@ -2057,6 +2219,8 @@ class PoprakoSyncDialog(QDialog):
     # ================================================================ 绑定
 
     def _load_binding(self) -> None:
+        if self._task is None:
+            return
         raw = self._task.integrations.get("poprako") or {}
         if not isinstance(raw, dict):
             raw = {}
@@ -2103,7 +2267,7 @@ class PoprakoSyncDialog(QDialog):
                 self._release_worker(worker)
         self._workers.clear()
 
-        if self._chapter is not None or self._mapping_dirty:
+        if self._task is not None and (self._chapter is not None or self._mapping_dirty):
             self._task.integrations["poprako"] = self._binding_dict()
             self.binding_changed.emit()
         if self._settings_dirty:

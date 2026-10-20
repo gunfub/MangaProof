@@ -503,12 +503,8 @@ class MainWindow(QMainWindow):
             "监制数据同步：点击入口（task=%s, base_dir=%s）",
             self.task is not None, self._base_dir,
         )
-        if self.task is None or self._base_dir is None:
-            QMessageBox.information(
-                self, "监制数据同步", "请先打开一个任务（PSD 或文件夹）后再同步。"
-            )
-            return
-
+        # 2026-10-20：入口永远可以进——没打开任务也要能登录、设代理；
+        # 没有任务时由对话框自己把「目标章节 / 页面映射 / 预览与上传」三页置灰。
         try:
             from mangaproof.ui.poprako_dialog import PoprakoSyncDialog
 
@@ -2835,7 +2831,6 @@ class MainWindow(QMainWindow):
         self.action_save.setEnabled(has_task)
         self.action_renumber.setEnabled(has_task)
         self.action_report.setEnabled(has_task)
-        self.action_sync_poprako.setEnabled(has_task)
         self.action_redraw.setEnabled(has_task)
         self.action_compare.setEnabled(has_task)
         self.action_recenter.setEnabled(has_task)

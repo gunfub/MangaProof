@@ -33,6 +33,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 import mangaproof.ui.poprako_dialog as dialog_module
 from mangaproof.config.settings import SettingsManager
+from mangaproof.poprako.last_choice import LastChoiceStore
 from mangaproof.poprako.models import Chapter, Membership, PageArtwork, User
 from mangaproof.review.issue import Issue
 from mangaproof.review.state import FileRecord, TaskState
@@ -152,7 +153,7 @@ def test_sidebar_has_five_pages_in_pipeline_order(qapp, tmp_path):
     """代理独立成页（2026-10-20 需求方），位置紧跟账号之后。"""
     dialog = open_dialog(tmp_path, make_task("001.psd"))
     try:
-        titles = [dialog.nav_list.item(i).text() for i in range(dialog.nav_list.count())]
+        titles = dialog._nav_titles()
         assert titles == ["账号", "代理", "目标章节", "页面映射", "预览与上传"]
         assert dialog.stack.count() == 5
         assert sorted(dialog._page_widgets) == [
@@ -171,7 +172,7 @@ def test_window_geometry_matches_settings_spec(qapp, tmp_path):
         assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
             GUTTER, GUTTER, GUTTER, GUTTER,
         )
-        assert dialog.nav_list.width() == NAV_WIDTH
+        assert dialog._sidebar.width() == NAV_WIDTH
         account_page = dialog._page_widgets["account"]
         assert account_page.rows is not None
         assert account_page.rows.spacing() == ROW_SPACING
@@ -503,7 +504,7 @@ def test_login_then_manual_lazy_cascade(qapp, tmp_path, monkeypatch):
         assert dialog._worksets == [] and dialog._comics == []
 
         # 进入「目标章节」：只加载团队，且不自动选中
-        dialog.nav_list.setCurrentRow(2)
+        dialog._select_page("target")
         QApplication.processEvents()
         assert [team.team_id for team in dialog._teams] == ["t_1"]
         assert dialog._team_combo.currentData() is None, "必须等用户选"
@@ -565,7 +566,7 @@ def test_startup_with_cached_token_only_verifies(qapp, tmp_path, monkeypatch):
         assert dialog._account_status.text().startswith("已登录")
         assert dialog._teams == [], "未进入目标页时不应请求团队"
 
-        dialog.nav_list.setCurrentRow(2)
+        dialog._select_page("target")
         QApplication.processEvents()
         assert [team.team_id for team in dialog._teams] == ["t_1"]
         assert dialog._chapter is None
@@ -609,9 +610,7 @@ def test_main_window_menu_opens_dialog(qapp, tmp_path, monkeypatch):
 
         def _fake_exec(self):
             opened["title"] = self.windowTitle()
-            opened["nav"] = [
-                self.nav_list.item(i).text() for i in range(self.nav_list.count())
-            ]
+            opened["nav"] = self._nav_titles()
             return 0
 
         monkeypatch.setattr(PoprakoSyncDialog, "exec", _fake_exec)
@@ -642,8 +641,8 @@ class _RecordingBox:
         return None
 
 
-def test_menu_handler_without_task_shows_hint(qapp, tmp_path, monkeypatch):
-    """没有任务时给一句提示，而不是静默什么都不做。"""
+def test_menu_handler_opens_dialog_without_task(qapp, tmp_path, monkeypatch):
+    """没打开任务也能进对话框（2026-10-20）：只有流程三页置灰。"""
     from mangaproof.ui import main_window as mw_module
 
     _RecordingBox.calls = []
@@ -654,10 +653,24 @@ def test_menu_handler_without_task_shows_hint(qapp, tmp_path, monkeypatch):
     try:
         window.task = None
         window._base_dir = None
+        opened: dict = {}
+
+        def _fake_exec(self):
+            opened["task_open"] = self._task_open
+            opened["nav"] = self._nav_titles()
+            opened["disabled"] = [
+                key for key in self.WORKFLOW_KEYS
+                if not (self._nav_items[key].flags() & Qt.ItemFlag.ItemIsEnabled)
+            ]
+            return 0
+
+        monkeypatch.setattr(PoprakoSyncDialog, "exec", _fake_exec)
         window._open_poprako_sync()
-        assert _RecordingBox.calls
-        assert _RecordingBox.calls[-1][0] == "info"
-        assert "请先打开一个任务" in _RecordingBox.calls[-1][1]
+
+        assert opened["task_open"] is False
+        assert opened["nav"] == ["账号", "代理", "目标章节", "页面映射", "预览与上传"]
+        assert opened["disabled"] == ["target", "mapping", "upload"]
+        assert _RecordingBox.calls == [], "不该再弹「请先打开任务」"
     finally:
         window.close()
 
@@ -1057,3 +1070,96 @@ def test_last_choice_marker_annotates_without_selecting(qapp, tmp_path):
         assert dialog._team_combo.currentData() is None, "标注 ≠ 自动选中"
     finally:
         dialog.done(0)
+
+
+# ---------------------------------------------------------------- 侧栏分组 / 无任务
+
+
+def test_sidebar_groups_workflow_pages_in_own_list(qapp, tmp_path):
+    """「同步流程」三项单独一个列表（= 界面上的那个框），账号/代理在另一个列表。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        assert dialog._settings_nav.count() == 2
+        assert dialog._workflow_nav.count() == 3
+        assert [
+            dialog._settings_nav.item(i).text() for i in range(2)
+        ] == ["账号", "代理"]
+        assert [
+            dialog._workflow_nav.item(i).text() for i in range(3)
+        ] == ["目标章节", "页面映射", "预览与上传"]
+        # 不加序号、不加箭头：标题就是原名
+        assert all(not any(ch.isdigit() for ch in title) for title in dialog._nav_titles())
+    finally:
+        dialog.done(0)
+
+
+def test_sidebar_selection_is_exclusive_between_groups(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._select_page("target")
+        assert dialog._workflow_nav.currentRow() == 0
+        assert dialog._settings_nav.currentRow() == -1
+        assert dialog.stack.currentIndex() == 2
+
+        dialog._select_page("account")
+        assert dialog._settings_nav.currentRow() == 0
+        assert dialog._workflow_nav.currentRow() == -1
+        assert dialog.stack.currentIndex() == 0
+    finally:
+        dialog.done(0)
+
+
+def _open_dialog_without_task(tmp_path):
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    return PoprakoSyncDialog(
+        None, None, manager.settings,
+        client_factory=lambda base, proxy: _NoNetworkClient(base, proxy),
+        last_store=LastChoiceStore(tmp_path / "poprako_last.json"),
+    )
+
+
+def test_no_task_disables_only_workflow_pages(qapp, tmp_path):
+    from mangaproof.poprako.last_choice import LastChoiceStore
+
+    dialog = _open_dialog_without_task(tmp_path)
+    try:
+        assert dialog._task_open is False
+        assert dialog._current_page_key() == "account"
+        for key in ("target", "mapping", "upload"):
+            item = dialog._nav_items[key]
+            assert not (item.flags() & Qt.ItemFlag.ItemIsEnabled), key
+            assert item.toolTip(), key
+            assert dialog._page_widgets[key].isEnabled() is False, key
+        for key in ("account", "proxy"):
+            assert dialog._nav_items[key].flags() & Qt.ItemFlag.ItemIsEnabled
+            assert dialog._page_widgets[key].isEnabled() is True
+        assert "未打开任务" in dialog._status_label.text()
+        assert dialog._upload_btn.isEnabled() is False
+        assert "未打开任务" in dialog._upload_btn.toolTip()
+    finally:
+        dialog.done(0)
+
+
+def test_no_task_still_allows_proxy_and_login_ui(qapp, tmp_path):
+    from mangaproof.poprako.last_choice import LastChoiceStore
+
+    dialog = _open_dialog_without_task(tmp_path)
+    try:
+        assert dialog._login_btn.isEnabled() is True
+        dialog._proxy_edit.setText("http://127.0.0.1:7897")
+        dialog._on_proxy_save_clicked()
+        assert dialog._poprako.proxy == "http://127.0.0.1:7897"
+        assert dialog._client.proxy == "http://127.0.0.1:7897"
+    finally:
+        dialog.done(0)
+
+
+def test_no_task_close_does_not_touch_task_binding(qapp, tmp_path):
+    from mangaproof.poprako.last_choice import LastChoiceStore
+
+    dialog = _open_dialog_without_task(tmp_path)
+    emitted: list[int] = []
+    dialog.binding_changed.connect(lambda: emitted.append(1))
+    dialog.done(0)
+    assert emitted == []

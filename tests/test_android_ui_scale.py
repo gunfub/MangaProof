@@ -415,8 +415,8 @@ def test_main_window_has_file_settings_about_menus(qapp, tmp_path):
 
         sync_menu = menubar.actions()[1].menu()
         assert [a.text() for a in sync_menu.actions()] == ["同步到 Poprako…"]
-        # 没有打开任务时子项置灰（1.2.0 需求 §3.4）
-        assert window.action_sync_poprako.isEnabled() is False
+        # 子项**永远可点**（2026-10-20：没任务也要能登录 / 设代理）
+        assert window.action_sync_poprako.isEnabled() is True
 
         settings_menu = menubar.actions()[2].menu()
         assert [a.text() for a in settings_menu.actions()] == ["设置…"]
