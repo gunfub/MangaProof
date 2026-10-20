@@ -23,9 +23,10 @@
 - **代理**：只有 GitHub 与 R2 使用用户配置的代理；MirrorChyan 不使用（§29）；
 - **限速**：同样只作用于 GitHub 与 R2（§30）。限速与代理可同时启用。
 
-限速实现：滑动"应完成时间"表 —— 每写一块就按 ``已写字节 / 限速`` 算出
-应到的时刻，超前后 ``sleep`` 差额。比"每块固定 sleep"更准，也不会因为
-网络本身慢而额外拖慢（只在超前时等待）。
+限速实现：**按字节计费的令牌桶**（见 :class:`_TokenBucket`）。三条硬约定 ——
+起算点是**第一个字节**（握手/首字节等待不算额度）、桶容量**封顶**（卡顿不攒
+追赶额度）、欠多少等多少（不截断）。限速靠"不读"形成 TCP 背压，等待切成
+100 ms 的片，取消不必等满一次 ``sleep``。
 """
 
 from __future__ import annotations
@@ -45,6 +46,15 @@ log = logging.getLogger("mangaproof.update.downloader")
 
 #: 单块读取大小（256 KiB：进度刷新够细，系统调用不过多）
 CHUNK_SIZE = 256 * 1024
+
+#: 限速等待切片（秒）：一次等待被切成这么多片，每片检查一次取消，
+#: 于是"取消"最多等一片就生效（旧实现一次 ``sleep`` 最长 1 秒）。
+RATE_WAIT_SLICE = 0.1
+
+#: 令牌桶容量系数：桶里最多攒 ``限速 × 该秒数`` 的额度（且不小于一块）。
+#: 取 0.1 秒 —— 网络抖一下之后能平滑补跑，但"卡了 5 秒"绝不会变成
+#: "接下来 5 秒不设防"。
+RATE_BURST_SECONDS = 0.1
 
 #: 进度回调：(已下载字节, 总字节或 None, 瞬时速度或 None, 阶段文案)
 ProgressCallback = Callable[[int, int | None, float | None, str], None]
@@ -69,6 +79,55 @@ def _bps_from_mbps(speed_limit_mbps: int | float | None) -> float:
     if not speed_limit_mbps or speed_limit_mbps <= 0:
         return 0.0
     return float(speed_limit_mbps) * 1024 * 1024
+
+
+class _TokenBucket:
+    """按字节计费的令牌桶（需求 §30 的限速实现）。
+
+    三条约定都是"限速看着没生效"这个老问题的成因，别再退回去：
+
+    1. **起算点 = 第一个字节**。计时从第一次 :meth:`take` 开始，不追溯到发
+       请求之前 —— 否则 DNS/TCP/TLS/代理 CONNECT/302 跳转/首字节等待这些
+       "一个字节都没传"的时间会被当成已消耗的额度，白送
+       ``限速 × 首字节秒数`` 字节的全速额度（实测 3 秒握手时，40 MiB 的文件
+       有 31.75 MiB 完全不受限速约束）。
+    2. **容量封顶**。桶里最多攒 ``限速 × RATE_BURST_SECONDS``。旧实现用
+       "累计平均"计费、且没有上限，一段卡顿会攒出等量的追赶额度，之后全速
+       补跑（实测 2 秒卡顿让 40 MiB 的下载提前 2 秒跑完）。
+    3. **欠多少等多少**，不再对等待做 ``min(..., 1.0)`` 截断。
+
+    本类只算"该等多久"，真正的等待交给 :meth:`take` 的 ``wait`` 参数 ——
+    这样才能把等待切成可取消的片（见调用方传入的 ``_wait``）。
+    """
+
+    def __init__(self, rate_bps: float) -> None:
+        self._rate = float(rate_bps)
+        self._capacity = max(float(CHUNK_SIZE), self._rate * RATE_BURST_SECONDS)
+        #: 起步**没有**额度：第一块就得按价付，不会"先送一秒"
+        self._tokens = 0.0
+        #: 首次 take 时才起算（握手时间不产生额度）
+        self._stamp: float | None = None
+
+    def take(self, nbytes: int, wait: Callable[[float], None]) -> None:
+        """为 ``nbytes`` 付账：额度不够就 ``wait`` 到付得起为止。"""
+        if self._rate <= 0:      # pragma: no cover - 调用方已按 0 走了无限速分支
+            return
+        now = time.monotonic()
+        if self._stamp is not None:
+            self._tokens = min(
+                self._capacity, self._tokens + (now - self._stamp) * self._rate
+            )
+        self._stamp = now
+        self._tokens -= nbytes
+        while self._tokens < 0:
+            wait(-self._tokens / self._rate)
+            now = time.monotonic()
+            # 睡醒后按**实际**流逝的时间补额度：sleep 总会略超，超出的部分要
+            # 还回去，否则每块都白等一点、整包会系统性偏慢。
+            self._tokens = min(
+                self._capacity, self._tokens + (now - self._stamp) * self._rate
+            )
+            self._stamp = now
 
 
 def _client(proxy: str, *, transport: httpx.BaseTransport | None) -> httpx.Client:
@@ -196,6 +255,17 @@ def _stream_to_part(
     started = time.monotonic()
     last_report = 0.0
     speed: float | None = None
+    limiter = _TokenBucket(limit_bps) if limit_bps > 0 else None
+
+    def _wait(seconds: float) -> None:
+        """可取消的等待：切成 ``RATE_WAIT_SLICE`` 的片，每片检查一次取消。"""
+        deadline = time.monotonic() + seconds
+        while True:
+            check_cancel()
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(left, RATE_WAIT_SLICE))
 
     try:
         with _client(proxy, transport=transport) as client:
@@ -212,19 +282,16 @@ def _stream_to_part(
                         check_cancel()
                         if not chunk:
                             continue
+                        # 限速：**先付账再落盘**。额度不够时这一块不写、下一块
+                        # 也不会去读，背压才会传到网络侧 —— 只限住写盘等于假限速。
+                        if limiter is not None:
+                            limiter.take(len(chunk), _wait)
                         fh.write(chunk)
                         written += len(chunk)
 
                         now = time.monotonic()
                         elapsed = now - started
                         speed = written / elapsed if elapsed > 0 else None
-
-                        # 限速：只在"跑得比配额快"时等待
-                        if limit_bps > 0:
-                            expected = written / limit_bps
-                            drift = expected - elapsed
-                            if drift > 0:
-                                time.sleep(min(drift, 1.0))
 
                         # 进度回调限频：每 100 ms 一次，避免刷爆事件循环
                         if now - last_report >= 0.1:
