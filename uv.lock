@@ -452,7 +452,7 @@ wheels = [
 
 [[package]]
 name = "mangaproof"
-version = "1.1.23a0"
+version = "1.1.23b0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx", extra = ["socks"] },
