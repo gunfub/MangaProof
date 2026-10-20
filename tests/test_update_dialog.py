@@ -249,6 +249,26 @@ def test_action_buttons_sit_left_of_cancel(dialog):
     assert dlg.cache_btn.isEnabled(), "清理缓存随时可用（没有结果时也能清）"
 
 
+def test_action_buttons_have_gaps_between_them(dialog):
+    """三个动作按钮之间必须有间距 —— 2026-10-20 重排时踩过：
+
+    ``root.setSpacing(0)``（为了给分割线上下精确的 16）会把 0 传给用
+    ``addLayout()`` 加进去的子布局，结果三个按钮严丝合缝地粘在一起（gap=0），
+    比原型里明显"挤成一块"。现在按钮行自己显式 ``setSpacing(BUTTON_GAP)``。
+    """
+    dlg, _ = dialog
+    _laid_out(dlg)
+    row = dlg.action_row
+    assert row.spacing() >= 8, f"按钮行间距 {row.spacing()} 太小"
+
+    boxes = [_box(dlg, b) for b in (dlg.check_btn, dlg.download_btn, dlg.cache_btn)]
+    gaps = [right[0] - left[1] for left, right in zip(boxes, boxes[1:])]
+    assert gaps == [row.spacing()] * 2, f"按钮间隙应等于行间距，实际 {gaps}"
+    assert all(gap >= 8 for gap in gaps), "三个动作按钮不许粘在一起"
+    # 「取消」被 stretch 推到最右，与动作按钮之间是一大片空白
+    assert _box(dlg, dlg.cancel_btn)[0] - boxes[-1][1] > 200
+
+
 def test_progress_is_hidden_initially(dialog):
     dlg, _ = dialog
     assert not dlg.progress.isVisible()

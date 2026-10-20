@@ -165,6 +165,10 @@ BLOCK_GAP = 12
 #: 进度条之前的间距：它属于"输出区"的一部分，比块间距再紧一点。
 OUTPUT_GAP = 10
 
+#: 按钮行**内部**的间距。必须显式写：``root.setSpacing(0)`` 会把 0 传给
+#: 用 ``addLayout()`` 加进去的子布局，按钮会严丝合缝地粘在一起（实测 gap=0）。
+BUTTON_GAP = 10
+
 #: 状态区固定高度（px）：内容超过就在这一块里滚动。
 #: 必须是**固定**高度而不是只设上限：Qt 在窗口大小不变的前提下重排布局，
 #: 后出现的进度条会从状态区"抢"高度，抢不到就去压缩 QFormLayout 的行高——
@@ -484,6 +488,9 @@ class UpdateDialog(QDialog):
         root.addSpacing(BLOCK_GAP)
 
         buttons = QHBoxLayout()
+        # 显式给定间距（见 BUTTON_GAP 的说明）：不写的话会被上层布局的 0 间距继承，
+        # 三个动作按钮直接贴在一起。
+        buttons.setSpacing(BUTTON_GAP)
         # 左：语义恒定（保存 + 检查）。右：常驻置灰，按状态在"下载 / 安装"间切换。
         self.check_btn = QPushButton(CHECK_BTN_TEXT)
         self.check_btn.setDefault(True)
