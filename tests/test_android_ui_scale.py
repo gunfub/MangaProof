@@ -402,7 +402,9 @@ def test_main_window_has_file_settings_about_menus(qapp, tmp_path):
     try:
         menubar = window.menuBar()
         titles = [a.text() for a in menubar.actions()]
-        assert titles == ["文件(&F)", "监制数据同步(&T)", "设置(&S)", "关于"]
+        assert titles == ["文件(&F)", "监制数据同步", "设置(&S)", "关于"]
+        assert "&" not in titles[1], \
+            "「监制数据同步」不设助记符/快捷键（2026-10-20：非高频场景且与 Alt+T 冲突）"
         assert "&" not in titles[3], \
             "「关于」不许带助记符（2026-09-25：解除 Alt+H 且不设新绑定）"
 

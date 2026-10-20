@@ -327,3 +327,43 @@ def test_domain_layer_does_not_import_qt():
         [sys.executable, "-c", code], cwd=str(ROOT), capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------- 代理环境健壮性
+
+
+def test_client_constructs_when_no_proxy_env_is_malformed(monkeypatch):
+    """回归：``NO_PROXY`` 含裸 IPv6 时 httpx 构造会抛 InvalidURL → 对话框打不开。
+
+    实测环境变量 ``NO_PROXY=localhost,127.0.0.1,::1,[::1]`` 会让
+    ``httpx.Client(trust_env=True)`` 在构造阶段就失败；本客户端必须自动退回
+    "显式代理 / 直连"而不是让整个窗口崩掉。
+    """
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,::1,[::1]")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1,::1,[::1]")
+
+    client = PoprakoClient(BASE)
+    try:
+        assert isinstance(client._http, httpx.Client)
+    finally:
+        client.close()
+
+
+def test_env_proxy_skips_unparseable_values(monkeypatch):
+    from mangaproof.poprako import client as client_module
+
+    for key in client_module._PROXY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("all_proxy", "::1")
+
+    assert client_module._env_proxy() == ""
+
+
+def test_env_proxy_prefers_https_then_all(monkeypatch):
+    from mangaproof.poprako import client as client_module
+
+    for key in client_module._PROXY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7897")
+
+    assert client_module._env_proxy() == "http://127.0.0.1:7897"

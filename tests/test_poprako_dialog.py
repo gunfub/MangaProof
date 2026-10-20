@@ -511,3 +511,53 @@ def test_startup_with_cached_token_verifies_and_loads_teams(qapp, tmp_path, monk
         assert dialog._chapter is not None
     finally:
         dialog.done(0)
+
+
+# ---------------------------------------------------------------- 真实入口
+
+
+def test_dialog_constructs_real_client_with_malformed_proxy_env(qapp, tmp_path, monkeypatch):
+    """回归：真实客户端（非注入的假对象）在代理环境变量损坏时也必须能构造。"""
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,::1,[::1]")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1,::1,[::1]")
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+
+    dialog = PoprakoSyncDialog(make_task("001.psd"), tmp_path, manager.settings)
+    try:
+        assert dialog._client.has_token is False
+    finally:
+        dialog.done(0)
+
+
+def test_main_window_menu_opens_dialog(qapp, tmp_path, monkeypatch):
+    """从主窗口真实入口点一次：菜单能打开对话框（用户报「点不开」的回归）。"""
+    from mangaproof.ui.main_window import MainWindow
+
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,::1,[::1]")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1,::1,[::1]")
+    manager = SettingsManager(tmp_path / "settings.json")
+    manager.save()
+    window = MainWindow(manager)
+    try:
+        window.task = make_task("001.psd")
+        window._base_dir = tmp_path
+        window._refresh_enabled_state()
+        assert window.action_sync_poprako.isEnabled() is True
+
+        opened: dict = {}
+
+        def _fake_exec(self):
+            opened["title"] = self.windowTitle()
+            opened["nav"] = [
+                self.nav_list.item(i).text() for i in range(self.nav_list.count())
+            ]
+            return 0
+
+        monkeypatch.setattr(PoprakoSyncDialog, "exec", _fake_exec)
+        window._open_poprako_sync()
+
+        assert opened["nav"] == ["账号", "目标章节", "页面映射", "预览与上传"]
+        assert "监制数据同步" in opened["title"]
+    finally:
+        window.close()

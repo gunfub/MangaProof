@@ -442,7 +442,9 @@ class MainWindow(QMainWindow):
         # 顶栏第二项（1.2.0）：文件右边、设置左边。每个平台一条**独立**子项
         # ——平台之间不共享界面代码（docs/1.2.0开发需求.md §4）；接入第二个平台
         # 时在这里加一条同级 action + 一个打开方法即可，不动本平台的任何文件。
-        sync_menu = menubar.addMenu("监制数据同步(&T)")
+        # 不带助记符、不分配快捷键（2026-10-20 需求方：同步不是高频场景，
+        # 且 Alt+T 与既有快捷键冲突）——与「关于」一样只有标题，没有 &。
+        sync_menu = menubar.addMenu("监制数据同步")
         self.action_sync_poprako = QAction("同步到 Poprako…", self)
         self.action_sync_poprako.triggered.connect(self._open_poprako_sync)
         sync_menu.addAction(self.action_sync_poprako)

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Any, Optional
 from urllib.parse import quote
@@ -65,6 +66,53 @@ DEFAULT_TIMEOUT = (10.0, 30.0)
 
 _UNSET = object()
 
+#: 按优先级尝试的环境代理变量（httpx 自己在 trust_env 下也认这些名字）
+_PROXY_ENV_KEYS = (
+    "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY",
+)
+
+
+def _env_proxy() -> str:
+    """从环境变量里挑一个**能解析**的代理地址；没有就返回空串。"""
+    for key in _PROXY_ENV_KEYS:
+        value = (os.environ.get(key) or "").strip()
+        if not value:
+            continue
+        try:
+            httpx.URL(value)
+        except (httpx.InvalidURL, ValueError, TypeError):
+            continue
+        return value
+    return ""
+
+
+def _build_http_client(
+    timeout: tuple[float, float],
+    headers: dict[str, str],
+    transport: Optional[httpx.BaseTransport],
+) -> httpx.Client:
+    """构造 httpx 客户端：优先跟随系统代理，环境变量坏了就退回显式代理/直连。
+
+    为什么需要这一层：``trust_env=True`` 时 httpx 会解析 ``NO_PROXY``，而
+    ``NO_PROXY=localhost,127.0.0.1,::1,[::1]`` 这种含**裸 IPv6 片段**的写法会让
+    httpx 0.28 在 ``Client()`` 构造阶段就抛 ``InvalidURL: Invalid port: ':1]'``
+    —— 整个对话框连打开都做不到（用户侧表现就是「菜单点不开」）。
+    回退路径仍然尊重用户配置的代理（显式传入），只是绕开坏掉的 NO_PROXY 列表。
+    """
+    kwargs: dict = {
+        "timeout": httpx.Timeout(timeout[1], connect=timeout[0]),
+        "headers": headers,
+        "transport": transport,
+    }
+    try:
+        return httpx.Client(trust_env=True, **kwargs)
+    except (httpx.InvalidURL, ValueError) as exc:
+        proxy = _env_proxy()
+        log.warning(
+            "系统代理环境变量无法解析（%s），改用显式代理：%s", exc, proxy or "直连"
+        )
+        return httpx.Client(trust_env=False, proxy=(proxy or None), **kwargs)
+
 
 class PoprakoClient:
     """Poprako API 的薄封装。一个实例 = 一个令牌 + 一个 base_url。"""
@@ -89,12 +137,9 @@ class PoprakoClient:
             "Accept": "application/json",
             "User-Agent": user_agent or f"MangaProof/{__version__}",
         }
-        # trust_env 默认开启：跟随系统代理环境变量，不写死任何代理地址（需求 §13）
-        self._http = httpx.Client(
-            timeout=httpx.Timeout(timeout[1], connect=timeout[0]),
-            headers=headers,
-            transport=transport,
-        )
+        # 跟随系统代理环境变量，不写死任何代理地址（需求 §13）；
+        # 环境变量格式不合法时自动退回显式代理/直连，见 :func:`_build_http_client`
+        self._http = _build_http_client(timeout, headers, transport)
 
     # -- 生命周期 ----------------------------------------------------------
 
