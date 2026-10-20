@@ -718,6 +718,14 @@ class UpdateSettings:
 #: 这里引用它而不是再抄一遍字符串，避免两处漂移）
 DEFAULT_POPRAKO_BASE_URL = _POPRAKO_API_BASE_URL
 
+#: 代理地址默认值：空 = 直连（与更新模块同一口径，2026-10-20 决策）
+DEFAULT_POPRAKO_PROXY = ""
+
+#: 只做**粗校验**（详细的 scheme/主机检查在 mangaproof.poprako.client 里）：
+#: 这里只保证 settings.json 里手写的垃圾值不会让请求发出去，又不把 httpx 拖进
+#: 启动路径（config 在 main 的最早期被导入）。
+_POPRAKO_PROXY_PREFIXES = ("http://", "https://", "socks5://")
+
 
 @dataclass
 class PoprakoSettings:
@@ -732,6 +740,8 @@ class PoprakoSettings:
     """
 
     base_url: str = DEFAULT_POPRAKO_BASE_URL
+    #: 代理地址；**空 = 直连**。支持 http / https / socks5（含 user:pass@ 认证）
+    proxy: str = DEFAULT_POPRAKO_PROXY
     token: str = ""
     user_id: str = ""
     qid: str = ""
@@ -745,6 +755,7 @@ class PoprakoSettings:
     def to_dict(self) -> dict[str, Any]:
         return {
             "base_url": self.base_url,
+            "proxy": self.proxy,
             "token": self.token,
             "user_id": self.user_id,
             "qid": self.qid,
@@ -769,6 +780,13 @@ class PoprakoSettings:
         ):
             settings.base_url = base_url.strip()
         # 其余情况保持默认：写坏的地址会让所有请求发不出去，回默认比报错更稳
+
+        proxy = raw.get("proxy", DEFAULT_POPRAKO_PROXY)
+        if isinstance(proxy, str):
+            candidate = proxy.strip()
+            if not candidate or candidate.lower().startswith(_POPRAKO_PROXY_PREFIXES):
+                settings.proxy = candidate
+        # 非法值静默回落到"直连"：绝不让一条手改坏的配置卡死网络路径
 
         for field_name in (
             "token", "user_id", "qid", "nickname",

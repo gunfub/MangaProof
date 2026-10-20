@@ -25,13 +25,19 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from mangaproof.poprako.client import PoprakoClient
+from mangaproof.poprako.client import PoprakoClient, mask_proxy, probe_connection
 from mangaproof.poprako.errors import PoprakoError, user_message
 from mangaproof.poprako.models import ImportResult
 
 log = logging.getLogger("mangaproof.ui.poprako_worker")
 
-__all__ = ["CallWorker", "UploadWorker", "UploadOutcome", "adopt_worker"]
+__all__ = [
+    "CallWorker",
+    "ProxyProbeWorker",
+    "UploadWorker",
+    "UploadOutcome",
+    "adopt_worker",
+]
 
 #: 已从对话框"脱离"、尚未结束的线程。必须留引用，否则 QThread 被 GC 时
 #: 若仍在运行，Qt 会 abort 整个进程。
@@ -131,3 +137,22 @@ class UploadWorker(QThread):
         self.succeeded.emit(UploadOutcome(result=result,
                                           remote_page_count=len(pages),
                                           remote_issue_count=len(rows)))
+
+
+class ProxyProbeWorker(QThread):
+    """用候选代理访问谷歌，**只测不存**（需求：测试不落盘）。"""
+
+    finished_with = Signal(bool, str)     # 是否连通, 说明文本
+
+    def __init__(self, proxy: str, parent: Optional[object] = None):
+        super().__init__(parent)
+        self._proxy = proxy
+
+    def run(self) -> None:  # noqa: D102 —— QThread 约定
+        try:
+            ok, message = probe_connection(self._proxy)
+        except Exception as exc:      # pragma: no cover —— probe_connection 已兜底
+            ok, message = False, f"代理测试失败：{exc}"
+        # 日志只记遮罩后的地址（代理可能带账号密码）
+        log.info("Poprako 代理测试：%s（%s）", "成功" if ok else "失败", mask_proxy(self._proxy))
+        self.finished_with.emit(ok, message)

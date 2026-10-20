@@ -50,9 +50,10 @@ from mangaproof.ui.poprako_dialog import (
 class _NoNetworkClient:
     """任何网络方法被调用都直接失败——测试里不该发请求。"""
 
-    def __init__(self, base_url: str = "", token: str = ""):
+    def __init__(self, base_url: str = "", proxy: str = ""):
         self.base_url = base_url
-        self.token = token
+        self.proxy = proxy
+        self.token = ""
 
     def close(self) -> None:      # 生命周期方法，不是网络调用
         return None
@@ -107,14 +108,18 @@ def make_artwork(pid: str, index: int, raw: str | None = None) -> PageArtwork:
                        image_uploaded=True, ext="png")
 
 
-def open_dialog(tmp_path: Path, task: TaskState,
-                client=None) -> PoprakoSyncDialog:
+def open_dialog(tmp_path: Path, task: TaskState, client=None, factory=None) -> PoprakoSyncDialog:
+    """``client`` 传实例时复用；要验证"重建客户端"就传 ``factory``。"""
     manager = SettingsManager(tmp_path / "settings.json")
     manager.save()
-    fake = client if client is not None else _NoNetworkClient()
+    if factory is not None:
+        make = factory
+    elif client is not None:
+        make = lambda base, proxy: client
+    else:
+        make = lambda base, proxy: _NoNetworkClient(base, proxy)
     dialog = PoprakoSyncDialog(
-        task, tmp_path, manager.settings,
-        client_factory=lambda base, token: fake,
+        task, tmp_path, manager.settings, client_factory=make,
     )
     dialog._manager = manager       # 便于测试断言保存内容
     return dialog
@@ -137,13 +142,16 @@ def make_ready(dialog: PoprakoSyncDialog, *, roles: int = 32, stages: int = 0) -
 # ---------------------------------------------------------------- 结构
 
 
-def test_sidebar_has_four_pages_in_pipeline_order(qapp, tmp_path):
+def test_sidebar_has_five_pages_in_pipeline_order(qapp, tmp_path):
+    """代理独立成页（2026-10-20 需求方），位置紧跟账号之后。"""
     dialog = open_dialog(tmp_path, make_task("001.psd"))
     try:
         titles = [dialog.nav_list.item(i).text() for i in range(dialog.nav_list.count())]
-        assert titles == ["账号", "目标章节", "页面映射", "预览与上传"]
-        assert dialog.stack.count() == 4
-        assert sorted(dialog._page_widgets) == ["account", "mapping", "target", "upload"]
+        assert titles == ["账号", "代理", "目标章节", "页面映射", "预览与上传"]
+        assert dialog.stack.count() == 5
+        assert sorted(dialog._page_widgets) == [
+            "account", "mapping", "proxy", "target", "upload",
+        ]
     finally:
         dialog.done(0)
 
@@ -559,7 +567,7 @@ def test_main_window_menu_opens_dialog(qapp, tmp_path, monkeypatch):
         monkeypatch.setattr(PoprakoSyncDialog, "exec", _fake_exec)
         window._open_poprako_sync()
 
-        assert opened["nav"] == ["账号", "目标章节", "页面映射", "预览与上传"]
+        assert opened["nav"] == ["账号", "代理", "目标章节", "页面映射", "预览与上传"]
         assert "监制数据同步" in opened["title"]
     finally:
         window.close()
@@ -629,3 +637,131 @@ def test_menu_handler_reports_constructor_failure(qapp, tmp_path, monkeypatch):
         assert "RuntimeError" in text and "构造失败测试" in text
     finally:
         window.close()
+
+
+# ---------------------------------------------------------------- 代理页
+
+
+class _FakeProbeWorker:
+    """替身探测线程：start() 时同步发出预设结果（不起线程、不联网）。"""
+
+    last: "_FakeProbeWorker | None" = None
+    result: tuple[bool, str] = (True, "代理可用（https://www.google.com/generate_204 → HTTP 204）")
+
+    def __init__(self, proxy: str, parent=None):
+        from PySide6.QtCore import QObject, Signal
+
+        class _Signal(QObject):
+            finished_with = Signal(bool, str)
+
+        self._emitter = _Signal()
+        self.finished_with = self._emitter.finished_with
+        self.proxy = proxy
+        type(self).last = self
+
+    def start(self) -> None:
+        self.finished_with.emit(*type(self).result)
+
+    def deleteLater(self) -> None:      # noqa: N802（Qt 命名）
+        return None
+
+
+def test_proxy_page_exists_with_test_and_save(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        assert dialog._page_widgets["proxy"] is not None
+        assert dialog._proxy_current.text() == "直连"
+        assert dialog._proxy_test_btn.text() == "测试连接"
+        assert dialog._proxy_save_btn.text() == "保存"
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_test_does_not_save(qapp, tmp_path, monkeypatch):
+    """测试只用输入框里的地址，不写设置、不重建客户端。"""
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        monkeypatch.setattr(dialog_module, "ProxyProbeWorker", _FakeProbeWorker)
+        _FakeProbeWorker.result = (
+            True, "代理可用（https://www.google.com/generate_204 → HTTP 204）"
+        )
+        dialog._proxy_edit.setText("http://127.0.0.1:7897")
+        dialog._on_proxy_test_clicked()
+
+        assert dialog._poprako.proxy == "", "测试不得保存"
+        assert dialog._client.proxy == ""
+        assert "✓" in dialog._status_label.text()
+        assert dialog._proxy_test_btn.text() == "测试连接"
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_test_reports_failure(qapp, tmp_path, monkeypatch):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        monkeypatch.setattr(dialog_module, "ProxyProbeWorker", _FakeProbeWorker)
+        _FakeProbeWorker.result = (False, "代理不可用：ConnectTimeout: timed out")
+        dialog._proxy_edit.setText("http://127.0.0.1:9")
+        dialog._on_proxy_test_clicked()
+        assert "✗" in dialog._status_label.text()
+        assert "ConnectTimeout" in dialog._status_label.text()
+        assert dialog._poprako.proxy == ""
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_save_persists_and_rebuilds_client(qapp, tmp_path):
+    dialog = open_dialog(
+        tmp_path, make_task("001.psd"), factory=_NoNetworkClient
+    )
+    emitted: list[int] = []
+    dialog.settings_committed.connect(lambda: emitted.append(1))
+    try:
+        dialog._proxy_edit.setText("  http://127.0.0.1:7897  ")
+        dialog._on_proxy_save_clicked()
+
+        assert dialog._poprako.proxy == "http://127.0.0.1:7897"
+        assert dialog._client.proxy == "http://127.0.0.1:7897", "保存后要重建客户端"
+        assert dialog._proxy_current.text() == "http://127.0.0.1:7897"
+        assert emitted == [1], "保存要立即落盘"
+        assert "已保存并生效" in dialog._status_label.text()
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_save_empty_means_direct(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._poprako.proxy = "http://127.0.0.1:7897"
+        dialog._proxy_edit.setText("")
+        dialog._on_proxy_save_clicked()
+        assert dialog._poprako.proxy == ""
+        assert dialog._client.proxy == ""
+        assert dialog._proxy_current.text() == "直连"
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_save_rejects_invalid_input(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    emitted: list[int] = []
+    dialog.settings_committed.connect(lambda: emitted.append(1))
+    try:
+        dialog._proxy_edit.setText("127.0.0.1:7897")     # 缺协议
+        dialog._on_proxy_save_clicked()
+        assert dialog._poprako.proxy == ""
+        assert emitted == []
+        assert "协议" in dialog._status_label.text()
+    finally:
+        dialog.done(0)
+
+
+def test_proxy_masked_when_saving_credentials(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._proxy_edit.setText("http://user:secret@127.0.0.1:7897")
+        dialog._on_proxy_save_clicked()
+        assert "secret" not in dialog._status_label.text(), "状态行不得回显代理密码"
+        assert "***@" in dialog._status_label.text()
+    finally:
+        dialog.done(0)

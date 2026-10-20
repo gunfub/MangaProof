@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from typing import Any, Optional
 from urllib.parse import quote
@@ -66,52 +65,112 @@ DEFAULT_TIMEOUT = (10.0, 30.0)
 
 _UNSET = object()
 
-#: 按优先级尝试的环境代理变量（httpx 自己在 trust_env 下也认这些名字）
-_PROXY_ENV_KEYS = (
-    "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "http_proxy", "HTTP_PROXY",
-)
+#: 代理允许的协议（httpx 只认这三个；socks5 由 httpx[socks] 提供）
+PROXY_SCHEMES = ("http", "https", "socks5")
+
+#: 代理测试目标：**谷歌**。任何 HTTP 响应都算链路通（被墙/被劫持会超时或异常），
+#: 因此"能拿到状态码"就说明代理确实在转发请求（用户决策 2026-10-20）。
+PROXY_TEST_URL = "https://www.google.com/generate_204"
+
+#: 代理地址长度上限（防止把整段 JSON 粘进来）
+_PROXY_MAX_LEN = 300
 
 
-def _env_proxy() -> str:
-    """从环境变量里挑一个**能解析**的代理地址；没有就返回空串。"""
-    for key in _PROXY_ENV_KEYS:
-        value = (os.environ.get(key) or "").strip()
-        if not value:
-            continue
-        try:
-            httpx.URL(value)
-        except (httpx.InvalidURL, ValueError, TypeError):
-            continue
-        return value
-    return ""
+def validate_proxy(text: str) -> tuple[str, str]:
+    """校验代理地址，返回 ``(规范化后的值, 错误说明)``。
+
+    空值合法（= 直连，与更新模块同一口径，2026-10-20 决策）。
+    """
+    value = (text or "").strip()
+    if not value:
+        return "", ""
+    if len(value) > _PROXY_MAX_LEN:
+        return "", "代理地址过长"
+    if any(ch.isspace() for ch in value):
+        return "", "代理地址里不能有空格"
+    if "://" not in value:
+        return "", "代理地址需要带协议，例如 http://127.0.0.1:7890"
+    try:
+        url = httpx.URL(value)
+    except (httpx.InvalidURL, ValueError):
+        return "", "代理地址格式不对，例如 http://127.0.0.1:7890"
+    if url.scheme not in PROXY_SCHEMES:
+        return "", "只支持 http / https / socks5 代理"
+    if not url.host:
+        return "", "代理地址缺少主机名"
+    return value, ""
+
+
+def mask_proxy(text: str) -> str:
+    """日志用的代理遮罩：``http://user:pass@host:port`` → ``http://***@host:port``。"""
+    value = (text or "").strip()
+    if not value:
+        return ""
+    try:
+        url = httpx.URL(value)
+    except (httpx.InvalidURL, ValueError):
+        return "[REDACTED]" if "@" in value else value
+    if url.userinfo:
+        port = f":{url.port}" if url.port else ""
+        return f"{url.scheme}://***@{url.host}{port}"
+    return value
 
 
 def _build_http_client(
     timeout: tuple[float, float],
     headers: dict[str, str],
     transport: Optional[httpx.BaseTransport],
+    proxy: str,
 ) -> httpx.Client:
-    """构造 httpx 客户端：优先跟随系统代理，环境变量坏了就退回显式代理/直连。
+    """构造 httpx 客户端。
 
-    为什么需要这一层：``trust_env=True`` 时 httpx 会解析 ``NO_PROXY``，而
-    ``NO_PROXY=localhost,127.0.0.1,::1,[::1]`` 这种含**裸 IPv6 片段**的写法会让
-    httpx 0.28 在 ``Client()`` 构造阶段就抛 ``InvalidURL: Invalid port: ':1]'``
-    —— 整个对话框连打开都做不到（用户侧表现就是「菜单点不开」）。
-    回退路径仍然尊重用户配置的代理（显式传入），只是绕开坏掉的 NO_PROXY 列表。
+    **一律 ``trust_env=False``**（用户决策 2026-10-20：与更新模块一致）：
+
+    - ``proxy`` 为空 → 直连；
+    - 非空 → 只走这个代理；
+    - 顺带避开 ``NO_PROXY`` 里裸 IPv6 让 httpx 在构造阶段抛 ``InvalidURL`` 的坑
+      （那曾导致"菜单点了没反应"）。
     """
-    kwargs: dict = {
-        "timeout": httpx.Timeout(timeout[1], connect=timeout[0]),
-        "headers": headers,
-        "transport": transport,
-    }
+    return httpx.Client(
+        timeout=httpx.Timeout(timeout[1], connect=timeout[0]),
+        headers=headers,
+        transport=transport,
+        trust_env=False,
+        proxy=(proxy or None),
+    )
+
+
+def probe_connection(
+    proxy: str,
+    *,
+    timeout: float = 10.0,
+    transport: Optional[httpx.BaseTransport] = None,
+) -> tuple[bool, str]:
+    """用候选代理访问谷歌，**不读写任何设置**（需求：测试只做临时连接）。
+
+    :returns: ``(是否连通, 说明文本)``
+    """
+    value, error = validate_proxy(proxy)
+    if error:
+        return False, error
+    if not value:
+        return False, "留空表示直连，不需要测试代理"
+
     try:
-        return httpx.Client(trust_env=True, **kwargs)
-    except (httpx.InvalidURL, ValueError) as exc:
-        proxy = _env_proxy()
-        log.warning(
-            "系统代理环境变量无法解析（%s），改用显式代理：%s", exc, proxy or "直连"
-        )
-        return httpx.Client(trust_env=False, proxy=(proxy or None), **kwargs)
+        with httpx.Client(
+            timeout=httpx.Timeout(connect=timeout, read=timeout, write=timeout, pool=timeout),
+            follow_redirects=False,
+            trust_env=False,
+            proxy=value,
+            headers={"User-Agent": f"MangaProof/{__version__}"},
+            transport=transport,
+        ) as client:
+            response = client.get(PROXY_TEST_URL)
+        return True, f"代理可用（{PROXY_TEST_URL} → HTTP {response.status_code}）"
+    except httpx.HTTPError as exc:
+        return False, f"代理不可用：{type(exc).__name__}: {exc}"
+    except Exception as exc:  # pragma: no cover —— 代理串非法等
+        return False, f"代理不可用：{exc}"
 
 
 class PoprakoClient:
@@ -122,6 +181,7 @@ class PoprakoClient:
         base_url: str = API_BASE_URL,
         token: str = "",
         *,
+        proxy: str = "",
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
         max_retries: int = 1,
         retry_delay: float = RETRY_DELAY,
@@ -131,15 +191,18 @@ class PoprakoClient:
         normalized = (base_url or "").strip() or API_BASE_URL
         self._base_url = normalized.rstrip("/")
         self._token = (token or "").strip()
+        proxy_value, proxy_error = validate_proxy(proxy)
+        if proxy_error:
+            log.warning("忽略非法的代理地址（%s）：%s", proxy_error, mask_proxy(proxy))
+        self._proxy = proxy_value
         self._max_retries = max(0, int(max_retries))
         self._retry_delay = max(0.0, float(retry_delay))
         headers = {
             "Accept": "application/json",
             "User-Agent": user_agent or f"MangaProof/{__version__}",
         }
-        # 跟随系统代理环境变量，不写死任何代理地址（需求 §13）；
-        # 环境变量格式不合法时自动退回显式代理/直连，见 :func:`_build_http_client`
-        self._http = _build_http_client(timeout, headers, transport)
+        # 留空 = 直连；非空 = 只走该代理（与更新模块同一口径，用户决策 2026-10-20）
+        self._http = _build_http_client(timeout, headers, transport, self._proxy)
 
     # -- 生命周期 ----------------------------------------------------------
 
@@ -157,6 +220,10 @@ class PoprakoClient:
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    @property
+    def proxy(self) -> str:
+        return self._proxy
 
     @property
     def token(self) -> str:

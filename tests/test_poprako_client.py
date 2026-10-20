@@ -329,15 +329,72 @@ def test_domain_layer_does_not_import_qt():
     assert result.returncode == 0, result.stderr
 
 
-# ---------------------------------------------------------------- 代理环境健壮性
+# ---------------------------------------------------------------- 代理
+
+def test_client_without_proxy_is_direct_and_ignores_env(monkeypatch):
+    """留空 = 直连：一律 trust_env=False（与更新模块同口径，2026-10-20 决策）。"""
+    from mangaproof.poprako import client as client_module
+
+    recorded: dict = {}
+
+    class _FakeHttpxClient:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(client_module.httpx, "Client", _FakeHttpxClient)
+    client_module.PoprakoClient(BASE)
+
+    assert recorded["trust_env"] is False
+    assert recorded["proxy"] is None
+
+
+def test_client_uses_explicit_proxy(monkeypatch):
+    from mangaproof.poprako import client as client_module
+
+    recorded: dict = {}
+
+    class _FakeHttpxClient:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(client_module.httpx, "Client", _FakeHttpxClient)
+    client = client_module.PoprakoClient(BASE, proxy="http://127.0.0.1:7897")
+
+    assert recorded["trust_env"] is False
+    assert recorded["proxy"] == "http://127.0.0.1:7897"
+    assert client.proxy == "http://127.0.0.1:7897"
+
+
+def test_client_ignores_invalid_proxy(monkeypatch):
+    from mangaproof.poprako import client as client_module
+
+    recorded: dict = {}
+
+    class _FakeHttpxClient:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(client_module.httpx, "Client", _FakeHttpxClient)
+    client = client_module.PoprakoClient(BASE, proxy="ftp://nope:1")
+
+    assert client.proxy == ""
+    assert recorded["proxy"] is None
 
 
 def test_client_constructs_when_no_proxy_env_is_malformed(monkeypatch):
-    """回归：``NO_PROXY`` 含裸 IPv6 时 httpx 构造会抛 InvalidURL → 对话框打不开。
+    """回归：``NO_PROXY`` 含裸 IPv6 会让 httpx 在 trust_env=True 时构造失败。
 
-    实测环境变量 ``NO_PROXY=localhost,127.0.0.1,::1,[::1]`` 会让
-    ``httpx.Client(trust_env=True)`` 在构造阶段就失败；本客户端必须自动退回
-    "显式代理 / 直连"而不是让整个窗口崩掉。
+    我们已固定 ``trust_env=False``，所以这种环境变量再坏也不影响客户端构造
+    （曾导致"菜单点了没反应"）。
     """
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,::1,[::1]")
     monkeypatch.setenv("no_proxy", "localhost,127.0.0.1,::1,[::1]")
@@ -349,21 +406,115 @@ def test_client_constructs_when_no_proxy_env_is_malformed(monkeypatch):
         client.close()
 
 
-def test_env_proxy_skips_unparseable_values(monkeypatch):
+@pytest.mark.parametrize(
+    "raw, expected, error_fragment",
+    [
+        ("", "", None),
+        ("   ", "", None),
+        ("127.0.0.1:7897", "", "协议"),
+        ("http://127.0.0.1:7897", "http://127.0.0.1:7897", None),
+        ("  socks5://127.0.0.1:1080  ", "socks5://127.0.0.1:1080", None),
+        ("https://proxy.example:443", "https://proxy.example:443", None),
+        ("http://user:pass@host:1", "http://user:pass@host:1", None),
+        ("ftp://host:1", "", "只支持"),
+        ("http://h ost:1", "", "空格"),
+        ("http://" + "a" * 400, "", "过长"),
+    ],
+)
+def test_validate_proxy(raw: str, expected: str, error_fragment: str | None):
+    from mangaproof.poprako.client import validate_proxy
+
+    value, error = validate_proxy(raw)
+    assert value == expected
+    if error_fragment is None:
+        assert error == ""
+    else:
+        assert error_fragment in error
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("", ""),
+        ("http://127.0.0.1:7897", "http://127.0.0.1:7897"),
+        ("http://user:secret@127.0.0.1:7897", "http://***@127.0.0.1:7897"),
+        ("socks5://u:p@host:1080", "socks5://***@host:1080"),
+    ],
+)
+def test_mask_proxy_hides_credentials(raw: str, expected: str):
+    from mangaproof.poprako.client import mask_proxy
+
+    assert mask_proxy(raw) == expected
+
+
+class _FakeProbeClient:
+    """替身探测客户端：记录 kwargs，返回预设响应或抛预设异常。"""
+
+    response: httpx.Response | None = None
+    error: Exception | None = None
+    last_kwargs: dict = {}
+
+    def __init__(self, **kwargs):
+        type(self).last_kwargs = kwargs
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def get(self, url: str):
+        type(self).last_url = url
+        if type(self).error is not None:
+            raise type(self).error
+        return type(self).response
+
+
+@pytest.fixture
+def fake_probe(monkeypatch):
     from mangaproof.poprako import client as client_module
 
-    for key in client_module._PROXY_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("all_proxy", "::1")
+    _FakeProbeClient.response = httpx.Response(204)
+    _FakeProbeClient.error = None
+    monkeypatch.setattr(client_module.httpx, "Client", _FakeProbeClient)
+    return _FakeProbeClient
 
-    assert client_module._env_proxy() == ""
+
+def test_probe_connection_success_reports_status(fake_probe):
+    from mangaproof.poprako.client import probe_connection
+
+    ok, message = probe_connection("http://127.0.0.1:7897", timeout=1.0)
+
+    assert ok is True
+    assert "HTTP 204" in message
+    assert "google.com" in message
+    assert fake_probe.last_kwargs["proxy"] == "http://127.0.0.1:7897"
+    assert fake_probe.last_kwargs["trust_env"] is False
 
 
-def test_env_proxy_prefers_https_then_all(monkeypatch):
-    from mangaproof.poprako import client as client_module
+def test_probe_connection_treats_any_http_response_as_reachable(fake_probe):
+    from mangaproof.poprako.client import probe_connection
 
-    for key in client_module._PROXY_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7897")
+    fake_probe.response = httpx.Response(403)
+    ok, message = probe_connection("socks5://127.0.0.1:1080", timeout=1.0)
 
-    assert client_module._env_proxy() == "http://127.0.0.1:7897"
+    assert ok is True
+    assert "HTTP 403" in message
+
+
+def test_probe_connection_reports_network_error(fake_probe):
+    from mangaproof.poprako.client import probe_connection
+
+    fake_probe.error = httpx.ConnectTimeout("timed out")
+    ok, message = probe_connection("http://127.0.0.1:7897", timeout=1.0)
+
+    assert ok is False
+    assert "ConnectTimeout" in message
+
+
+def test_probe_connection_rejects_empty_or_invalid_proxy():
+    from mangaproof.poprako.client import probe_connection
+
+    assert probe_connection("")[0] is False
+    ok, message = probe_connection("127.0.0.1:7897")
+    assert ok is False and "协议" in message

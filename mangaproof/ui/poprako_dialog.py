@@ -61,7 +61,7 @@ from PySide6.QtWidgets import (
 from mangaproof import APP_NAME
 from mangaproof.config.settings import PoprakoSettings
 from mangaproof.poprako import PLATFORM_NAME
-from mangaproof.poprako.client import PoprakoClient
+from mangaproof.poprako.client import PoprakoClient, mask_proxy, validate_proxy
 from mangaproof.poprako.convert import PreflightReport, build_payload
 from mangaproof.poprako.credentials import (
     clear_token,
@@ -81,7 +81,13 @@ from mangaproof.poprako.models import (
     stage_phases,
 )
 from mangaproof.review.state import TaskState
-from mangaproof.ui.poprako_worker import CallWorker, UploadOutcome, UploadWorker, adopt_worker
+from mangaproof.ui.poprako_worker import (
+    CallWorker,
+    ProxyProbeWorker,
+    UploadOutcome,
+    UploadWorker,
+    adopt_worker,
+)
 from mangaproof.ui.theme import (
     COLOR_BG_HOVER,
     COLOR_BG_PANEL,
@@ -116,6 +122,7 @@ ROW_LABEL_GAP = 10
 #: 侧栏四项 = 四页；顺序即流程顺序
 PAGES: dict[str, tuple[str, str]] = {
     "account": ("账号", "登录 Poprako；密码不保存，令牌优先存系统凭据库"),
+    "proxy": ("代理", "连接方式：留空表示直连；测试只做临时连接，保存后才生效"),
     "target": ("目标章节", "选择要写入的团队 / 项目集 / 作品 / 章节"),
     "mapping": ("页面映射", "把本地 PSD 对应到章节的复合图页；对不上的页不会被写入"),
     "upload": ("预览与上传", "上传会用本次结果整体替换该章节的全部问题"),
@@ -293,7 +300,8 @@ class PoprakoSyncDialog(QDialog):
         self._settings = settings
         self._poprako: PoprakoSettings = settings.poprako
         self._client_factory = client_factory or PoprakoClient
-        self._client = self._client_factory(self._poprako.base_url, "")
+        # 工厂签名 (base_url, proxy)：代理是平台级设置，客户端跟着它构造
+        self._client = self._client_factory(self._poprako.base_url, self._poprako.proxy)
         self._android = is_android_strict()
 
         self._files = [record.relative_path for record in task.files]
@@ -384,6 +392,7 @@ class PoprakoSyncDialog(QDialog):
 
         self._page_widgets: dict[str, _Page] = {}
         self._build_account_page()
+        self._build_proxy_page()
         self._build_target_page()
         self._build_mapping_page()
         self._build_upload_page()
@@ -456,7 +465,51 @@ class PoprakoSyncDialog(QDialog):
         rows.addLayout(actions)
         _align_fields(rows)
 
-    # -- 页 2：目标章节 ----------------------------------------------------
+    # -- 页 2：代理 --------------------------------------------------------
+
+    def _build_proxy_page(self) -> None:
+        """代理独立成页（2026-10-20 需求方）：测试不保存、点「保存」才生效。"""
+        page = self._add_page("proxy")
+        rows = page.enable_scroll()
+
+        self._proxy_edit = QLineEdit(self._poprako.proxy)
+        self._proxy_edit.setPlaceholderText(
+            "留空 = 直连；例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+        )
+        self._proxy_edit.setToolTip(
+            "留空表示直连（与更新功能的代理设置同口径）；支持 http / https / socks5，"
+            "可带账号密码：http://user:pass@host:port（会明文保存在 settings.json）"
+        )
+        self._add_row(rows, "代理地址", self._proxy_edit, expand=True)
+
+        self._proxy_current = self._info_value()
+        self._add_row(rows, "当前生效", self._proxy_current)
+
+        self._proxy_hint = QLabel(
+            "「测试连接」只用输入框里的地址访问谷歌，不会保存；"
+            "点「保存」后才写入设置并用于后续请求。"
+        )
+        self._proxy_hint.setWordWrap(True)
+        self._proxy_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+        rows.addWidget(self._proxy_hint)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        actions.addStretch(1)
+        self._proxy_test_btn = QPushButton("测试连接")
+        self._proxy_test_btn.setAutoDefault(False)
+        self._proxy_test_btn.clicked.connect(self._on_proxy_test_clicked)
+        actions.addWidget(self._proxy_test_btn)
+
+        self._proxy_save_btn = QPushButton("保存")
+        self._proxy_save_btn.setAutoDefault(False)
+        self._proxy_save_btn.clicked.connect(self._on_proxy_save_clicked)
+        actions.addWidget(self._proxy_save_btn)
+        rows.addLayout(actions)
+
+        _align_fields(rows)
+
+    # -- 页 3：目标章节 ----------------------------------------------------
 
     def _build_target_page(self) -> None:
         page = self._add_page("target")
@@ -647,7 +700,9 @@ class PoprakoSyncDialog(QDialog):
 
     def _on_nav_changed(self, index: int) -> None:
         self.stack.setCurrentIndex(max(0, index))
-        if index == 2:
+        if index == 1:
+            self._refresh_proxy_row()
+        if index == 3:
             self._refresh_mapping_summary()
         self._refresh_status()
 
@@ -736,6 +791,7 @@ class PoprakoSyncDialog(QDialog):
         self._base_url_edit.setText(self._poprako.base_url)
         self._qid_edit.setText(self._poprako.qid)
         self._refresh_token_hint()
+        self._refresh_proxy_row()
         self._upload_target_value.setText("—")
         self._upload_write_value.setText("—")
         self._upload_clear_value.setText("—")
@@ -845,9 +901,11 @@ class PoprakoSyncDialog(QDialog):
             return
 
         self._poprako.base_url = base_url
-        if self._client.base_url != base_url.rstrip("/"):
-            self._client.close()
-            self._client = self._client_factory(base_url, "")
+        if (
+            self._client.base_url != base_url.rstrip("/")
+            or self._client.proxy != (self._poprako.proxy or "")
+        ):
+            self._rebuild_client()
         self._client.token = ""
         self._set_busy("正在登录…")
 
@@ -893,6 +951,83 @@ class PoprakoSyncDialog(QDialog):
         self._refresh_payload()
         self._apply_logged_out()
         self._set_notice("已退出登录", "info")
+
+    # ================================================================ 代理
+
+    def _refresh_proxy_row(self) -> None:
+        saved = (self._poprako.proxy or "").strip()
+        self._proxy_current.setText(saved or "直连")
+        self._proxy_current.setStyleSheet(
+            f"color: {COLOR_TEXT if saved else COLOR_TEXT_DIM};"
+        )
+
+    def _on_proxy_test_clicked(self) -> None:
+        """只测不存：用输入框里的地址访问谷歌，不碰 settings。"""
+        value, error = validate_proxy(self._proxy_edit.text())
+        if error:
+            self._set_notice(error, "warn")
+            return
+        if not value:
+            self._set_notice("留空表示直连，不需要测试代理", "warn")
+            return
+
+        self._proxy_test_btn.setEnabled(False)
+        self._proxy_test_btn.setText("测试中…")
+        self._set_notice("正在通过代理访问谷歌…", "info")
+        worker = ProxyProbeWorker(value)
+        self._workers.add(worker)
+        worker.finished_with.connect(
+            lambda ok, message: self._on_proxy_tested(worker, ok, message)
+        )
+        worker.start()
+
+    def _on_proxy_tested(self, worker, ok: bool, message: str) -> None:
+        self._workers.discard(worker)
+        self._release_worker(worker)
+        self._proxy_test_btn.setEnabled(True)
+        self._proxy_test_btn.setText("测试连接")
+        self._set_notice(("✓ " if ok else "✗ ") + message, "ok" if ok else "error")
+
+    def _on_proxy_save_clicked(self) -> None:
+        """保存并立即生效（用户决策：点保存才真的保存与使用）。"""
+        value, error = validate_proxy(self._proxy_edit.text())
+        if error:
+            self._set_notice(error, "warn")
+            return
+
+        changed = value != (self._poprako.proxy or "")
+        self._poprako.proxy = value
+        self._settings_dirty = True
+        self.settings_committed.emit()        # 立即写 settings.json
+        self._rebuild_client()
+        self._refresh_proxy_row()
+
+        if not value:
+            self._set_notice("已保存：直连", "ok")
+        elif "@" in value:
+            self._set_notice(
+                f"已保存并生效：{mask_proxy(value)}（含账号密码，明文存于 settings.json）",
+                "warn",
+            )
+        else:
+            self._set_notice(
+                f"已保存并生效：{mask_proxy(value)}" if changed else "设置未变化",
+                "ok" if changed else "info",
+            )
+
+    def _rebuild_client(self) -> None:
+        """按当前 base_url + proxy 重建客户端，保留已登录令牌。"""
+        token = self._client.token
+        old = self._client
+        self._client = self._client_factory(self._poprako.base_url, self._poprako.proxy)
+        self._client.token = token
+        try:
+            old.close()
+        except Exception:      # pragma: no cover —— 关闭失败不影响新客户端
+            pass
+        log.info(
+            "Poprako 客户端已重建（代理=%s）", mask_proxy(self._poprako.proxy) or "直连"
+        )
 
     # ================================================================ 层级
 
@@ -1406,6 +1541,9 @@ class PoprakoSyncDialog(QDialog):
         self._export_btn.setEnabled(bool(self._preview_full))
         self._refresh_btn.setEnabled(self._user is not None and not self._busy)
         self._login_btn.setEnabled(not self._busy)
+        self._proxy_save_btn.setEnabled(not self._busy)
+        if not self._busy:
+            self._proxy_test_btn.setEnabled(True)
 
     # ================================================================ 上传
 
