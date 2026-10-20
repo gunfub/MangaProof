@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 from mangaproof.poprako.client import PAGE_LIMIT, PoprakoClient  # noqa: E402
 from mangaproof.poprako.errors import (  # noqa: E402
     PoprakoAuthError,
+    PoprakoError,
     PoprakoForbiddenError,
     PoprakoHTTPError,
     PoprakoNetworkError,
@@ -205,17 +206,111 @@ def test_pagination_walks_until_short_page():
 # ---------------------------------------------------------------- 层级与导入
 
 
-def test_comics_filters_archived_rows():
+def test_comics_reads_documented_object_shape():
+    """回归：``/worksets/{id}/comics`` 的 data 是**对象**，不是数组。
+
+    swagger 的 ``ListComicInfosVal`` = ``{comics, pinned_chapters,
+    pinned_chapter_assignments}``；按数组解析会永远得到空列表（曾经的 bug：
+    作品与章节都加载不出来）。
+    """
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params.get("status") == "active"
-        return envelope([
-            {"id": "c_1", "title": "某漫画", "is_archived": False},
-            {"id": "c_2", "title": "旧坑", "is_archived": True},
-        ])
+        return envelope({
+            "comics": [
+                {"id": "c_1", "title": "某漫画", "is_archived": False},
+                {"id": "c_2", "title": "旧坑", "is_archived": True},
+            ],
+            "pinned_chapters": [None, None],
+            "pinned_chapter_assignments": [[], []],
+        })
 
     client = make_client(handler, token="tok-1")
     comics = client.comics("w_1")
     assert [c.id for c in comics] == ["c_1"]
+
+
+def test_comics_still_accepts_bare_array():
+    """服务端若回退成裸数组也能吃（防御）."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return envelope([{"id": "c_1", "title": "某漫画"}])
+
+    client = make_client(handler, token="tok-1")
+    assert [c.id for c in client.comics("w_1")] == ["c_1"]
+
+
+def test_paged_object_shape_paginates_over_comics():
+    offsets: list[str] = []
+    first = [{"id": f"c_{i}"} for i in range(PAGE_LIMIT)]
+    second = [{"id": "c_tail"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        offset = request.url.params.get("offset", "0")
+        offsets.append(offset)
+        comics = first if offset == "0" else second
+        return envelope({
+            "comics": comics,
+            "pinned_chapters": [],
+            "pinned_chapter_assignments": [],
+        })
+
+    client = make_client(handler, token="tok-1")
+    comic_ids = [c.id for c in client.comics("w_1")]
+    assert offsets == ["0", str(PAGE_LIMIT)]
+    assert len(comic_ids) == PAGE_LIMIT + 1
+    assert comic_ids[-1] == "c_tail"
+
+
+def test_unexpected_list_shape_raises_readable_error():
+    """结构不符必须报错，而不是静默返回空列表（用户要求）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return envelope({"items": [{"id": "x"}]})
+
+    client = make_client(handler, token="tok-1")
+    with pytest.raises(PoprakoError) as excinfo:
+        client.worksets("t_1")
+    message = str(excinfo.value)
+    assert "结构不符" in message
+    assert "items" in message
+
+
+def test_null_data_is_treated_as_empty_list():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return envelope(None)
+
+    client = make_client(handler, token="tok-1")
+    assert client.chapters("c_1") == []
+
+
+#: 列表端点 → 文档形态。任何一个端点的 data 形态变了，这里会先炸（契约表）。
+_LIST_CONTRACTS = [
+    ("my_teams", lambda c: c.my_teams(),
+     [{"team_id": "t_1", "roles": 32, "team": {"name": "T"}}]),
+    ("worksets", lambda c: c.worksets("t_1"),
+     [{"id": "w_1", "name": "W"}]),
+    ("comics", lambda c: c.comics("w_1"),
+     {"comics": [{"id": "c_1", "title": "C"}],
+      "pinned_chapters": [], "pinned_chapter_assignments": []}),
+    ("chapters", lambda c: c.chapters("c_1"),
+     [{"id": "ch_1", "index": 0}]),
+    ("page_artworks", lambda c: c.page_artworks("ch_1"),
+     [{"id": "pa_1", "index": 0}]),
+    ("issues", lambda c: c.issues("ch_1"),
+     [{"id": "i_1", "page_artwork_id": "pa_1", "variant": "v", "note": "n"}]),
+]
+
+
+@pytest.mark.parametrize("name, call, data", _LIST_CONTRACTS,
+                         ids=[case[0] for case in _LIST_CONTRACTS])
+def test_list_endpoints_match_documented_shapes(name, call, data):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return envelope(data)
+
+    client = make_client(handler, token="tok-1")
+    rows = call(client)
+    assert len(rows) == 1, f"{name} 的文档形态解析失败"
 
 
 def test_import_issues_posts_payload_and_returns_counts():

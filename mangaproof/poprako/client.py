@@ -277,9 +277,16 @@ class PoprakoClient:
         return [Workset.from_api(row) for row in rows]
 
     def comics(self, workset_id: str) -> list[Comic]:
-        """只列未归档作品（需求 §6.3）。"""
+        """只列未归档作品（需求 §6.3）。
+
+        注意这个端点的 data 是**对象**而不是数组：
+        ``{comics, pinned_chapters, pinned_chapter_assignments}``
+        （swagger 的 ``ListComicInfosVal``，poprako-web 也按 ``data.comics`` 解码）。
+        """
         rows = self._paged(
-            f"worksets/{quote(workset_id, safe='')}/comics", {"status": "active"}
+            f"worksets/{quote(workset_id, safe='')}/comics",
+            {"status": "active"},
+            key="comics",
         )
         return [Comic.from_api(row) for row in rows if not row.get("is_archived")]
 
@@ -400,7 +407,16 @@ class PoprakoClient:
         message = f"HTTP {status}" + (f"（code {code}）" if code is not None else "")
         raise PoprakoHTTPError(message, status=status, code=code)
 
-    def _paged(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _paged(
+        self, path: str, params: dict[str, Any], *, key: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """拉取全部分页。
+
+        ``key`` 用于"列表被包在对象里"的端点（``/worksets/{id}/comics`` 返回
+        ``{comics, pinned_chapters, pinned_chapter_assignments}``）；其余端点仍是
+        裸数组。**形态不符时抛错**，而不是静默返回空列表——空列表和"解析失败"
+        在界面上必须能区分开（否则就是"作品下拉一片空白、也不知道为什么"）。
+        """
         items: list[dict[str, Any]] = []
         offset = 0
         for _ in range(MAX_PAGES):
@@ -408,9 +424,27 @@ class PoprakoClient:
             query["offset"] = offset
             query["limit"] = PAGE_LIMIT
             data = self._request("GET", path, params=query)
-            chunk = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+            chunk = self._list_of(data, key, path)
             items.extend(chunk)
             if len(chunk) < PAGE_LIMIT:
                 return items
             offset += PAGE_LIMIT
         raise PoprakoError(f"分页超过 {MAX_PAGES} 页上限，已中止")
+
+    @staticmethod
+    def _list_of(data: Any, key: Optional[str], path: str) -> list[dict[str, Any]]:
+        """从响应 data 里取出列表；形态不符抛 :class:`PoprakoError`。"""
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        if key and isinstance(data, dict) and isinstance(data.get(key), list):
+            return [row for row in data[key] if isinstance(row, dict)]
+        if data is None:
+            # {code:0, data:null} 当作空列表（服务端偶发，不明显是错误）
+            return []
+
+        detail = f"data.{key}" if key else "data"
+        top = sorted(data)[:8] if isinstance(data, dict) else type(data).__name__
+        log.warning("Poprako %s 返回结构不符（期望 %s 为列表）；顶层：%s", path, detail, top)
+        raise PoprakoError(
+            f"接口返回结构不符：{path} 的 {detail} 不是列表（顶层键：{top}）"
+        )

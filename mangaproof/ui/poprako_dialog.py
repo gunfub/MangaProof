@@ -1071,6 +1071,11 @@ class PoprakoSyncDialog(QDialog):
             [(item.name, item.id) for item in self._worksets],
             self._poprako.last_workset_id,
         )
+        if not self._worksets:
+            self._set_notice("该团队下没有项目集", "warn")
+            self._clear_combos(self._comic_combo, self._chapter_combo)
+            self._reset_chapter_state()
+            return
         self._on_workset_changed()
 
     def _on_workset_changed(self) -> None:
@@ -1091,6 +1096,12 @@ class PoprakoSyncDialog(QDialog):
             [(item.title, item.id) for item in self._comics],
             self._poprako.last_comic_id,
         )
+        if not self._comics:
+            # 空列表要说话：否则用户分不清"没数据"和"加载失败"（需求 2026-10-20）
+            self._set_notice("该项目集下没有作品", "warn")
+            self._clear_combos(self._chapter_combo)
+            self._reset_chapter_state()
+            return
         self._on_comic_changed()
 
     def _on_comic_changed(self) -> None:
@@ -1112,6 +1123,10 @@ class PoprakoSyncDialog(QDialog):
             [(item.label, item.id) for item in self._chapters],
             pending,
         )
+        if not self._chapters:
+            self._set_notice("该作品下没有章节", "warn")
+            self._reset_chapter_state()
+            return
         self._on_chapter_changed()
 
     def _pending_chapter_id(self) -> str:
@@ -1120,15 +1135,19 @@ class PoprakoSyncDialog(QDialog):
         chapter_id = binding.get("chapter_id")
         return chapter_id if isinstance(chapter_id, str) else ""
 
+    def _reset_chapter_state(self) -> None:
+        """章节被清空（未选 / 上级为空 / 没有章节）时统一收尾。"""
+        self._chapter = None
+        self._artworks = []
+        self._remote_issues = []
+        self._refresh_chapter_info()
+        self._refresh_mapping_table()
+        self._refresh_payload()
+
     def _on_chapter_changed(self) -> None:
         chapter_id = self._chapter_combo.currentData()
         if not chapter_id:
-            self._chapter = None
-            self._artworks = []
-            self._remote_issues = []
-            self._refresh_chapter_info()
-            self._refresh_mapping_table()
-            self._refresh_payload()
+            self._reset_chapter_state()
             return
 
         if self._chapter is not None and chapter_id != self._chapter.id and self._mapping:

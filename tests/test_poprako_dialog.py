@@ -488,6 +488,9 @@ def test_login_cascades_to_chapter_and_auto_mapping(qapp, tmp_path, monkeypatch)
 
         assert dialog._user is not None and dialog._user.nickname == "秋叶声生"
         assert [t.team_name for t in dialog._teams] == ["木叶翻译组"]
+        assert dialog._comic_combo.count() == 1, "作品下拉必须被填充"
+        assert dialog._comic_combo.currentData() == "co_1"
+        assert dialog._chapter_combo.count() == 1, "章节下拉必须被填充"
         assert dialog._chapter is not None and dialog._chapter.id == "ch_1"
         assert dialog._mapping == {"001.psd": "pa_1"}
         assert dialog._page_widgets["target"].isEnabled()
@@ -763,5 +766,39 @@ def test_proxy_masked_when_saving_credentials(qapp, tmp_path):
         dialog._on_proxy_save_clicked()
         assert "secret" not in dialog._status_label.text(), "状态行不得回显代理密码"
         assert "***@" in dialog._status_label.text()
+    finally:
+        dialog.done(0)
+
+
+# ---------------------------------------------------------------- 空列表提示
+
+
+def test_empty_worksets_shows_notice(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._on_worksets([])
+        assert "没有项目集" in dialog._status_label.text()
+        assert dialog._comic_combo.count() == 0
+    finally:
+        dialog.done(0)
+
+
+def test_empty_comics_shows_notice_and_clears_chapters(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._on_comics([])
+        assert "没有作品" in dialog._status_label.text()
+        assert dialog._chapter_combo.count() == 0
+    finally:
+        dialog.done(0)
+
+
+def test_empty_chapters_shows_notice(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        dialog._on_chapters([])
+        assert "没有章节" in dialog._status_label.text()
+        assert dialog._chapter is None
+        assert dialog._artworks == []
     finally:
         dialog.done(0)
