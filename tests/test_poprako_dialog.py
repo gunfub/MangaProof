@@ -487,3 +487,27 @@ def test_login_cascades_to_chapter_and_auto_mapping(qapp, tmp_path, monkeypatch)
         assert dialog._password_edit.text() == "", "登录成功后密码框必须清空"
     finally:
         dialog.done(0)
+
+
+def test_startup_with_cached_token_verifies_and_loads_teams(qapp, tmp_path, monkeypatch):
+    """有缓存令牌时：/users/me 校验 → 已登录 → 团队 → … → 章节（回归：曾漏写回调）。"""
+    monkeypatch.setattr(dialog_module, "load_token", lambda settings: "tok-1")
+
+    def _sync_run(self, fn, on_success):
+        result = fn()
+        self._set_busy(None)
+        on_success(result)
+
+    monkeypatch.setattr(PoprakoSyncDialog, "_run", _sync_run)
+    dialog = open_dialog(tmp_path, make_task("001.psd"), client=_FakeClient())
+    try:
+        dialog.show()
+        QApplication.processEvents()
+
+        assert dialog._client.token == "tok-1"
+        assert dialog._user is not None and dialog._user.nickname == "秋叶声生"
+        assert dialog._account_status.text().startswith("已登录")
+        assert [team.team_id for team in dialog._teams] == ["t_1"]
+        assert dialog._chapter is not None
+    finally:
+        dialog.done(0)

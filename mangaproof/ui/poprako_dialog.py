@@ -759,6 +759,15 @@ class PoprakoSyncDialog(QDialog):
         self._set_busy("正在校验登录状态…")
         self._run(self._client.me, self._on_verified)
 
+    def _on_verified(self, user: User) -> None:
+        """用缓存令牌校验成功：进入已登录态并继续拉层级。"""
+        if user.nickname != self._poprako.nickname or user.qid != self._poprako.qid:
+            self._poprako.nickname = user.nickname
+            self._poprako.qid = user.qid
+            self._settings_dirty = True
+        self._apply_logged_in(user)
+        self._load_teams()
+
     # ================================================================ 鉴权
 
     def _apply_logged_out(self) -> None:
