@@ -169,11 +169,9 @@ OUTPUT_GAP = 10
 #: 用 ``addLayout()`` 加进去的子布局，按钮会严丝合缝地粘在一起（实测 gap=0）。
 BUTTON_GAP = 10
 
-#: 状态区固定高度（px）：内容超过就在这一块里滚动。
-#: 必须是**固定**高度而不是只设上限：Qt 在窗口大小不变的前提下重排布局，
-#: 后出现的进度条会从状态区"抢"高度，抢不到就去压缩 QFormLayout 的行高——
-#: 实测「代理」那一行（含按钮，行高最大）会被压到 12px，看起来就是"被压扁"。
-#: 固定住状态区，表单各行高度就恒定，对话框最小高度也就能一次算准。
+#: 状态区的**最小**高度（px）：内容超过就在这一块里滚动。
+#: 是"下限"而不是"固定值"，这一点很关键 —— 见 :meth:`UpdateDialog._fit_status_height`
+#: 的两条推理：下限保证表单永不被压缩；上不封顶则让**多余高度归输出区**。
 #: 取值权衡：够放"发现新版本 + 文件 + 大小"而不用滚动，又不至于让空闲窗口太高。
 STATUS_AREA_HEIGHT = 180
 
@@ -397,11 +395,18 @@ class UpdateDialog(QDialog):
         self._add_row(form, "下载限速", self.speed_combo)
 
         root.addLayout(form)
-        root.addSpacing(BLOCK_GAP)
+        # 说明区上留空用 ROW_SPACING（与下方、与分割线同一个常量）：实测视觉值 =
+        # 布局值 + 1px（富文本行框），所以上下都是 17px，与「分割线 → 状态区首行」
+        # 的 18px 只差 1px 行框内边距；关键是不能让它再随窗口变 —— 多余高度归状态区
+        # （见 _fit_status_height 的 2026-10-20 说明）。
+        root.addSpacing(ROW_SPACING)
 
         self.hint_label = QLabel()
         self.hint_label.setWordWrap(True)
         self.hint_label.setObjectName("updateHint")
+        # 注意：**不要**给这里加 Fixed/Maximum 竖向策略来"防止被撑开"——
+        # wordWrap 标签的 sizeHint 是按旧的（未布局的）宽度算的，实测会被钉成
+        # 6 行 108px。真正的对策是让多余高度归状态区（见 _fit_status_height）。
         # 提示行里带"申请 GitHub Token"的链接：沿用关于页的做法，
         # 交给 QLabel 直接调系统浏览器（about_dialog.py 同款）。
         self.hint_label.setTextFormat(Qt.TextFormat.RichText)
@@ -625,19 +630,31 @@ class UpdateDialog(QDialog):
         self.progress.setEnabled(True)
 
     def _fit_status_height(self) -> None:
-        """状态区高度固定 + 窗口最小高度一次算准（表单永不被压扁）。
+        """状态区最小高度 + 窗口最小高度一次算准（表单永不被压扁）。
 
         为什么需要它：状态文案（"发现新版本"里带更新说明、失败原因）变化时，
         Qt 只在窗口大小不变的假设下重排布局——空间不够时 QFormLayout 会自己
         压缩行高（实测「代理」行被压到 12px）。所以：
 
-        - 状态区高度固定为 :data:`STATUS_AREA_HEIGHT`，文案长了只自己滚动；
+        - 状态区**最小**高度为 :data:`STATUS_AREA_HEIGHT`，文案长了只自己滚动；
+          **下限**这一步挡住"被压缩"：状态区不会低于 180，行高就恒定了；
         - 进度条常驻占位（见 :meth:`_build_ui`），最小高度里天然含它的位置，
           所以「检查中」只是把它点亮，不会中途多出一个控件来抢高度；
         - 窗口最小高度取布局自己算出来的 ``minimumSize``，再留 8px 余量吸收
           Qt 内部取整误差。
+
+        2026-10-20 追加：**上不封顶**（``Expanding``），让窗口比最小高度高出来的
+        部分归输出区。原先这里写的是 ``setFixedHeight``，看似更稳，实测却是个坑：
+        页面上只有说明标签 ``hint_label`` 允许长高（状态区被钉死、进度条与按钮行
+        固定），多余高度全灌进那个 QLabel，而 QLabel 默认把文字垂直居中 ——
+        于是两行灰字的上下留空随窗口一起膨胀（840×700 时上下各 46/51px），
+        而「分割线 → 状态区文字」那段始终 18px，看着就是"这两行飘在空中"。
+        让状态区吃下余量后，说明标签高度恒为两行（36px）、留空恒定。
         """
-        self.status_area.setFixedHeight(STATUS_AREA_HEIGHT)
+        self.status_area.setMinimumHeight(STATUS_AREA_HEIGHT)
+        self.status_area.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.setMinimumHeight(self.layout().minimumSize().height() + 8)
 
     def _load_draft(self) -> None:
