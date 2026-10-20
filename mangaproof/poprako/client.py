@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import quote
 
 import httpx
@@ -276,17 +276,26 @@ class PoprakoClient:
         rows = self._paged(f"teams/{quote(team_id, safe='')}/worksets", {})
         return [Workset.from_api(row) for row in rows]
 
-    def comics(self, workset_id: str) -> list[Comic]:
+    def comics(
+        self,
+        workset_id: str,
+        *,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> list[Comic]:
         """只列未归档作品（需求 §6.3）。
 
         注意这个端点的 data 是**对象**而不是数组：
         ``{comics, pinned_chapters, pinned_chapter_assignments}``
         （swagger 的 ``ListComicInfosVal``，poprako-web 也按 ``data.comics`` 解码）。
+
+        ``progress(pages_done, rows)`` 每读完一页回调一次——作品可能有很多页，
+        界面要靠它显示"第几页 / 已获取多少条"。
         """
         rows = self._paged(
             f"worksets/{quote(workset_id, safe='')}/comics",
             {"status": "active"},
             key="comics",
+            progress=progress,
         )
         return [Comic.from_api(row) for row in rows if not row.get("is_archived")]
 
@@ -408,7 +417,12 @@ class PoprakoClient:
         raise PoprakoHTTPError(message, status=status, code=code)
 
     def _paged(
-        self, path: str, params: dict[str, Any], *, key: Optional[str] = None
+        self,
+        path: str,
+        params: dict[str, Any],
+        *,
+        key: Optional[str] = None,
+        progress: Optional[Callable[[int, int], None]] = None,
     ) -> list[dict[str, Any]]:
         """拉取全部分页。
 
@@ -426,6 +440,8 @@ class PoprakoClient:
             data = self._request("GET", path, params=query)
             chunk = self._list_of(data, key, path)
             items.extend(chunk)
+            if progress is not None:
+                progress(offset // PAGE_LIMIT + 1, len(items))
             if len(chunk) < PAGE_LIMIT:
                 return items
             offset += PAGE_LIMIT

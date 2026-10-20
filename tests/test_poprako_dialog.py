@@ -108,7 +108,8 @@ def make_artwork(pid: str, index: int, raw: str | None = None) -> PageArtwork:
                        image_uploaded=True, ext="png")
 
 
-def open_dialog(tmp_path: Path, task: TaskState, client=None, factory=None) -> PoprakoSyncDialog:
+def open_dialog(tmp_path: Path, task: TaskState, client=None, factory=None,
+                last_store=None) -> PoprakoSyncDialog:
     """``client`` 传实例时复用；要验证"重建客户端"就传 ``factory``。"""
     manager = SettingsManager(tmp_path / "settings.json")
     manager.save()
@@ -120,6 +121,7 @@ def open_dialog(tmp_path: Path, task: TaskState, client=None, factory=None) -> P
         make = lambda base, proxy: _NoNetworkClient(base, proxy)
     dialog = PoprakoSyncDialog(
         task, tmp_path, manager.settings, client_factory=make,
+        last_store=last_store,
     )
     dialog._manager = manager       # 便于测试断言保存内容
     return dialog
@@ -130,7 +132,11 @@ def make_ready(dialog: PoprakoSyncDialog, *, roles: int = 32, stages: int = 0) -
     dialog._user = User(id="u_1", qid="123456", nickname="秋叶声生", is_sadmin=False)
     dialog._apply_logged_in(dialog._user)
     dialog._teams = [Membership("t_1", "木叶翻译组", roles)]
-    dialog._fill_combo(dialog._team_combo, [("木叶翻译组", "t_1")], "t_1")
+    dialog._teams_loaded = True
+    dialog._fill_combo(dialog._team_combo, [("木叶翻译组", "t_1")], "请选择团队")
+    dialog._team_combo.blockSignals(True)      # 只改界面状态，不触发网络
+    dialog._team_combo.setCurrentIndex(1)
+    dialog._team_combo.blockSignals(False)
     dialog._artworks = [make_artwork("pa_1", 0), make_artwork("pa_2", 1)]
     dialog._chapter = make_chapter(stages)
     dialog._mapping = {"001.psd": "pa_1", "002.psd": "pa_2"}
@@ -327,7 +333,10 @@ def test_preserve_toggle_changes_payload(qapp, tmp_path):
 
         dialog._user = User(id="u_1", qid="1", nickname="n", is_sadmin=False)
         dialog._teams = [Membership("t_1", "T", 32)]
-        dialog._fill_combo(dialog._team_combo, [("T", "t_1")], "t_1")
+        dialog._fill_combo(dialog._team_combo, [("T", "t_1")], "请选择团队")
+        dialog._team_combo.blockSignals(True)
+        dialog._team_combo.setCurrentIndex(1)
+        dialog._team_combo.blockSignals(False)
         dialog._artworks = [make_artwork("pa_1", 0), make_artwork("pa_2", 1)]
         dialog._chapter = make_chapter()
         dialog._mapping = {"001.psd": "pa_1"}
@@ -465,10 +474,12 @@ class _FakeClient(_NoNetworkClient):
         return []
 
 
-def test_login_cascades_to_chapter_and_auto_mapping(qapp, tmp_path, monkeypatch):
-    """登录 → 团队 → 项目集 → 作品 → 章节 → 页面，全程同步执行、不联网。"""
+def test_login_then_manual_lazy_cascade(qapp, tmp_path, monkeypatch):
+    """登录只完成鉴权；团队、项目集、作品、章节都靠用户逐级选择才请求。
+
+    这是 2026-10-20 决策：不再"自动选第一项一路加载到底"。
+    """
     def _sync_run(self, fn, on_success):
-        """同步执行，并模拟真实流程里"完成 → 清 busy → 回调"的顺序。"""
         result = fn()
         self._set_busy(None)
         on_success(result)
@@ -476,33 +487,65 @@ def test_login_cascades_to_chapter_and_auto_mapping(qapp, tmp_path, monkeypatch)
     monkeypatch.setattr(PoprakoSyncDialog, "_run", _sync_run)
     task = make_task("001.psd", issues=[make_issue("001.psd", 1)])
     dialog = open_dialog(tmp_path, task, client=_FakeClient())
+    dialog._poprako.rank_comics = False        # 同步路径，避免线程与进度窗
     try:
         dialog.show()
         QApplication.processEvents()
-        QApplication.processEvents()   # 启动流程在事件循环下一拍
-        assert dialog._user is None, "没有缓存令牌时应停在与未登录"
+        QApplication.processEvents()
+        assert dialog._user is None
 
         dialog._qid_edit.setText("123456")
         dialog._password_edit.setText("p@ss")
         dialog._on_login_clicked()
 
         assert dialog._user is not None and dialog._user.nickname == "秋叶声生"
-        assert [t.team_name for t in dialog._teams] == ["木叶翻译组"]
-        assert dialog._comic_combo.count() == 1, "作品下拉必须被填充"
-        assert dialog._comic_combo.currentData() == "co_1"
-        assert dialog._chapter_combo.count() == 1, "章节下拉必须被填充"
+        assert dialog._teams == [], "登录本身不请求层级数据"
+        assert dialog._worksets == [] and dialog._comics == []
+
+        # 进入「目标章节」：只加载团队，且不自动选中
+        dialog.nav_list.setCurrentRow(2)
+        QApplication.processEvents()
+        assert [team.team_id for team in dialog._teams] == ["t_1"]
+        assert dialog._team_combo.currentData() is None, "必须等用户选"
+        assert dialog._worksets == []
+
+        # 选团队 → 项目集
+        dialog._team_combo.setCurrentIndex(1)
+        QApplication.processEvents()
+        assert [item.id for item in dialog._worksets] == ["w_1"]
+        assert dialog._workset_combo.currentData() is None
+
+        # 选项目集 → 作品（未排序路径）
+        dialog._workset_combo.setCurrentIndex(1)
+        QApplication.processEvents()
+        assert [item.id for item in dialog._comics] == ["co_1"]
+        assert dialog._comic_combo.currentData() is None
+
+        # 选作品 → 章节
+        dialog._comic_combo.setCurrentIndex(1)
+        QApplication.processEvents()
+        assert [item.id for item in dialog._chapters] == ["ch_1"]
+        assert dialog._chapter_combo.currentData() is None
+
+        # 选章节：不发请求，只让按钮可用
+        dialog._chapter_combo.setCurrentIndex(1)
+        QApplication.processEvents()
+        assert dialog._chapter is None, "选章节不得自动加载章节信息"
+        assert dialog._load_chapter_btn.isEnabled() is True
+
+        # 点「加载章节信息」才真正拉详情 / 复合图页 / 现有问题
+        dialog._on_load_chapter_clicked()
+        QApplication.processEvents()
         assert dialog._chapter is not None and dialog._chapter.id == "ch_1"
         assert dialog._mapping == {"001.psd": "pa_1"}
-        assert dialog._page_widgets["target"].isEnabled()
-        assert dialog._upload_target_value.text() == "第 12 话 初次见面"
         assert dialog._upload_btn.isEnabled() is True, dialog._upload_btn.toolTip()
         assert dialog._password_edit.text() == "", "登录成功后密码框必须清空"
     finally:
         dialog.done(0)
 
 
-def test_startup_with_cached_token_verifies_and_loads_teams(qapp, tmp_path, monkeypatch):
-    """有缓存令牌时：/users/me 校验 → 已登录 → 团队 → … → 章节（回归：曾漏写回调）。"""
+def test_startup_with_cached_token_only_verifies(qapp, tmp_path, monkeypatch):
+    """有缓存令牌：/users/me 校验 → 已登录；进入目标页才拉团队（回归：曾漏写回调）。"""
     monkeypatch.setattr(dialog_module, "load_token", lambda settings: "tok-1")
 
     def _sync_run(self, fn, on_success):
@@ -515,13 +558,17 @@ def test_startup_with_cached_token_verifies_and_loads_teams(qapp, tmp_path, monk
     try:
         dialog.show()
         QApplication.processEvents()
-        QApplication.processEvents()   # 启动流程在事件循环下一拍
+        QApplication.processEvents()
 
         assert dialog._client.token == "tok-1"
         assert dialog._user is not None and dialog._user.nickname == "秋叶声生"
         assert dialog._account_status.text().startswith("已登录")
+        assert dialog._teams == [], "未进入目标页时不应请求团队"
+
+        dialog.nav_list.setCurrentRow(2)
+        QApplication.processEvents()
         assert [team.team_id for team in dialog._teams] == ["t_1"]
-        assert dialog._chapter is not None
+        assert dialog._chapter is None
     finally:
         dialog.done(0)
 
@@ -778,7 +825,7 @@ def test_empty_worksets_shows_notice(qapp, tmp_path):
     try:
         dialog._on_worksets([])
         assert "没有项目集" in dialog._status_label.text()
-        assert dialog._comic_combo.count() == 0
+        assert dialog._comic_combo.itemText(0) == "请先选择项目集"
     finally:
         dialog.done(0)
 
@@ -788,7 +835,7 @@ def test_empty_comics_shows_notice_and_clears_chapters(qapp, tmp_path):
     try:
         dialog._on_comics([])
         assert "没有作品" in dialog._status_label.text()
-        assert dialog._chapter_combo.count() == 0
+        assert dialog._chapter_combo.itemText(0) == "请先选择作品"
     finally:
         dialog.done(0)
 
@@ -800,5 +847,213 @@ def test_empty_chapters_shows_notice(qapp, tmp_path):
         assert "没有章节" in dialog._status_label.text()
         assert dialog._chapter is None
         assert dialog._artworks == []
+    finally:
+        dialog.done(0)
+
+
+# ---------------------------------------------------------------- 逐级懒加载
+
+
+def test_target_page_starts_with_placeholders(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    try:
+        assert dialog._team_combo.itemText(0) == "请先登录"
+        assert dialog._workset_combo.itemText(0) == "请先选择团队"
+        assert dialog._comic_combo.itemText(0) == "请先选择项目集"
+        assert dialog._chapter_combo.itemText(0) == "请先选择作品"
+        for combo in (dialog._team_combo, dialog._workset_combo,
+                      dialog._comic_combo, dialog._chapter_combo):
+            assert combo.currentData() is None, "任何一级都不许自动选中"
+        assert dialog._load_chapter_btn.isEnabled() is False
+        assert dialog._clear_all_btn.isEnabled() is False
+    finally:
+        dialog.done(0)
+
+
+def test_clear_all_button_resets_every_level(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd", "002.psd"))
+    try:
+        make_ready(dialog)
+        dialog._on_clear_all_clicked()
+        assert dialog._chapter is None and dialog._artworks == []
+        assert dialog._team_combo.currentData() is None
+        assert dialog._workset_combo.itemText(0) == "请先选择团队"
+        assert dialog._comic_combo.itemText(0) == "请先选择项目集"
+        assert dialog._chapter_combo.itemText(0) == "请先选择作品"
+        assert dialog._load_chapter_btn.isEnabled() is False
+        assert "已清空选择" in dialog._status_label.text()
+    finally:
+        dialog.done(0)
+
+
+# ---------------------------------------------------------------- 排序 / 进度窗
+
+
+def _record_progress(monkeypatch) -> list:
+    """把进度窗换成记录器，验证"是否弹出 / 阶段文案 / 是否关闭"。"""
+    events: list = []
+    real = dialog_module._ProgressDialog
+
+    class _Recorder(real):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            events.append(("init", ""))
+
+        def show(self):                       # noqa: D102
+            events.append(("show", ""))
+            super().show()
+
+        def set_phase(self, text, done=0, total=0):   # noqa: D102
+            events.append(("phase", text))
+            super().set_phase(text, done, total)
+
+        def accept(self):                     # noqa: D102
+            events.append(("accept", ""))
+            super().accept()
+
+    monkeypatch.setattr(dialog_module, "_ProgressDialog", _Recorder)
+    return events
+
+
+class _FakeComicsWorker:
+    """替身作品加载 worker：start() 时同步发进度与结果。"""
+
+    entries: list = []
+    instances: list = []
+
+    def __init__(self, client, workset_id, task_name, parent=None):
+        from PySide6.QtCore import QObject, Signal
+
+        class _Sig(QObject):
+            progress = Signal(int, int, str)
+            succeeded = Signal(object)
+            failed = Signal(str)
+
+        self._sig = _Sig()
+        self.progress = self._sig.progress
+        self.succeeded = self._sig.succeeded
+        self.failed = self._sig.failed
+        type(self).instances.append(self)
+
+    def start(self) -> None:
+        self.progress.emit(0, 0, "正在读取作品…（第 1 页，已获取 2 条）")
+        self.succeeded.emit(type(self).entries)
+
+    def deleteLater(self) -> None:            # noqa: N802（Qt 命名）
+        return None
+
+    def isRunning(self) -> bool:
+        return False
+
+
+def test_rank_toggle_persists_to_settings(qapp, tmp_path):
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    emitted: list[int] = []
+    dialog.settings_committed.connect(lambda: emitted.append(1))
+    try:
+        assert dialog._rank_switch.isChecked() is True, "默认开启"
+        dialog._rank_switch.setChecked(False)
+        QApplication.processEvents()
+        assert dialog._poprako.rank_comics is False
+        assert dialog._manager.settings.poprako.rank_comics is False
+        assert emitted == [1]
+        assert "已关闭" in dialog._status_label.text()
+    finally:
+        dialog.done(0)
+
+
+def test_ranked_load_shows_progress_popup_and_sorts(qapp, tmp_path, monkeypatch):
+    from mangaproof.poprako.models import Comic
+    from mangaproof.poprako.title_match import RankedComic
+
+    monkeypatch.setattr(dialog_module, "MIN_PROGRESS_VISIBLE", 0.0)
+    events = _record_progress(monkeypatch)
+    _FakeComicsWorker.entries = [
+        RankedComic(Comic("c1", "某漫画", "", 1, False), 1.0, (0, 3)),
+        RankedComic(Comic("c2", "某漫画 第二部", "", 1, False), 0.78, (0, 3)),
+    ]
+    monkeypatch.setattr(dialog_module, "ComicsLoadWorker", _FakeComicsWorker)
+
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    dialog._poprako.rank_comics = True
+    try:
+        dialog._load_comics("w_1")
+        QApplication.processEvents()
+
+        kinds = [kind for kind, _ in events]
+        assert "show" in kinds and "accept" in kinds, "开了排序就一定弹，且结束后关闭"
+        assert any(kind == "phase" and "正在读取作品" in text for kind, text in events)
+
+        assert [entry.comic.id for entry in dialog._comic_entries] == ["c1", "c2"]
+        assert dialog._comic_combo.itemText(1) == "某漫画"
+        assert dialog._comic_combo.itemData(1, dialog_module._SPANS_ROLE) == (0, 3)
+        tip = dialog._comic_combo.itemData(1, Qt.ItemDataRole.ToolTipRole) or ""
+        assert "匹配度" in tip
+        assert "已按匹配度排序" in dialog._status_label.text()
+    finally:
+        dialog.done(0)
+
+
+def test_rank_off_keeps_server_order_and_skips_popup(qapp, tmp_path, monkeypatch):
+    from mangaproof.poprako.models import Comic
+
+    events = _record_progress(monkeypatch)
+    dialog = open_dialog(tmp_path, make_task("001.psd"))
+    dialog._poprako.rank_comics = False
+    try:
+        entries = dialog._plain_entries([
+            Comic("c2", "乙作品", "", 1, False),
+            Comic("c1", "甲作品", "", 1, False),
+        ])
+        dialog._on_comics(entries)
+
+        assert [entry.comic.id for entry in dialog._comic_entries] == ["c2", "c1"]
+        assert dialog._comic_combo.itemData(1, dialog_module._SPANS_ROLE) is None
+        assert events == [], "关闭排序时不该弹进度窗"
+        assert "未排序" in dialog._status_label.text()
+    finally:
+        dialog.done(0)
+
+
+# ---------------------------------------------------------------- 上次选择
+
+
+def test_last_choice_written_to_separate_file(qapp, tmp_path):
+    from mangaproof.poprako.last_choice import LastChoiceStore
+
+    store = LastChoiceStore(tmp_path / "poprako_last.json")
+    dialog = open_dialog(tmp_path, make_task("001.psd"), last_store=store)
+    try:
+        dialog._teams_loaded = True
+        dialog._teams = [Membership("t_1", "木叶翻译组", 32)]
+        dialog._fill_combo(dialog._team_combo, [("木叶翻译组", "t_1")], "请选择团队")
+        dialog._team_combo.blockSignals(True)
+        dialog._team_combo.setCurrentIndex(1)
+        dialog._team_combo.blockSignals(False)
+        dialog._persist_last_choice()
+
+        assert (tmp_path / "poprako_last.json").exists()
+        saved = store.load()
+        assert saved.team_id == "t_1" and saved.team_name == "木叶翻译组"
+        # 绝不能写进 settings.json
+        assert "last_team_id" not in dialog._manager.settings.poprako.to_dict()
+    finally:
+        dialog.done(0)
+
+
+def test_last_choice_marker_annotates_without_selecting(qapp, tmp_path):
+    from mangaproof.poprako.last_choice import LastChoice, LastChoiceStore
+
+    store = LastChoiceStore(tmp_path / "poprako_last.json")
+    store.save(LastChoice(team_id="t_2", team_name="另一个组"))
+    dialog = open_dialog(tmp_path, make_task("001.psd"), last_store=store)
+    try:
+        dialog._on_teams([
+            Membership("t_1", "木叶翻译组", 32),
+            Membership("t_2", "另一个组", 32),
+        ])
+        assert dialog._team_combo.itemText(1) == "木叶翻译组"
+        assert dialog._team_combo.itemText(2) == "另一个组（上次）"
+        assert dialog._team_combo.currentData() is None, "标注 ≠ 自动选中"
     finally:
         dialog.done(0)

@@ -50,6 +50,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 from mangaproof.review.state import PASSED, FAILED, TaskState
+from mangaproof.utils.task_naming import task_display_name
 from mangaproof.report import templates as T
 
 log = logging.getLogger("mangaproof.report.generator")
@@ -262,20 +263,10 @@ def default_report_name(
 ) -> str:
     """默认返修单名称（需求 §49.1 + 固定路径格式优化）。
 
-    自动嵌字脚本的固定输出路径为 .../<章节名>/output/*.psd：
-    当 PSD 所在文件夹名为 output（不区分大小写）时，
-    默认名取上一级文件夹名（即章节名），而不是 "output"。
+    名字规则现在是**唯一实现**：``mangaproof.utils.task_naming.task_display_name``
+    （监制数据同步窗口"按名称匹配作品"用的是同一个函数，避免两处漂移）。
     """
-    if task_type == "single":
-        folder = base_dir                       # PSD 所在目录
-        if folder.name.lower() == "output" and folder.parent.name:
-            return folder.parent.name
-        return Path(psd_file_name or "report").stem
-
-    folder = base_dir                           # 打开的文件夹
-    if folder.name.lower() == "output" and folder.parent.name:
-        return folder.parent.name
-    return folder.name
+    return task_display_name(task_type, base_dir, psd_file_name)
 
 
 def generate_report(

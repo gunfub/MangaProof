@@ -23,14 +23,16 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -52,6 +54,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -69,10 +74,12 @@ from mangaproof.poprako.credentials import (
     load_token,
     save_token,
 )
+from mangaproof.poprako.last_choice import LastChoice, LastChoiceStore
 from mangaproof.poprako.mapping import align_in_order, auto_match
 from mangaproof.poprako.models import (
     PHASE_LABELS,
     Chapter,
+    Comic,
     Membership,
     PageArtwork,
     RemoteIssue,
@@ -80,9 +87,12 @@ from mangaproof.poprako.models import (
     roles_text,
     stage_phases,
 )
+from mangaproof.poprako.title_match import RankedComic, analyse, rank_comics
 from mangaproof.review.state import TaskState
+from mangaproof.utils.task_naming import task_display_name
 from mangaproof.ui.poprako_worker import (
     CallWorker,
+    ComicsLoadWorker,
     ProxyProbeWorker,
     UploadOutcome,
     UploadWorker,
@@ -133,6 +143,12 @@ PREVIEW_LIMIT = 20_000
 
 #: 状态行最多显示的字数（超出截断，避免把窗口撑宽）
 STATUS_LIMIT = 120
+
+#: "上次选择"标注（存在独立的 poprako_last.json，不写 settings.json）
+LAST_SUFFIX = "（上次）"
+
+#: 进度窗最短可见时间（秒）：开了排序就一定弹，但别一闪而过
+MIN_PROGRESS_VISIBLE = 0.45
 
 
 class _Row(QWidget):
@@ -272,6 +288,106 @@ def _align_fields(rows: QVBoxLayout) -> None:
         row.label.setMinimumWidth(width)
 
 
+#: 下拉项里存"高亮区间"的自定义角色
+_SPANS_ROLE = int(Qt.ItemDataRole.UserRole) + 21
+
+
+def _rich_title(text: str, span: Optional[tuple[int, int]],
+                base_color: str = COLOR_TEXT,
+                highlight: str = COLOR_PASS) -> str:
+    """把标题渲染成富文本：``span`` 区间的字标绿（2026-10-20 决策：B 方案）。"""
+    body = html.escape(text or "")
+    if not span or span[1] <= span[0]:
+        return f'<span style="color:{base_color}">{body}</span>'
+    start = max(0, min(int(span[0]), len(body)))
+    end = max(start, min(int(span[1]), len(body)))
+    parts = [
+        f'<span style="color:{base_color}">{html.escape(text[:start])}</span>',
+        f'<span style="color:{highlight}">{html.escape(text[start:end])}</span>',
+        f'<span style="color:{base_color}">{html.escape(text[end:])}</span>',
+    ]
+    return "".join(parts)
+
+
+class _MatchDelegate(QStyledItemDelegate):
+    """下拉行富文本渲染：命中的那几个字标绿，其余保持主题文字色。
+
+    QComboBox 的默认 delegate 只画纯文本，所以要自己画：先用 ``CE_ItemViewItem``
+    交给样式系统画背景/选中态（**不带文字**），再用 ``QTextDocument`` 把富文本
+    画到同一矩形里。
+    """
+
+    def paint(self, painter, option, index) -> None:   # noqa: D102（Qt 命名）
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""                                  # 背景交给样式，文字我们自己画
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        span = index.data(_SPANS_ROLE)
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        base_color = "#ffffff" if selected else COLOR_TEXT
+        markup = _rich_title(text, span if isinstance(span, tuple) else None,
+                             base_color=base_color)
+
+        document = QTextDocument()
+        document.setDefaultFont(opt.font)
+        document.setDocumentMargin(0)
+        document.setHtml(markup)
+        width = max(10, opt.rect.width() - 12)
+        document.setTextWidth(width)
+
+        painter.save()
+        painter.setClipRect(opt.rect)
+        painter.translate(opt.rect.left() + 6, opt.rect.top() + 3)
+        document.drawContents(painter, QRectF(0, 0, width, opt.rect.height()))
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:        # noqa: D102（Qt 命名）
+        size = super().sizeHint(option, index)
+        size.setHeight(max(24, size.height()))
+        return size
+
+
+class _ProgressDialog(QDialog):
+    """作品"读取 → 匹配 → 排序"的模态进度窗（不可取消，2026-10-20 决策）。"""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("正在整理作品列表")
+        self.setModal(True)
+        self.setFixedWidth(420)
+        self.setMinimumHeight(150)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(GUTTER, GUTTER, GUTTER, GUTTER)
+        layout.setSpacing(12)
+
+        self._label = QLabel("正在读取作品…")
+        self._label.setWordWrap(True)
+        layout.addWidget(self._label)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(10)
+        layout.addWidget(self._bar)
+
+        hint = QLabel("完成后即可选择作品；这一步不会修改任何数据。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+        layout.addWidget(hint)
+
+    def set_phase(self, text: str, done: int = 0, total: int = 0) -> None:
+        self._label.setText(text)
+        if total > 0:
+            self._bar.setRange(0, total)
+            self._bar.setValue(max(0, min(done, total)))
+        else:
+            self._bar.setRange(0, 0)
+
+
 class PoprakoSyncDialog(QDialog):
     """Poprako 监制数据同步对话框。"""
 
@@ -287,6 +403,7 @@ class PoprakoSyncDialog(QDialog):
         settings,
         *,
         client_factory: Optional[Callable[[str, str], PoprakoClient]] = None,
+        last_store: Optional[LastChoiceStore] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -329,6 +446,17 @@ class PoprakoSyncDialog(QDialog):
         self._finalized = False
         self._mapping_dirty = False
         self._settings_dirty = False
+        # 逐级懒加载状态
+        self._teams_loaded = False
+        self._teams_loading = False
+        self._comics: list[Comic] = []
+        self._comic_entries: list[RankedComic] = []
+        self._comics_worker = None
+        self._progress_dialog: Optional[_ProgressDialog] = None
+        self._progress_started = 0.0
+        # 上次选择（独立文件，不写 settings.json）
+        self._last_store = last_store or LastChoiceStore()
+        self._last_choice = self._last_store.load()
         self._keyring_ok: Optional[bool] = None
         self._last_upload_at = ""
         self._last_page_count = 0
@@ -512,6 +640,7 @@ class PoprakoSyncDialog(QDialog):
     # -- 页 3：目标章节 ----------------------------------------------------
 
     def _build_target_page(self) -> None:
+        """逐级懒加载：每一级都要用户先选，才去读下一级（2026-10-20 决策）。"""
         page = self._add_page("target")
         rows = page.enable_scroll()
 
@@ -525,11 +654,29 @@ class PoprakoSyncDialog(QDialog):
 
         self._comic_combo = self._new_combo()
         self._comic_combo.currentIndexChanged.connect(self._on_comic_changed)
+        self._comic_combo.view().setItemDelegate(_MatchDelegate(self._comic_combo.view()))
         self._add_row(rows, "作品", self._comic_combo, expand=True)
+
+        # 选中作品的"匹配说明"：与下拉行同一套富文本，匹配片段标绿
+        self._comic_match = QLabel("")
+        self._comic_match.setTextFormat(Qt.TextFormat.RichText)
+        self._comic_match.setWordWrap(True)
+        self._comic_match.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+        self._add_row(rows, "", self._comic_match, expand=True)
 
         self._chapter_combo = self._new_combo()
         self._chapter_combo.currentIndexChanged.connect(self._on_chapter_changed)
         self._add_row(rows, "章节", self._chapter_combo, expand=True)
+
+        rows.addSpacing(ROW_SPACING)
+        self._rank_switch = ToggleSwitch()
+        self._rank_switch.setChecked(bool(self._poprako.rank_comics))
+        self._rank_switch.setToolTip(
+            "开启后：选完项目集会一次性读完作品、按与任务名的匹配度排序，"
+            "并弹出进度窗；关闭则按平台返回顺序显示"
+        )
+        self._rank_switch.toggled.connect(self._on_rank_toggled)
+        self._add_row(rows, "按名称匹配度排序作品", self._rank_switch)
 
         rows.addSpacing(ROW_SPACING)
         self._stage_value = self._info_value()
@@ -548,15 +695,22 @@ class PoprakoSyncDialog(QDialog):
         rows.addWidget(self._warn_label)
 
         actions = QHBoxLayout()
+        actions.setSpacing(8)
         actions.addStretch(1)
-        self._refresh_btn = QPushButton("刷新")
-        self._refresh_btn.setAutoDefault(False)
-        self._refresh_btn.clicked.connect(self._on_refresh_clicked)
-        actions.addWidget(self._refresh_btn)
-        rows.addLayout(actions)
+        self._clear_all_btn = QPushButton("清空所有选择")
+        self._clear_all_btn.setAutoDefault(False)
+        self._clear_all_btn.clicked.connect(self._on_clear_all_clicked)
+        actions.addWidget(self._clear_all_btn)
+
+        self._load_chapter_btn = QPushButton("加载章节信息")
+        self._load_chapter_btn.setAutoDefault(False)
+        self._load_chapter_btn.clicked.connect(self._on_load_chapter_clicked)
+        actions.addWidget(self._load_chapter_btn)
+        # 动作行固定在滚动区**下方**：内容再长也不必滚动才能点"加载章节信息"
+        page.body.addLayout(actions)
         _align_fields(rows)
 
-    # -- 页 3：页面映射 ----------------------------------------------------
+    # -- 页 4：页面映射 ----------------------------------------------------
 
     def _build_mapping_page(self) -> None:
         page = self._add_page("mapping")
@@ -702,6 +856,9 @@ class PoprakoSyncDialog(QDialog):
         self.stack.setCurrentIndex(max(0, index))
         if index == 1:
             self._refresh_proxy_row()
+        if index == 2:
+            # 懒加载第一级：只有真的要看这一页才请求团队
+            self._ensure_teams_loaded()
         if index == 3:
             self._refresh_mapping_summary()
         self._refresh_status()
@@ -798,6 +955,12 @@ class PoprakoSyncDialog(QDialog):
         self._upload_keep_value.setText("—")
         self._preview.setPlainText("")
         self._preview_full = ""
+        self._set_placeholder(self._team_combo, "请先登录")
+        self._set_placeholder(self._workset_combo, "请先选择团队")
+        self._set_placeholder(self._comic_combo, "请先选择项目集")
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._comic_match.setText("")
+        self._rank_switch.setChecked(bool(self._poprako.rank_comics))
         self._refresh_mapping_summary()
         self._refresh_status()
         self._refresh_gates()
@@ -831,7 +994,7 @@ class PoprakoSyncDialog(QDialog):
             self._poprako.qid = user.qid
             self._settings_dirty = True
         self._apply_logged_in(user)
-        self._load_teams()
+        self._ensure_teams_loaded()
 
     # ================================================================ 鉴权
 
@@ -927,7 +1090,7 @@ class PoprakoSyncDialog(QDialog):
             self._set_notice("登录成功；系统凭据库不可用，令牌已存为明文", "warn")
         else:
             self._set_notice("登录成功", "ok")
-        self._load_teams()
+        self._ensure_teams_loaded()
 
     def _on_logout_clicked(self) -> None:
         clear_token(self._poprako)
@@ -937,15 +1100,21 @@ class PoprakoSyncDialog(QDialog):
         self._client.token = ""
         self._settings_dirty = True
         self._teams = []
+        self._teams_loaded = False
+        self._teams_loading = False
         self._worksets = []
         self._comics = []
+        self._comic_entries = []
         self._chapters = []
         self._chapter = None
         self._artworks = []
         self._remote_issues = []
         self._mapping = {}
-        self._clear_combos(self._workset_combo, self._comic_combo, self._chapter_combo)
-        self._clear_combos(self._team_combo)
+        self._set_placeholder(self._team_combo, "请先登录")
+        self._set_placeholder(self._workset_combo, "请先选择团队")
+        self._set_placeholder(self._comic_combo, "请先选择项目集")
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._comic_match.setText("")
         self._refresh_chapter_info()
         self._refresh_mapping_table()
         self._refresh_payload()
@@ -1029,141 +1198,298 @@ class PoprakoSyncDialog(QDialog):
             "Poprako 客户端已重建（代理=%s）", mask_proxy(self._poprako.proxy) or "直连"
         )
 
-    # ================================================================ 层级
+    # ================================================================ 层级（逐级懒加载）
+
+    def _ensure_teams_loaded(self) -> None:
+        """第一次进入「目标章节」页时才读团队。
+
+        这是"懒加载"的第一级：打开窗口、登录成功都不再自动请求层级数据，
+        每个列表只在用户真的要选的时候拉一次（2026-10-20 决策）。
+        """
+        if self.nav_list.currentRow() != 2:
+            return                      # 只有"目标章节"页可见时才值得发请求
+        if self._user is None or self._teams_loaded or self._teams_loading or self._busy:
+            return
+        self._load_teams()
 
     def _load_teams(self) -> None:
+        self._teams_loading = True
         self._set_busy("正在读取团队…")
         self._run(self._client.my_teams, self._on_teams)
 
     def _on_teams(self, teams: list) -> None:
+        self._teams_loading = False
+        self._teams_loaded = True
         self._teams = list(teams)
         self._fill_combo(
             self._team_combo,
-            [(item.display_name, item.team_id) for item in self._teams],
-            self._poprako.last_team_id,
+            [
+                (
+                    self._mark_last(item.display_name, item.team_id,
+                                    self._last_choice.team_id),
+                    item.team_id,
+                )
+                for item in self._teams
+            ],
+            "请选择团队",
         )
+        self._set_placeholder(self._workset_combo, "请先选择团队")
+        self._set_placeholder(self._comic_combo, "请先选择项目集")
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._refresh_comic_match()
+        self._reset_chapter_state()
         if not self._teams:
             self._set_notice("该账号还没有加入任何团队", "warn")
-            self._clear_combos(self._workset_combo, self._comic_combo, self._chapter_combo)
-            return
-        self._on_team_changed()
+        else:
+            self._set_notice(f"请选择团队（共 {len(self._teams)} 个）", "info")
+        self._refresh_gates()
 
     def _on_team_changed(self) -> None:
         membership = self._current_membership()
+        self._worksets = []
+        self._comics = []
+        self._comic_entries = []
+        self._chapters = []
+        self._set_placeholder(self._comic_combo, "请先选择项目集")
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._refresh_comic_match()
+        self._reset_chapter_state()
+        self._persist_last_choice()
+
         if membership is None:
-            self._clear_combos(self._workset_combo, self._comic_combo, self._chapter_combo)
+            self._set_placeholder(self._workset_combo, "请先选择团队")
             self._refresh_role_value()
+            self._refresh_gates()
             return
-        if self._poprako.last_team_id != membership.team_id:
-            self._poprako.last_team_id = membership.team_id
-            self._settings_dirty = True
+
         self._refresh_role_value()
+        self._set_placeholder(self._workset_combo, "正在读取项目集…")
         self._set_busy("正在读取项目集…")
         self._run(
-            lambda: self._client.worksets(membership.team_id),
-            self._on_worksets,
+            lambda: self._client.worksets(membership.team_id), self._on_worksets
         )
 
     def _on_worksets(self, worksets: list) -> None:
         self._worksets = list(worksets)
         self._fill_combo(
             self._workset_combo,
-            [(item.name, item.id) for item in self._worksets],
-            self._poprako.last_workset_id,
+            [
+                (self._mark_last(item.name, item.id, self._last_choice.workset_id), item.id)
+                for item in self._worksets
+            ],
+            "请选择项目集",
         )
+        self._set_placeholder(self._comic_combo, "请先选择项目集")
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._refresh_comic_match()
+        self._reset_chapter_state()
         if not self._worksets:
             self._set_notice("该团队下没有项目集", "warn")
-            self._clear_combos(self._comic_combo, self._chapter_combo)
-            self._reset_chapter_state()
-            return
-        self._on_workset_changed()
+        else:
+            self._set_notice(f"请选择项目集（共 {len(self._worksets)} 个）", "info")
+        self._refresh_gates()
 
     def _on_workset_changed(self) -> None:
         workset_id = self._workset_combo.currentData()
-        if not workset_id:
-            self._clear_combos(self._comic_combo, self._chapter_combo)
-            return
-        if self._poprako.last_workset_id != workset_id:
-            self._poprako.last_workset_id = workset_id
-            self._settings_dirty = True
-        self._set_busy("正在读取作品…")
-        self._run(lambda: self._client.comics(workset_id), self._on_comics)
+        self._comics = []
+        self._comic_entries = []
+        self._chapters = []
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._refresh_comic_match()
+        self._reset_chapter_state()
+        self._persist_last_choice()
 
-    def _on_comics(self, comics: list) -> None:
-        self._comics = list(comics)
+        if not workset_id:
+            self._set_placeholder(self._comic_combo, "请先选择项目集")
+            self._refresh_gates()
+            return
+
+        self._set_placeholder(self._comic_combo, "正在读取作品…")
+        self._load_comics(workset_id)
+
+    # -- 作品加载（可带"匹配 + 排序"） --------------------------------------
+
+    def _load_comics(self, workset_id: str) -> None:
+        """读作品列表。
+
+        - 排序关闭：直接拉取（状态行显示忙碌），顺序 = 平台返回顺序；
+        - 排序开启：后台 worker 里"读取 → 匹配 → 排序"，并弹模态进度窗
+          （**只要开了排序就一定弹**，2026-10-20 决策）。
+        """
+        self._set_busy("正在读取作品…")
+        if not self._poprako.rank_comics:
+            self._run(
+                lambda: self._client.comics(workset_id),
+                lambda comics: self._on_comics(self._plain_entries(comics)),
+            )
+            return
+
+        progress = _ProgressDialog(self)
+        self._progress_dialog = progress
+        self._progress_started = time.monotonic()
+        progress.show()
+
+        worker = ComicsLoadWorker(self._client, workset_id, self._task_title())
+        self._comics_worker = worker
+        self._workers.add(worker)
+        worker.progress.connect(self._on_comics_progress)
+        worker.succeeded.connect(self._on_comics_loaded)
+        worker.failed.connect(self._on_comics_failed)
+        worker.start()
+
+    def _on_comics_progress(self, done: int, total: int, text: str) -> None:
+        progress = self._progress_dialog
+        if progress is not None and progress.isVisible():
+            progress.set_phase(text, done, total)
+
+    def _on_comics_loaded(self, entries: object) -> None:
+        self._release_comics_worker()
+        self._set_busy(None)
+        self._close_progress_dialog()
+        self._on_comics(list(entries or []))
+
+    def _on_comics_failed(self, message: str) -> None:
+        self._release_comics_worker()
+        self._set_busy(None)
+        self._close_progress_dialog()
+        self._set_placeholder(self._comic_combo, "作品读取失败，请重选项目集")
+        self._set_notice(message, "error")
+
+    def _release_comics_worker(self) -> None:
+        worker = self._comics_worker
+        self._comics_worker = None
+        if worker is not None:
+            self._workers.discard(worker)
+            self._release_worker(worker)
+
+    def _close_progress_dialog(self) -> None:
+        """关掉进度窗；至少显示 ``MIN_PROGRESS_VISIBLE`` 秒，避免一闪而过。"""
+        progress = self._progress_dialog
+        self._progress_dialog = None
+        if progress is None:
+            return
+        remaining = MIN_PROGRESS_VISIBLE - (time.monotonic() - self._progress_started)
+        if remaining > 0:
+            QTimer.singleShot(int(remaining * 1000) + 10, progress.accept)
+        else:
+            progress.accept()
+
+    @staticmethod
+    def _plain_entries(comics: list) -> list[RankedComic]:
+        return [RankedComic(comic=item, score=0.0, span=None) for item in comics]
+
+    def _on_comics(self, entries: list) -> None:
+        self._comic_entries = list(entries)
+        self._comics = [entry.comic for entry in self._comic_entries]
         self._fill_combo(
             self._comic_combo,
-            [(item.title, item.id) for item in self._comics],
-            self._poprako.last_comic_id,
+            [
+                (
+                    self._mark_last(entry.comic.title, entry.comic.id,
+                                    self._last_choice.comic_id),
+                    entry.comic.id,
+                )
+                for entry in self._comic_entries
+            ],
+            "请选择作品",
         )
+        # 占位项占 index 0，作品从 1 开始
+        for index, entry in enumerate(self._comic_entries, start=1):
+            if index >= self._comic_combo.count():
+                break
+            self._comic_combo.setItemData(index, entry.span, _SPANS_ROLE)
+            if entry.score:
+                tip = f"与任务名「{self._task_title()}」的匹配度 {entry.score:.2f}"
+            else:
+                tip = "未参与排序"
+            self._comic_combo.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
+
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._refresh_comic_match()
+        self._reset_chapter_state()
+
         if not self._comics:
-            # 空列表要说话：否则用户分不清"没数据"和"加载失败"（需求 2026-10-20）
+            self._set_placeholder(self._comic_combo, "（该项目集下没有作品）")
             self._set_notice("该项目集下没有作品", "warn")
-            self._clear_combos(self._chapter_combo)
-            self._reset_chapter_state()
-            return
-        self._on_comic_changed()
+        elif self._poprako.rank_comics and self._comic_entries:
+            top = self._comic_entries[0]
+            self._set_notice(
+                f"作品已按匹配度排序（最匹配：{top.comic.title} {top.score:.2f}）", "info"
+            )
+        else:
+            self._set_notice(f"共 {len(self._comics)} 部作品（未排序）", "info")
+        self._refresh_gates()
 
     def _on_comic_changed(self) -> None:
         comic_id = self._comic_combo.currentData()
+        self._chapters = []
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._refresh_comic_match()
+        self._reset_chapter_state()
+        self._persist_last_choice()
+
         if not comic_id:
-            self._clear_combos(self._chapter_combo)
+            self._refresh_gates()
             return
-        if self._poprako.last_comic_id != comic_id:
-            self._poprako.last_comic_id = comic_id
-            self._settings_dirty = True
+
+        self._set_placeholder(self._chapter_combo, "正在读取章节…")
         self._set_busy("正在读取章节…")
         self._run(lambda: self._client.chapters(comic_id), self._on_chapters)
 
+    def _refresh_comic_match(self) -> None:
+        """作品行下方那行说明：把匹配到的字标绿（方案 B）。"""
+        comic_id = self._comic_combo.currentData()
+        entry = None
+        if comic_id:
+            entry = next(
+                (item for item in self._comic_entries if item.comic.id == comic_id), None
+            )
+        if entry is None:
+            self._comic_match.setText("")
+            return
+
+        highlighted = _rich_title(
+            entry.comic.title, entry.span, base_color=COLOR_TEXT_DIM
+        )
+        if entry.score:
+            self._comic_match.setText(f"匹配度 {entry.score:.2f}：{highlighted}")
+        else:
+            self._comic_match.setText(highlighted)
+
     def _on_chapters(self, chapters: list) -> None:
         self._chapters = list(chapters)
-        pending = self._pending_chapter_id()
         self._fill_combo(
             self._chapter_combo,
             [(item.label, item.id) for item in self._chapters],
-            pending,
+            "请选择章节",
         )
+        self._reset_chapter_state()
         if not self._chapters:
+            self._set_placeholder(self._chapter_combo, "（该作品下没有章节）")
             self._set_notice("该作品下没有章节", "warn")
-            self._reset_chapter_state()
-            return
-        self._on_chapter_changed()
+        else:
+            self._set_notice(f"请选择章节（共 {len(self._chapters)} 个）", "info")
+        self._refresh_gates()
 
-    def _pending_chapter_id(self) -> str:
-        """优先恢复任务里绑定的章节。"""
-        binding = self._task.integrations.get("poprako") or {}
-        chapter_id = binding.get("chapter_id")
-        return chapter_id if isinstance(chapter_id, str) else ""
+    def _on_chapter_changed(self) -> None:
+        """选章节**不发请求**：只更新状态，等用户点「加载章节信息」。"""
+        chapter_id = self._chapter_combo.currentData()
+        if self._chapter is not None and chapter_id != self._chapter.id:
+            self._reset_chapter_state()
+        if not chapter_id:
+            self._refresh_gates()
+            return
+        self._set_notice("已选择章节，点「加载章节信息」继续", "info")
+        self._refresh_gates()
 
     def _reset_chapter_state(self) -> None:
-        """章节被清空（未选 / 上级为空 / 没有章节）时统一收尾。"""
+        """章节信息被清空（未选 / 上级为空 / 换了选择）时统一收尾。"""
         self._chapter = None
         self._artworks = []
         self._remote_issues = []
         self._refresh_chapter_info()
         self._refresh_mapping_table()
         self._refresh_payload()
-
-    def _on_chapter_changed(self) -> None:
-        chapter_id = self._chapter_combo.currentData()
-        if not chapter_id:
-            self._reset_chapter_state()
-            return
-
-        if self._chapter is not None and chapter_id != self._chapter.id and self._mapping:
-            if not self._confirm_switch_chapter():
-                self._select_chapter(self._chapter.id)
-                return
-
-        self._set_busy("正在读取章节信息…")
-        self._run(
-            lambda: (
-                self._client.chapter(chapter_id),
-                self._client.page_artworks(chapter_id),
-                self._client.issues(chapter_id),
-            ),
-            self._on_chapter_data,
-        )
 
     def _on_chapter_data(self, data: tuple) -> None:
         chapter, pages, remote_issues = data
@@ -1175,41 +1501,117 @@ class PoprakoSyncDialog(QDialog):
         self._refresh_mapping_table()
         self._refresh_payload()
 
-    def _on_refresh_clicked(self) -> None:
+    def _on_load_chapter_clicked(self) -> None:
         chapter_id = self._chapter_combo.currentData()
-        if chapter_id:
-            self._on_chapter_changed()
-        elif self._user is not None:
-            self._load_teams()
+        if not chapter_id or self._busy:
+            return
+        self._reset_chapter_state()
+        self._set_busy("正在加载章节信息…")
+        self._run(
+            lambda: (
+                self._client.chapter(chapter_id),
+                self._client.page_artworks(chapter_id),
+                self._client.issues(chapter_id),
+            ),
+            self._on_chapter_data,
+        )
+
+    def _on_clear_all_clicked(self) -> None:
+        """清空所有选择（团队列表保留，方便重选）。"""
+        self._worksets = []
+        self._comics = []
+        self._comic_entries = []
+        self._chapters = []
+        if self._teams:
+            self._fill_combo(
+                self._team_combo,
+                [
+                    (
+                        self._mark_last(item.display_name, item.team_id,
+                                        self._last_choice.team_id),
+                        item.team_id,
+                    )
+                    for item in self._teams
+                ],
+                "请选择团队",
+            )
+        else:
+            self._set_placeholder(self._team_combo, "请选择团队")
+        self._set_placeholder(self._workset_combo, "请先选择团队")
+        self._set_placeholder(self._comic_combo, "请先选择项目集")
+        self._set_placeholder(self._chapter_combo, "请先选择作品")
+        self._refresh_comic_match()
+        self._refresh_role_value()
+        self._reset_chapter_state()
+        self._set_notice("已清空选择", "info")
+        self._refresh_gates()
+
+    def _on_rank_toggled(self, checked: bool) -> None:
+        self._poprako.rank_comics = bool(checked)
+        self._settings_dirty = True
+        self.settings_committed.emit()
+        if checked:
+            self._set_notice("已开启按匹配度排序（下次选择项目集时生效）", "info")
+        else:
+            self._set_notice("已关闭按匹配度排序（下次选择项目集时生效）", "info")
+
+    # -- 上次选择（独立文件 poprako_last.json） ----------------------------
+
+    def _mark_last(self, text: str, value: str, last_value: str) -> str:
+        if last_value and value == last_value:
+            return f"{text}{LAST_SUFFIX}"
+        return text
+
+    def _persist_last_choice(self) -> None:
+        membership = self._current_membership()
+        workset_id = self._workset_combo.currentData() or ""
+        comic_id = self._comic_combo.currentData() or ""
+        choice = LastChoice(
+            team_id=membership.team_id if membership else "",
+            team_name=membership.display_name if membership else "",
+            workset_id=workset_id,
+            workset_name=self._strip_last(self._workset_combo.currentText()) if workset_id else "",
+            comic_id=comic_id,
+            comic_title=self._strip_last(self._comic_combo.currentText()) if comic_id else "",
+        )
+        self._last_choice = choice
+        self._last_store.save(choice)
+
+    @staticmethod
+    def _strip_last(text: str) -> str:
+        return text[: -len(LAST_SUFFIX)] if text.endswith(LAST_SUFFIX) else text
+
+    def _task_title(self) -> str:
+        """当前任务对应的作品名（与返修单默认名同一套规则）。"""
+        psd_name = self._task.files[0].file_name if self._task.files else ""
+        return task_display_name(self._task.task_type, self._base_dir, psd_name)
 
     # -- 下拉框小工具 -------------------------------------------------------
 
     @staticmethod
-    def _fill_combo(combo: QComboBox, items: list[tuple[str, str]], preferred: str = "") -> None:
+    def _fill_combo(
+        combo: QComboBox,
+        items: list[tuple[str, str]],
+        placeholder: str,
+        preferred: str = "",
+    ) -> None:
+        """重建下拉：**第 0 项永远是占位项**（data=None），不自动选中任何真实值。"""
         combo.blockSignals(True)
         combo.clear()
+        combo.addItem(placeholder, None)
         for text, value in items:
             combo.addItem(text, value)
-        if preferred:
-            index = combo.findData(preferred)
-            if index >= 0:
-                combo.setCurrentIndex(index)
+        index = combo.findData(preferred) if preferred else 0
+        combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
 
     @staticmethod
-    def _clear_combos(*combos: QComboBox) -> None:
-        for combo in combos:
-            combo.blockSignals(True)
-            combo.clear()
-            combo.blockSignals(False)
-
-    def _select_chapter(self, chapter_id: str) -> None:
-        index = self._chapter_combo.findData(chapter_id)
-        if index < 0:
-            return
-        self._chapter_combo.blockSignals(True)
-        self._chapter_combo.setCurrentIndex(index)
-        self._chapter_combo.blockSignals(False)
+    def _set_placeholder(combo: QComboBox, text: str) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(text, None)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
 
     def _current_membership(self) -> Optional[Membership]:
         team_id = self._team_combo.currentData()
@@ -1217,17 +1619,6 @@ class PoprakoSyncDialog(QDialog):
             if membership.team_id == team_id:
                 return membership
         return None
-
-    def _confirm_switch_chapter(self) -> bool:
-        box = QMessageBox(self)
-        box.setWindowTitle("切换章节")
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText("切换章节会清空当前的页面映射")
-        box.setInformativeText("已手工调整过的映射不会保留。要继续吗？")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        box.button(QMessageBox.StandardButton.Yes).setText("继续")
-        box.button(QMessageBox.StandardButton.No).setText("取消")
-        return box.exec() == QMessageBox.StandardButton.Yes
 
     # ================================================================ 章节信息
 
@@ -1533,6 +1924,8 @@ class PoprakoSyncDialog(QDialog):
         if self._user is None:
             return ["请先在「账号」页登录"]
         if self._chapter is None:
+            if self._chapter_combo.currentData():
+                return ["请先点「加载章节信息」读取该章节"]
             return ["请先在「目标章节」选择章节"]
         if self._chapter.is_published:
             return ["该章节已发布，Poprako 不接受问题导入"]
@@ -1558,8 +1951,25 @@ class PoprakoSyncDialog(QDialog):
         self._clear_btn.setEnabled(has_chapter and bool(self._mapping))
         self._copy_btn.setEnabled(bool(self._preview_full))
         self._export_btn.setEnabled(bool(self._preview_full))
-        self._refresh_btn.setEnabled(self._user is not None and not self._busy)
         self._login_btn.setEnabled(not self._busy)
+        # 逐级懒加载的启用链（置灰不隐藏）
+        idle = not self._busy
+        team_ready = idle and self._user is not None and self._teams_loaded
+        workset_ready = idle and self._current_membership() is not None and bool(self._worksets)
+        comic_ready = idle and bool(self._workset_combo.currentData()) and bool(self._comics)
+        chapter_ready = idle and bool(self._comic_combo.currentData()) and bool(self._chapters)
+        self._team_combo.setEnabled(team_ready)
+        self._workset_combo.setEnabled(workset_ready)
+        self._comic_combo.setEnabled(comic_ready)
+        self._chapter_combo.setEnabled(chapter_ready)
+        self._rank_switch.setEnabled(idle)
+        self._clear_all_btn.setEnabled(idle and bool(self._team_combo.currentData()))
+        chapter_id = self._chapter_combo.currentData()
+        self._load_chapter_btn.setEnabled(bool(idle and chapter_id))
+        self._load_chapter_btn.setToolTip(
+            "读取该章节的详情、复合图页与现有问题" if chapter_id
+            else "请先逐级选择团队 / 项目集 / 作品 / 章节"
+        )
         self._proxy_save_btn.setEnabled(not self._busy)
         if not self._busy:
             self._proxy_test_btn.setEnabled(True)
@@ -1680,6 +2090,11 @@ class PoprakoSyncDialog(QDialog):
         if self._finalized:
             return
         self._finalized = True
+
+        progress = self._progress_dialog
+        self._progress_dialog = None
+        if progress is not None:
+            progress.accept()
 
         for worker in list(self._workers):
             if worker.isRunning():

@@ -748,9 +748,10 @@ class PoprakoSettings:
     nickname: str = ""
     keep_signed_in: bool = True
     preserve_unmapped: bool = True
-    last_team_id: str = ""
-    last_workset_id: str = ""
-    last_comic_id: str = ""
+    #: 作品下拉是否按"与任务名的匹配度"排序（默认开；关掉后按服务端顺序）。
+    #: 注意：「上次选择的团队/项目集/作品」**不在本文件**——见
+    #: mangaproof/poprako/last_choice.py（与 recent.json 同级的独立文件）。
+    rank_comics: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -762,9 +763,7 @@ class PoprakoSettings:
             "nickname": self.nickname,
             "keep_signed_in": self.keep_signed_in,
             "preserve_unmapped": self.preserve_unmapped,
-            "last_team_id": self.last_team_id,
-            "last_workset_id": self.last_workset_id,
-            "last_comic_id": self.last_comic_id,
+            "rank_comics": self.rank_comics,
         }
 
     @classmethod
@@ -788,15 +787,12 @@ class PoprakoSettings:
                 settings.proxy = candidate
         # 非法值静默回落到"直连"：绝不让一条手改坏的配置卡死网络路径
 
-        for field_name in (
-            "token", "user_id", "qid", "nickname",
-            "last_team_id", "last_workset_id", "last_comic_id",
-        ):
+        for field_name in ("token", "user_id", "qid", "nickname"):
             value = raw.get(field_name, "")
             if isinstance(value, str):
                 setattr(settings, field_name, value.strip())
 
-        for flag in ("keep_signed_in", "preserve_unmapped"):
+        for flag in ("keep_signed_in", "preserve_unmapped", "rank_comics"):
             value = raw.get(flag)
             if isinstance(value, bool):
                 setattr(settings, flag, value)

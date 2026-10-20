@@ -28,11 +28,13 @@ from PySide6.QtCore import QThread, Signal
 from mangaproof.poprako.client import PoprakoClient, mask_proxy, probe_connection
 from mangaproof.poprako.errors import PoprakoError, user_message
 from mangaproof.poprako.models import ImportResult
+from mangaproof.poprako.title_match import rank_comics
 
 log = logging.getLogger("mangaproof.ui.poprako_worker")
 
 __all__ = [
     "CallWorker",
+    "ComicsLoadWorker",
     "ProxyProbeWorker",
     "UploadWorker",
     "UploadOutcome",
@@ -156,3 +158,56 @@ class ProxyProbeWorker(QThread):
         # 日志只记遮罩后的地址（代理可能带账号密码）
         log.info("Poprako 代理测试：%s（%s）", "成功" if ok else "失败", mask_proxy(self._proxy))
         self.finished_with.emit(ok, message)
+
+
+class ComicsLoadWorker(QThread):
+    """读取作品列表（分页）→ 按名称匹配打分 → 排序。
+
+    三个阶段都通过 ``progress(done, total, text)`` 报给界面：
+
+    - 读取：``total=0``（不确定进度），文案带"第 n 页 / 已获取 m 条"；
+    - 匹配：确定进度 ``i/N``；
+    - 排序：一次收尾。
+
+    打分排在后台（作品多时也要几十毫秒到几百毫秒），主线程只画进度条。
+    """
+
+    progress = Signal(int, int, str)
+    succeeded = Signal(object)      # list[RankedComic]
+    failed = Signal(str)
+
+    def __init__(self, client, workset_id: str, task_name: str, parent=None):
+        super().__init__(parent)
+        self._client = client
+        self._workset_id = workset_id
+        self._task_name = task_name
+
+    def run(self) -> None:  # noqa: D102 —— QThread 约定
+        try:
+            self.progress.emit(0, 0, "正在读取作品…")
+
+            def _on_page(pages: int, rows: int) -> None:
+                self.progress.emit(
+                    0, 0, f"正在读取作品…（第 {pages} 页，已获取 {rows} 条）"
+                )
+
+            comics = self._client.comics(self._workset_id, progress=_on_page)
+            total = len(comics)
+            if not comics:
+                self.succeeded.emit([])
+                return
+
+            self.progress.emit(0, total, f"正在匹配名称…（0/{total}）")
+
+            def _on_rank(done: int, amount: int) -> None:
+                self.progress.emit(done, amount, f"正在匹配名称…（{done}/{amount}）")
+
+            ranked = rank_comics(self._task_name, comics, progress=_on_rank)
+            self.progress.emit(total, total, "正在排序…")
+            self.succeeded.emit(ranked)
+        except PoprakoError as exc:
+            log.info("Poprako 读取作品失败：%s", type(exc).__name__)
+            self.failed.emit(user_message(exc))
+        except Exception:
+            log.exception("Poprako 读取作品出现未预期异常")
+            self.failed.emit("读取作品失败：内部错误（已记录日志）")
