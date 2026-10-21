@@ -86,6 +86,7 @@ from mangaproof.config.settings import (
     DEFAULT_KEYBINDINGS,
     default_memory_policy,
     default_position_mode,
+    DEFAULT_OUTLINE_WIDTH,
     DEFAULT_REPORT_IMAGE_FORMAT,
     DEFAULT_SHOW_LAYER_OUTLINE,
     default_ui_scale,
@@ -93,6 +94,7 @@ from mangaproof.config.settings import (
     DISPLAY_RATIOS,
     effective_memory_policy,
     JPEG_QUALITY_CHOICES,
+    OUTLINE_WIDTH_CHOICES,
     Settings,
     shortcut_conflicts,
     ui_scale_choices,
@@ -780,6 +782,28 @@ class SettingsDialog(QDialog):
         )
         self._add_row(rows, "显示当前图层的蓝色虚线边界框", self.layer_outline_check)
 
+        # 蓝框线宽（2026-10-21 需求方）：1～6px、步进 1px、默认 3px；
+        # 最大值与问题红框同宽（红框固定 6px，没有设置项）。关闭蓝框时整行置灰。
+        self.outline_width_combo = NoWheelComboBox()
+        for px in OUTLINE_WIDTH_CHOICES:
+            self.outline_width_combo.addItem(f"{int(px)}px", px)
+        current_width = self._settings.layer_outline_width
+        if current_width not in OUTLINE_WIDTH_CHOICES:   # 兼容手工写入的合法值
+            self.outline_width_combo.addItem(
+                f"{int(current_width)}px", current_width
+            )
+        self.outline_width_combo.setCurrentIndex(
+            max(0, self.outline_width_combo.findData(current_width))
+        )
+        self.outline_width_combo.setToolTip(
+            "蓝色虚线边界框的线宽（屏幕像素，不随画布缩放变化）：\n"
+            "默认 3px；最小 1px（旧版粗细），最大 6px —— 6px 与问题红框同宽。\n"
+            "关闭上面的开关时此项置灰，数值会保留。"
+        )
+        self.layer_outline_check.toggled.connect(self._update_outline_width_enabled)
+        self._update_outline_width_enabled()
+        self._add_row(rows, "蓝色虚线边界框线宽：", self.outline_width_combo, expand=True)
+
         # 界面缩放：**仅 Android 显示**。桌面端缩放恒为 1.0（由
         # config/settings.resolve_ui_scale 的平台判定硬保证），因此桌面既不
         # 显示这一项、也不读取设置文件里的值，避免误改桌面显示。
@@ -996,6 +1020,10 @@ class SettingsDialog(QDialog):
             self.report_image_combo.currentData() == "jpeg"
         )
 
+    def _update_outline_width_enabled(self) -> None:
+        """蓝框线宽仅在「显示蓝色虚线边界框」打开时可用（关闭时置灰，值保留）。"""
+        self.outline_width_combo.setEnabled(self.layer_outline_check.isChecked())
+
     # -- 复位 / 应用 --------------------------------------------------------
 
     def _reset_defaults(self) -> None:
@@ -1019,6 +1047,9 @@ class SettingsDialog(QDialog):
         idx = self.issue_scope_combo.findData(DEFAULT_ISSUE_SCOPE)
         self.issue_scope_combo.setCurrentIndex(max(0, idx))
         self.layer_outline_check.setChecked(DEFAULT_SHOW_LAYER_OUTLINE)
+        idx = self.outline_width_combo.findData(DEFAULT_OUTLINE_WIDTH)
+        self.outline_width_combo.setCurrentIndex(max(0, idx))
+        self._update_outline_width_enabled()
         # 定位依据回到**平台默认**（桌面视觉边界 / Android 快速原始框），
         # 与 default_position_mode()、SettingsManager 缺键默认同源。
         idx = self.position_combo.findData(default_position_mode())
@@ -1062,6 +1093,7 @@ class SettingsDialog(QDialog):
         settings.wheel_mode = str(self.wheel_mode_combo.currentData())
         settings.issue_scope = str(self.issue_scope_combo.currentData())
         settings.show_layer_outline = self.layer_outline_check.isChecked()
+        settings.layer_outline_width = float(self.outline_width_combo.currentData())
         settings.position_mode = str(self.position_combo.currentData())
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.generate_pdf_on_complete = self.pdf_check.isChecked()

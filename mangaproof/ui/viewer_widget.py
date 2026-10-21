@@ -46,6 +46,15 @@ SOURCE_BG = "bg"
 MIN_RECT_WORLD_SIZE = 3.0     # 拖框最小尺寸（世界像素），过滤误点
 CHECKER_SIZE = 16
 
+#: 问题红框线宽（屏幕像素，cosmetic 画笔）。**没有设置项**，固定值。
+#: 蓝色虚线框的线宽上限与之对齐（config/settings.py 的 OUTLINE_WIDTH_MAX，
+#: 由 tests/test_outline_width.py 的守卫用例钉住两者相等）。
+ISSUE_RECT_PEN_WIDTH = 6.0
+
+#: 蓝色虚线框的线宽（屏幕像素，cosmetic 画笔）。Viewer 自身保持历史默认，
+#: 应用级默认值在 config/settings.py（DEFAULT_OUTLINE_WIDTH），由主窗口下发。
+DEFAULT_OUTLINE_PEN_WIDTH = 1.0
+
 
 def smooth_scaling_for(zoom: float) -> bool:
     """缩放插值策略（类 Photoshop）。
@@ -105,6 +114,8 @@ class ViewerWidget(QWidget):
 
         self._issues: List[Issue] = []
         self._layer_outline: Optional[Tuple[float, float, float, float]] = None
+        # 蓝框线宽（屏幕像素）：由主窗口按设置下发，见 set_outline_pen_width
+        self._outline_width: float = DEFAULT_OUTLINE_PEN_WIDTH
         self._redraw_mode = False
         self._pending_type: Optional[str] = None
         self._drag: Optional[dict] = None
@@ -175,6 +186,24 @@ class ViewerWidget(QWidget):
     def layer_outline(self) -> Optional[Tuple[float, float, float, float]]:
         """当前虚线框（世界坐标 LTRB），仅供测试/调试。"""
         return self._layer_outline
+
+    def set_outline_pen_width(self, width: float) -> None:
+        """设置蓝色虚线框的线宽（屏幕像素，cosmetic 画笔）。
+
+        应用级取值与默认值在 config/settings.py（1～6px，默认 3px），
+        主窗口启动与设置应用时下发；这里只做下限兜底，避免 0/负数画笔。
+        """
+        try:
+            value = float(width)
+        except (TypeError, ValueError):
+            value = DEFAULT_OUTLINE_PEN_WIDTH
+        self._outline_width = value if value >= 1.0 else DEFAULT_OUTLINE_PEN_WIDTH
+        self.update()
+
+    @property
+    def outline_pen_width(self) -> float:
+        """当前蓝框线宽（屏幕像素），仅供测试/调试。"""
+        return self._outline_width
 
     # -- 问题创建模式 -----------------------------------------------------
 
@@ -345,10 +374,11 @@ class ViewerWidget(QWidget):
                 QRectF(0, 0, w, h),
             )
 
-        # 当前图层视觉边界虚线框（便于识别当前监制对象，可在设置中关闭）
+        # 当前图层视觉边界虚线框（便于识别当前监制对象，可在设置中关闭；
+        # 线宽 1～6px 可调，见 config/settings.py 的 OUTLINE_WIDTH_CHOICES）
         rect = outline_screen_rect(self._camera, self._layer_outline, vw, vh)
         if rect is not None:
-            pen = QPen(QColor(COLOR_ACCENT), 1.0, Qt.PenStyle.DashLine)
+            pen = QPen(QColor(COLOR_ACCENT), self._outline_width, Qt.PenStyle.DashLine)
             pen.setCosmetic(True)   # 屏幕宽度恒定，放大看细节时线不会变粗
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -370,7 +400,7 @@ class ViewerWidget(QWidget):
             return
         sx0, sy0 = self._camera.world_to_screen(x, y, vw, vh)
         sx1, sy1 = self._camera.world_to_screen(x + w, y + h, vw, vh)
-        pen = QPen(QColor(COLOR_FAIL), 3.0)
+        pen = QPen(QColor(COLOR_FAIL), ISSUE_RECT_PEN_WIDTH)
         pen.setCosmetic(True)  # 屏幕宽度恒定，不随 zoom 变细
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)

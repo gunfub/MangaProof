@@ -256,6 +256,8 @@ class MainWindow(QMainWindow):
         # ---- 中央 Viewer ----
         self.viewer = ViewerWidget()
         self.viewer.set_wheel_mode(self.settings.wheel_mode)
+        # 蓝框线宽来自设置（应用级默认 3px，Viewer 自身默认 1px）
+        self.viewer.set_outline_pen_width(self.settings.layer_outline_width)
         self.viewer.rect_drawn.connect(self._on_rect_drawn)
         self.viewer.issue_drawn.connect(self._on_issue_drawn)
         self.viewer.camera_changed.connect(self._on_camera_changed)
@@ -2798,6 +2800,8 @@ class MainWindow(QMainWindow):
             self._apply_compare_settings()
             self._apply_memory_policy()   # 内存策略档位热应用
             self.viewer.set_wheel_mode(self.settings.wheel_mode)
+            # 蓝框线宽热应用（与开/关、定位依据无关，先下发再刷新蓝框）
+            self.viewer.set_outline_pen_width(self.settings.layer_outline_width)
             self._refresh_viewer_issues()  # 红框显示范围（整页/仅当前图层）热应用
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))

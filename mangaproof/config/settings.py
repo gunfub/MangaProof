@@ -227,6 +227,20 @@ DEFAULT_ISSUE_SCOPE = "page"
 # 关闭后画布上不再绘制该框（定位、缩放行为完全不受影响）。
 DEFAULT_SHOW_LAYER_OUTLINE = True
 
+# 蓝色虚线边界框的线宽（**屏幕像素**，cosmetic 画笔，不随画布缩放变化）：
+# - 最小 1px = 旧版原始粗细；
+# - 最大 6px = 问题红框的线宽（ui/viewer_widget.py 的 ISSUE_RECT_PEN_WIDTH，
+#   由 tests/test_outline_width.py 的守卫用例钉住两者相等）；
+# - 默认 3px；设置文件里出现三档之外的任何值一律回落到默认值。
+OUTLINE_WIDTH_MIN = 1.0
+OUTLINE_WIDTH_MAX = 6.0
+OUTLINE_WIDTH_STEP = 1.0
+OUTLINE_WIDTH_CHOICES: tuple[float, ...] = tuple(
+    OUTLINE_WIDTH_MIN + i * OUTLINE_WIDTH_STEP
+    for i in range(int((OUTLINE_WIDTH_MAX - OUTLINE_WIDTH_MIN) / OUTLINE_WIDTH_STEP) + 1)
+)
+DEFAULT_OUTLINE_WIDTH = 3.0
+
 # 图层定位依据（需求 §17、§18）：
 # - POSITION_VISUAL：视觉内容包围盒（解像素，居中更准）——**桌面默认**；
 # - POSITION_FAST：直接取 PSD 图层自带的 x/y/w/h（零像素解析，快、省内存，
@@ -842,6 +856,8 @@ class Settings:
     issue_scope: str = DEFAULT_ISSUE_SCOPE     # "page"（当前页全部）/ "layer"（仅当前图层）
     # 当前图层视觉边界虚线框（蓝色）是否显示（默认显示）
     show_layer_outline: bool = DEFAULT_SHOW_LAYER_OUTLINE
+    # 蓝色虚线框线宽（屏幕像素，1～6px，默认 3px；最大与问题红框同宽）
+    layer_outline_width: float = DEFAULT_OUTLINE_WIDTH
     # 图层定位依据：POSITION_VISUAL（视觉边界，精准）/ POSITION_FAST（原始框，零解析）。
     # 这里写的是**与平台无关**的默认值；实际缺键默认由 default_position_mode()
     # 按平台给（Android 快速、桌面视觉），见 _default_settings / _from_dict。
@@ -1078,6 +1094,19 @@ class SettingsManager:
         s.show_layer_outline = bool(
             raw.get("show_layer_outline", DEFAULT_SHOW_LAYER_OUTLINE)
         )
+        # 蓝框线宽：只认 1～6px 的整档；缺键 / 越界 / 非数字 / 非整档一律回落默认值。
+        # 离散档位用白名单而不是"夹取"，避免把 2.5 之类的损坏配置静默变成别的数。
+        # 布尔值单独挡掉：JSON 的 true 会被 float() 变成 1.0，但它显然不是线宽。
+        raw_width = raw.get("layer_outline_width", DEFAULT_OUTLINE_WIDTH)
+        try:
+            outline_width = float(raw_width)
+        except (TypeError, ValueError):
+            outline_width = DEFAULT_OUTLINE_WIDTH
+        if isinstance(raw_width, bool):
+            outline_width = DEFAULT_OUTLINE_WIDTH
+        s.layer_outline_width = (
+            outline_width if outline_width in OUTLINE_WIDTH_CHOICES else DEFAULT_OUTLINE_WIDTH
+        )
         # 缺键 / 非法值 → **平台默认**（桌面视觉、Android 快速）；显式写过
         # "visual"/"fast" 的一律照用户的选择，Android 上也不强制覆盖。
         position_mode = raw.get("position_mode")
@@ -1184,6 +1213,7 @@ class SettingsManager:
                     "wheel_mode": self.settings.wheel_mode,
                     "issue_scope": self.settings.issue_scope,
                     "show_layer_outline": self.settings.show_layer_outline,
+                    "layer_outline_width": self.settings.layer_outline_width,
                     "position_mode": self.settings.position_mode,
                     "continuous_annotation": self.settings.continuous_annotation,
                     "recursive_scan": self.settings.recursive_scan,

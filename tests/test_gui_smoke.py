@@ -1995,7 +1995,15 @@ def test_settings_dialog_sidebar_layout() -> None:
     vbar.setValue(vbar.maximum())
     app.processEvents()
     vp = dlg.page_scrolls["display"].viewport()
-    assert 0 <= dlg.layer_outline_check.mapTo(vp, QPoint(0, 0)).y() < vp.height()
+    # 滚到底时「本页最后一行」必须完整落在视口内。取最后一行而不是写死某个
+    # 控件：设置项会随需求增加（2026-10-21 就在蓝框开关下面加了线宽下拉），
+    # 写死控件的话每加一行这条用例都要返工。
+    display_rows = [
+        dlg.page_rows["display"].itemAt(i).widget()
+        for i in range(dlg.page_rows["display"].count())
+    ]
+    last_row = [w for w in display_rows if w is not None][-1]
+    assert 0 <= last_row.mapTo(vp, QPoint(0, 0)).y() < vp.height()
 
     # 4) 下拉框不响应滚轮：聚焦与否都不改值（原生 QComboBox 会直接改值）
     def wheel_event(dy: int = -120) -> QWheelEvent:
