@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mangaproof.camera.centering import POSITION_FAST, POSITION_VISUAL
 from mangaproof.compare.controller import hz_to_interval_ms
 from mangaproof.config.settings import (
     android_memory_policy_locked,
@@ -84,6 +85,7 @@ from mangaproof.config.settings import (
     DEFAULT_JPEG_QUALITY,
     DEFAULT_KEYBINDINGS,
     default_memory_policy,
+    default_position_mode,
     DEFAULT_REPORT_IMAGE_FORMAT,
     DEFAULT_SHOW_LAYER_OUTLINE,
     default_ui_scale,
@@ -692,6 +694,25 @@ class SettingsDialog(QDialog):
         )
         self._add_row(rows, "图层自动显示比例：", self.ratio_combo, expand=True)
 
+        # 图层定位依据（需求 §17、§18）：两档取舍，不是开关——开关只有一句话
+        # 的空间，说不清"快在哪、差在哪"；下拉与「对比模式 / 问题红框显示」同类。
+        self.position_combo = NoWheelComboBox()
+        self.position_combo.addItem("视觉内容边界（精准，逐层解析像素）", POSITION_VISUAL)
+        self.position_combo.addItem("PSD 图层原始框（快速，零像素解析）", POSITION_FAST)
+        position_idx = self.position_combo.findData(self._settings.position_mode)
+        self.position_combo.setCurrentIndex(max(0, position_idx))
+        self.position_combo.setToolTip(
+            "定位与自动缩放以哪个矩形为准：\n"
+            "· 视觉内容边界（桌面默认）：逐层解析 alpha、取实际内容包围盒，居中更准；\n"
+            "  代价是首次切换要解图层像素（大图层有等待，且占内存）。\n"
+            "· PSD 图层原始框（Android 默认）：直接读 PSD 里该图层自带的 x / y / w / h，\n"
+            "  零像素解析，切换与定位瞬时完成；图层有透明留白、蒙版或特效时，\n"
+            "  居中会不如上面精准——这是刻意的取舍。\n"
+            "快速模式下：蓝色虚线框画的就是原始框，图层预热不再进行（图像预加载照旧），\n"
+            "自动框选也直接用原始框；后续「某些图层居中更准」的改进只做在视觉内容模式里。"
+        )
+        self._add_row(rows, "图层定位依据：", self.position_combo, expand=True)
+
         # bg / bg 拷贝 的独立比例（需求 §20.2，默认关）。
         # 关闭时两个下拉置灰：值仍保留在设置里，只是不参与自动缩放。
         self.bg_ratio_check = ToggleSwitch()
@@ -747,7 +768,9 @@ class SettingsDialog(QDialog):
         self.layer_outline_check = ToggleSwitch()
         self.layer_outline_check.setChecked(self._settings.show_layer_outline)
         self.layer_outline_check.setToolTip(
-            "画布上标出当前图层视觉内容范围的蓝色虚线框（定位辅助）。\n"
+            "画布上标出当前图层内容范围的蓝色虚线框（定位辅助）。\n"
+            "框的语义跟随上面的「图层定位依据」：视觉内容模式画实际内容边界，\n"
+            "快速模式画 PSD 图层原始框（与本次居中用的矩形同源）。\n"
             "关闭后不再绘制该框，图层定位与自动缩放行为不受影响；\n"
             "切换图层、翻页、改设置均即时生效。"
         )
@@ -992,6 +1015,10 @@ class SettingsDialog(QDialog):
         idx = self.issue_scope_combo.findData(DEFAULT_ISSUE_SCOPE)
         self.issue_scope_combo.setCurrentIndex(max(0, idx))
         self.layer_outline_check.setChecked(DEFAULT_SHOW_LAYER_OUTLINE)
+        # 定位依据回到**平台默认**（桌面视觉边界 / Android 快速原始框），
+        # 与 default_position_mode()、SettingsManager 缺键默认同源。
+        idx = self.position_combo.findData(default_position_mode())
+        self.position_combo.setCurrentIndex(max(0, idx))
         self.recursive_check.setChecked(False)
         self.console_check.setChecked(True)
         self.pdf_check.setChecked(True)
@@ -1031,6 +1058,7 @@ class SettingsDialog(QDialog):
         settings.wheel_mode = str(self.wheel_mode_combo.currentData())
         settings.issue_scope = str(self.issue_scope_combo.currentData())
         settings.show_layer_outline = self.layer_outline_check.isChecked()
+        settings.position_mode = str(self.position_combo.currentData())
         settings.recursive_scan = self.recursive_check.isChecked()
         settings.generate_pdf_on_complete = self.pdf_check.isChecked()
         settings.report_show_options = self.report_options_check.isChecked()
