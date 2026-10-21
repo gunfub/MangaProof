@@ -324,6 +324,22 @@ def test_switch_back_to_visual_requests_warm_instead_of_freezing(window):
     request.assert_called_once_with(0)
 
 
+def test_mode_change_does_not_touch_status_bar_message(window):
+    """2026-10-21 需求方：改设置不弹底栏消息——底栏左侧是常驻提示区，
+    这条消息会把正在显示的内容盖掉，而当前依据已在按钮 tooltip / 阶段 B 文案里。"""
+    window.settings.position_mode = POSITION_FAST
+    _bind_stub(window, [make_layer(bounds=(0, 0, 100, 100), tripwire=True, id="a")])
+    window._current_index = 0
+    window.statusBar().clearMessage()
+    with patch.object(window, "_schedule_preloads"), patch.object(
+        window, "_request_layer_switch"
+    ):
+        window._on_position_mode_changed(POSITION_VISUAL)
+        assert window.statusBar().currentMessage() == ""
+        window._on_position_mode_changed(POSITION_FAST)
+        assert window.statusBar().currentMessage() == ""
+
+
 def test_fast_mode_never_warms_layers_end_to_end(tmp_path):
     """真文档：快速模式打开任务后，没有任何图层被算过视觉边界。"""
     folder = tmp_path / "chapter01"
@@ -417,6 +433,18 @@ def test_settings_dialog_position_combo():
         out = Settings()
         dlg.apply_to(out)
         assert out.position_mode == POSITION_FAST
+    finally:
+        dlg.deleteLater()
+
+
+def test_position_tooltip_is_user_facing_only():
+    """tooltip 只讲"怎么选、差在哪"；"以后精度改进只做 visual"这类约定留在注释里。"""
+    dlg = SettingsDialog(Settings())
+    try:
+        tip = dlg.position_combo.toolTip()
+        assert "自动框选也直接用原始框" in tip
+        assert "后续" not in tip
+        assert "改进只做" not in tip
     finally:
         dlg.deleteLater()
 

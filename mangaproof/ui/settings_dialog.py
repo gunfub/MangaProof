@@ -696,6 +696,10 @@ class SettingsDialog(QDialog):
 
         # 图层定位依据（需求 §17、§18）：两档取舍，不是开关——开关只有一句话
         # 的空间，说不清"快在哪、差在哪"；下拉与「对比模式 / 问题红框显示」同类。
+        #
+        # 写代码的人注意（**不要**写进 tooltip，用户界面不需要这条）：
+        # 后续任何"某些图层居中更准"的改进只做在视觉内容模式（visual 分支），
+        # 快速模式是纯元数据路径，见 camera/centering.py 的模块不变量。
         self.position_combo = NoWheelComboBox()
         self.position_combo.addItem("视觉内容边界（精准，逐层解析像素）", POSITION_VISUAL)
         self.position_combo.addItem("PSD 图层原始框（快速，零像素解析）", POSITION_FAST)
@@ -709,7 +713,7 @@ class SettingsDialog(QDialog):
             "  零像素解析，切换与定位瞬时完成；图层有透明留白、蒙版或特效时，\n"
             "  居中会不如上面精准——这是刻意的取舍。\n"
             "快速模式下：蓝色虚线框画的就是原始框，图层预热不再进行（图像预加载照旧），\n"
-            "自动框选也直接用原始框；后续「某些图层居中更准」的改进只做在视觉内容模式里。"
+            "自动框选也直接用原始框。"
         )
         self._add_row(rows, "图层定位依据：", self.position_combo, expand=True)
 

@@ -2827,6 +2827,11 @@ class MainWindow(QMainWindow):
         切到快速模式：重新定位立即生效，预热队列改回"只补背景图"；
         切回视觉模式：当前图层若还没算过视觉边界，走带进度框的异步路径
         （`_request_layer_switch`），避免在 UI 线程里解图层像素造成冻结。
+
+        **不弹状态栏消息**（2026-10-21 需求方）：底栏左侧是常驻提示区，
+        改设置这种"用户自己刚做完的动作"没必要再回显一遍，反而会盖掉
+        正在显示的提示。当前依据常显在「定位当前图层」按钮 tooltip 与
+        阶段 B 文案里，够用了。
         """
         self._refresh_position_mode_ui()
         doc = self.current_doc
@@ -2843,13 +2848,6 @@ class MainWindow(QMainWindow):
             self.recenter_current_layer()
         if self.task is not None and self._current_file:
             self._schedule_preloads(self._current_file)
-        fast = self.settings.position_mode == POSITION_FAST
-        self.statusBar().showMessage(
-            "定位依据：PSD 图层原始框（快速）——零像素解析，居中精度有限"
-            if fast
-            else "定位依据：视觉内容边界（精准）——按图层实际内容居中",
-            5000,
-        )
         log.info("定位依据切换：%s → %s", old_mode, self.settings.position_mode)
 
     def _notify_ui_scale_restart_needed(self) -> None:
