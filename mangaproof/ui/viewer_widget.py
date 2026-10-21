@@ -26,7 +26,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from mangaproof.camera.camera import Camera
-from mangaproof.camera.centering import layer_visual_bounds, layer_visual_center
+from mangaproof.camera.centering import POSITION_VISUAL, position_bounds
 from mangaproof.camera.zoom import fit_zoom
 from mangaproof.psd.document import PSDDocument
 from mangaproof.review.issue import Issue
@@ -212,19 +212,32 @@ class ViewerWidget(QWidget):
 
     # -- 相机定位（需求 §17、§18、§20） ---------------------------------
 
-    def recenter_on_layer(self, info, ratio: float) -> None:
-        """图层视觉中心 → 视口中心 + 按比例自动缩放。"""
+    def recenter_on_layer(self, info, ratio: float, position_mode: str = POSITION_VISUAL) -> None:
+        """图层定位 → 视口中心 + 按比例自动缩放。
+
+        目标矩形由 ``position_mode`` 决定（见 camera.centering.position_bounds）：
+
+        - ``visual``（桌面默认）：视觉内容包围盒，解像素、居中更准；
+        - ``fast``（Android 默认）：PSD 图层原始框，纯元数据、不解像素。
+
+        两种模式共用同一个相机/缩放公式，只有"矩形从哪来"不同。
+        """
         if self._doc is None:
             return
-        vb = layer_visual_bounds(info)
-        center = layer_visual_center(info)
-        if center is None:
-            center = info.center
-        target = vb if vb is not None else info.bounds
+        target = position_bounds(info, position_mode)
+        if target is None:
+            # 无可用矩形（整层透明且 Bounds 不可用）→ 保持 Camera（需求 §18.1）
+            log.info(
+                "图层 %s 没有可用的定位矩形（%s 模式），保持当前 Camera",
+                info.id,
+                position_mode,
+            )
+            return
+        left, top, right, bottom = target
+        center = ((left + right) / 2.0, (top + bottom) / 2.0)
         vw, vh = self.width(), self.height()
         new_zoom = fit_zoom(target, (vw, vh), ratio)
         if new_zoom is None:
-            # 无法计算（透明图层且 Bounds 不可用）→ 保持 Camera（需求 §18.1）
             log.info("图层 %s 无法自动缩放，保持当前 Camera", info.id)
             return
         self._camera.center_on(*center)

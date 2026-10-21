@@ -32,7 +32,12 @@ from PySide6.QtWidgets import (
 )
 
 from mangaproof import APP_NAME, __version__
-from mangaproof.camera.centering import auto_box_rect, layer_visual_bounds
+from mangaproof.camera.centering import (
+    POSITION_FAST,
+    auto_box_rect,
+    layer_visual_bounds,
+    position_bounds,
+)
 from mangaproof.camera.zoom import resolve_display_ratio
 from mangaproof.compare.controller import BG_ONLY, ORIGINAL, CompareController, hz_to_interval_ms
 from mangaproof.config.recent import RecentManager
@@ -372,6 +377,23 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.hint_label)
 
         self._update_shortcut_hints()
+        self._refresh_position_mode_ui()
+
+    def _refresh_position_mode_ui(self) -> None:
+        """把当前「图层定位依据」反映到定位按钮 tooltip 与阶段 B 文案。
+
+        快速模式是"看得见的状态"：用户随时能在状态栏与按钮提示里确认当前
+        走的是原始框（精度有限）还是视觉边界，不必回设置页找。
+        """
+        fast = self.settings.position_mode == POSITION_FAST
+        tip = "把当前图层定位到视口中心，并按显示比例自动缩放"
+        tip += (
+            "\n当前定位依据：PSD 图层原始框（快速，零像素解析；居中精度有限）"
+            if fast
+            else "\n当前定位依据：视觉内容边界（精准，按图层实际内容居中）"
+        )
+        self.action_recenter.setToolTip(tip)
+        self._update_preload_label()
 
     def _build_settings_banner(self) -> QWidget:
         """首次使用提醒条：只提示「可以按自己的习惯调设置」，不替用户改任何值。
@@ -1338,12 +1360,26 @@ class MainWindow(QMainWindow):
             return
         # 未预热：后台提取 + 非模态忙碌进度框（不阻塞继续切换）
         self._pending_open = (rel, "file")
-        self._preload.submit_open(rel, layer_id)
+        self._preload.submit_open(rel, layer_id if self._layers_need_warm() else "")
         self._show_open_progress(rel)
 
-    @staticmethod
-    def _target_layer_warm(doc: PSDDocument, layer_id: str) -> bool:
+    def _layers_need_warm(self) -> bool:
+        """图层视觉边界是否需要预热（阶段 B 的"图层"部分）。
+
+        快速定位模式（``POSITION_FAST``）只读 PSD 图层原始框，**永远不需要**
+        视觉边界 —— 这里返回 False，让预热队列只做背景图、切图层走同步路径。
+        与"图像预加载"无关：merged / bg 的预取照旧（那是显示与对比的必需品）。
+        """
+        return self.settings.position_mode != POSITION_FAST
+
+    def _layer_ready(self, info) -> bool:
+        """该图层现在能否直接定位（无需在 UI 线程解像素）。"""
+        return not self._layers_need_warm() or info.has_visual_bounds()
+
+    def _target_layer_warm(self, doc: PSDDocument, layer_id: str) -> bool:
         """目标图层的视觉边界是否已计算（无需 UI 线程提取像素）。"""
+        if not self._layers_need_warm():
+            return True
         if not layer_id:
             return True
         info = doc.layer_by_id(layer_id)
@@ -1582,6 +1618,9 @@ class MainWindow(QMainWindow):
         #（任意文件的任意 ←→ 图层切换免等待）；已完成的部分跳过，
         # 避免重复排队。流式加载/驱逐后窗口内邻域文档可能缺失，
         # 此处惰性创建保证预加载覆盖（否则新邻居永不入队，切换必走慢路径）。
+        # 快速定位模式（Android 默认）只补背景图：图层视觉边界永远不算，
+        # 任务里的 layer_id 传空串即可（PreloadWorker._warm_layer("") 直接返回，
+        # 预加载代码本身零改动）；merged / bg 的预取照旧，不受定位模式影响。
         for c in [rel, *candidates]:
             doc = self._docs.get(c)
             if doc is None:
@@ -1590,8 +1629,9 @@ class MainWindow(QMainWindow):
                     continue
             if not doc.has_merged():
                 merged_jobs.append((c, target_layer_of(c)))
-            if not doc.has_bg() or not self._all_layers_warm(doc):
-                extra_jobs.append((c, WARM_ALL))
+            warm_spec = self._extra_warm_spec(doc)
+            if warm_spec is not None:
+                extra_jobs.append((c, warm_spec))
 
         self._preload_targets = {r for r, _ in merged_jobs}
         self._extra_targets = {r for r, _ in extra_jobs}
@@ -1613,6 +1653,23 @@ class MainWindow(QMainWindow):
         # 内存策略：窗口外完整文档对象驱逐（psd-tools 结构 ≈ 文件大小，
         # 是最大的随书增长内存池）。驱逐后重看时 _ensure_doc 惰性重建。
         self._evict_outside_window(keep)
+
+    def _extra_warm_spec(self, doc: PSDDocument) -> Optional[str]:
+        """阶段 B 该给这个文档排什么任务（None = 不需要排队）。
+
+        - ``WARM_ALL``：视觉定位模式且图层边界还没算过 → 背景图 + 全部图层；
+        - ``""``：只需背景图（快速定位模式，或图层已预热完但 bg 还没有）；
+        - ``None``：背景图与图层都齐了。
+
+        返回值直接作为预加载任务的 ``layer_id``：空串会命中
+        ``PreloadWorker._warm_layer("")`` 的早退分支（只做 ``prepare_bg``），
+        因此本模块不需要给预加载线程传"定位模式"。
+        """
+        if self._layers_need_warm() and not self._all_layers_warm(doc):
+            return WARM_ALL
+        if not doc.has_bg():
+            return ""
+        return None
 
     @staticmethod
     def _all_layers_warm(doc: PSDDocument) -> bool:
@@ -1751,7 +1808,12 @@ class MainWindow(QMainWindow):
             self._evict_retries = 0
 
     def _update_preload_label(self) -> None:
-        """两阶段独立显示：图像预加载（A）在左、图层预热（B）在右。"""
+        """两阶段独立显示：图像预加载（A）在左、阶段 B 在右。
+
+        阶段 B 随定位模式变化：视觉模式是「图层预热」（背景图 + 全部图层的
+        视觉边界），快速模式只剩背景图 —— 文案必须如实反映，不能把
+        "没有预热"说成"预热完成"。
+        """
         if self.task is None or not self._preload_scheduled:
             self.preload_label.setText("")
             self.warmup_label.setText("")
@@ -1762,11 +1824,19 @@ class MainWindow(QMainWindow):
         else:
             self.preload_label.setText("图像预加载完成")
             self.preload_label.setStyleSheet("color: #4caf50;")
+        warm_layers = self._layers_need_warm()
         if self._extra_targets:
-            self.warmup_label.setText(f"图层预热中…（{len(self._extra_targets)}）")
+            text = (
+                f"图层预热中…（{len(self._extra_targets)}）"
+                if warm_layers
+                else f"背景图准备中…（{len(self._extra_targets)}）"
+            )
+            self.warmup_label.setText(text)
             self.warmup_label.setStyleSheet("color: #f5a623;")
         else:
-            self.warmup_label.setText("图层预热完成")
+            self.warmup_label.setText(
+                "图层预热完成" if warm_layers else "背景图就绪（快速定位：图层不预热）"
+            )
             self.warmup_label.setStyleSheet("color: #4caf50;")
 
     def _select_layer_internal(self, index: int) -> None:
@@ -1788,7 +1858,11 @@ class MainWindow(QMainWindow):
         self.viewer.set_issues(self._viewer_issues())
         self._refresh_viewer_outline()
         # 自动定位 + 自动缩放（需求 §17、§20；bg / bg 拷贝 可用独立比例，§20.2）
-        self.viewer.recenter_on_layer(info, self._effective_display_ratio(info))
+        self.viewer.recenter_on_layer(
+            info,
+            self._effective_display_ratio(info),
+            self.settings.position_mode,
+        )
         self._refresh_issue_panel()
         self.viewer.setFocus()
 
@@ -1807,13 +1881,16 @@ class MainWindow(QMainWindow):
             self._switch_file(self.task.files[idx].relative_path)
 
     def _request_layer_switch(self, index: int) -> None:
-        """图层切换入口：视觉边界已预热走快路径；
-        否则交后台线程预热（进度框，UI 不冻结）。"""
+        """图层切换入口：可直接定位走快路径；否则交后台线程预热（进度框）。
+
+        「可直接定位」在视觉模式下 = 视觉边界已算过；快速模式下恒为真
+        （定位只读 PSD 图层原始框，根本不需要预热）。
+        """
         doc = self.current_doc
         if doc is None or not (0 <= index < len(doc.layers)):
             return
         info = doc.layers[index]
-        if info.has_visual_bounds():
+        if self._layer_ready(info):
             self._select_layer_internal(index)
             self._refresh_layer_selection()
             self._mark_dirty()
@@ -1866,7 +1943,11 @@ class MainWindow(QMainWindow):
         if doc is None or not (0 <= self._current_index < len(doc.layers)):
             return
         info = doc.layers[self._current_index]
-        self.viewer.recenter_on_layer(info, self._effective_display_ratio(info))
+        self.viewer.recenter_on_layer(
+            info,
+            self._effective_display_ratio(info),
+            self.settings.position_mode,
+        )
 
     # ================================================================= 监制操作（需求 §14～§16）
 
@@ -2114,11 +2195,12 @@ class MainWindow(QMainWindow):
         self._after_issue_draw(rearm_type=None)
 
     def auto_box_current_layer(self) -> None:
-        """自动框选当前图层：按视觉边界自动生成红框（拖框模式内可用）。
+        """自动框选当前图层：按定位目标矩形自动生成红框（拖框模式内可用）。
 
-        矩形 = 蓝色虚线框（图层视觉边界）上下左右各外扩 5 像素，对称外扩，
-        因此中心与虚线框中心完全一致。随后走与手动拖框完全相同的流程：
-        已选问题类型 → 直接建该类型；否则弹对话框选类型。
+        矩形跟随「图层定位依据」（与定位、蓝色虚线框同源）：视觉模式下是
+        视觉边界，快速模式下是 PSD 图层原始框；上下左右各外扩 5 像素，
+        对称外扩，因此中心与虚线框中心完全一致。随后走与手动拖框完全相同的
+        流程：已选问题类型 → 直接建该类型；否则弹对话框选类型。
         """
         if self.task is None or self.current_doc is None or self._current_index < 0:
             return
@@ -2138,7 +2220,7 @@ class MainWindow(QMainWindow):
             )
             return
         info = self.current_doc.layers[self._current_index]
-        rect = auto_box_rect(info)
+        rect = auto_box_rect(info, position_mode=self.settings.position_mode)
         if rect is None:
             self.statusBar().showMessage(
                 f"自动框选：图层「{info.name}」没有可框选的内容", 5000
@@ -2223,10 +2305,14 @@ class MainWindow(QMainWindow):
         self.viewer.set_issues(self._viewer_issues())
 
     def _refresh_viewer_outline(self) -> None:
-        """刷新当前图层视觉边界虚线框（蓝框，设置中可关闭）。
+        """刷新当前图层的蓝色虚线框（设置中可关闭）。
 
-        世界坐标 (left, top, right, bottom) 由 camera.centering 统一换算；
-        关闭设置、无文档、无当前图层或图层无有效像素时一律传 None（不绘制）。
+        框的语义随「图层定位依据」变化，始终与本次居中用的矩形同源：
+
+        - 视觉模式：视觉内容边界（世界坐标由 camera.centering 换算）；
+        - 快速模式：PSD 图层原始框（不解像素）。
+
+        关闭设置、无文档、无当前图层、或矩形无效时一律传 None（不绘制）。
         """
         doc = self.current_doc
         info = (
@@ -2236,7 +2322,10 @@ class MainWindow(QMainWindow):
         )
         outline = None
         if info is not None and self.settings.show_layer_outline:
-            outline = layer_visual_bounds(info)
+            if self.settings.position_mode == POSITION_FAST:
+                outline = position_bounds(info, POSITION_FAST)
+            else:
+                outline = layer_visual_bounds(info)
         self.viewer.set_layer_outline(outline)
 
     def _viewer_issues(self) -> List[Issue]:
@@ -2702,6 +2791,7 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self, intro: str = "") -> None:
         dialog = SettingsDialog(self.settings, self, intro=intro)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
+            old_position_mode = self.settings.position_mode
             dialog.apply_to(self.settings)
             self._save_settings()
             self._rebuild_shortcuts()
@@ -2709,10 +2799,15 @@ class MainWindow(QMainWindow):
             self._apply_memory_policy()   # 内存策略档位热应用
             self.viewer.set_wheel_mode(self.settings.wheel_mode)
             self._refresh_viewer_issues()  # 红框显示范围（整页/仅当前图层）热应用
-            self._refresh_viewer_outline()  # 蓝色虚线边界框开关热应用
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))
-            self.recenter_current_layer()
+            # 定位依据可能变了：蓝框语义、预热策略、当前视图都要跟着变
+            mode_changed = old_position_mode != self.settings.position_mode
+            if mode_changed:
+                self._on_position_mode_changed(old_position_mode)
+            else:
+                self._refresh_viewer_outline()  # 蓝色虚线边界框开关热应用
+                self.recenter_current_layer()
             # 控制台开关即时生效（打包产物下隐藏/恢复控制台窗口）。
             # AllocConsole 可能阻塞数百毫秒，放后台线程避免 UI 卡顿。
             import threading
@@ -2725,6 +2820,37 @@ class MainWindow(QMainWindow):
                 daemon=True,
             ).start()
             self._notify_ui_scale_restart_needed()
+
+    def _on_position_mode_changed(self, old_mode: str) -> None:
+        """「图层定位依据」热切换：刷新蓝框/视图，并重新排预加载队列。
+
+        切到快速模式：重新定位立即生效，预热队列改回"只补背景图"；
+        切回视觉模式：当前图层若还没算过视觉边界，走带进度框的异步路径
+        （`_request_layer_switch`），避免在 UI 线程里解图层像素造成冻结。
+        """
+        self._refresh_position_mode_ui()
+        doc = self.current_doc
+        current = (
+            doc.layers[self._current_index]
+            if doc is not None and 0 <= self._current_index < len(doc.layers)
+            else None
+        )
+        if current is not None and not self._layer_ready(current):
+            # 切回视觉模式且当前层未预热：异步预热后自动定位（进度框可见）
+            self._request_layer_switch(self._current_index)
+        else:
+            self._refresh_viewer_outline()
+            self.recenter_current_layer()
+        if self.task is not None and self._current_file:
+            self._schedule_preloads(self._current_file)
+        fast = self.settings.position_mode == POSITION_FAST
+        self.statusBar().showMessage(
+            "定位依据：PSD 图层原始框（快速）——零像素解析，居中精度有限"
+            if fast
+            else "定位依据：视觉内容边界（精准）——按图层实际内容居中",
+            5000,
+        )
+        log.info("定位依据切换：%s → %s", old_mode, self.settings.position_mode)
 
     def _notify_ui_scale_restart_needed(self) -> None:
         """界面缩放（Android 专有）改动后提示需重启应用。
