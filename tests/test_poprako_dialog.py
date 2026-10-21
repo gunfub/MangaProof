@@ -202,7 +202,7 @@ def test_window_geometry_matches_settings_spec(qapp, tmp_path):
 
 
 def test_window_ratio_matches_main_window(qapp, tmp_path):
-    """默认尺寸与主界面同比例（主窗口 1440×900 = 1.6 → 960×600）。"""
+    """默认尺寸与主界面同比例（主窗口 1440×900 = 1.6 → 1088×680）。"""
     dialog = open_dialog(tmp_path, make_task("001.psd"))
     try:
         width, height = DEFAULT_DIALOG_SIZE
