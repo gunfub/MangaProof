@@ -21,6 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from mangaproof.camera.centering import (
+    POSITION_FAST,
+    POSITION_MODES,
+    POSITION_VISUAL,
+)
 from mangaproof.config import paths
 from mangaproof.poprako import API_BASE_URL as _POPRAKO_API_BASE_URL
 from mangaproof.utils.platform import is_android_strict
@@ -222,6 +227,13 @@ DEFAULT_ISSUE_SCOPE = "page"
 # 关闭后画布上不再绘制该框（定位、缩放行为完全不受影响）。
 DEFAULT_SHOW_LAYER_OUTLINE = True
 
+# 图层定位依据（需求 §17、§18）：
+# - POSITION_VISUAL：视觉内容包围盒（解像素，居中更准）——**桌面默认**；
+# - POSITION_FAST：直接取 PSD 图层自带的 x/y/w/h（零像素解析，快、省内存，
+#   有透明留白/蒙版/特效时居中精度有限）——**Android 默认**（内存与算力更紧）。
+# 缺键时的落到哪个由 default_position_mode() 按平台决定，见下方函数。
+DEFAULT_POSITION_MODE = POSITION_VISUAL
+
 # 连续标注：默认关闭——进入拖框模式（红框模式 R / 问题类型快捷键）后，
 # 标完一个问题即自动退出该模式；开启后问题面板右侧按钮常驻高亮，
 # 可连续拖框标注（问题类型快捷键则保持同一类型待标）。
@@ -335,6 +347,21 @@ def first_run_banner() -> str:
     if android_memory_policy_locked():
         return FIRST_RUN_BANNER_ANDROID
     return FIRST_RUN_BANNER_DESKTOP
+
+
+def default_position_mode() -> str:
+    """当前平台的默认「图层定位依据」。
+
+    - 桌面（Windows / Linux / macOS）：``POSITION_VISUAL`` —— 视觉内容边界，
+      居中更准；桌面内存/算力宽裕，精度优先。
+    - Android：``POSITION_FAST`` —— 直接取 PSD 图层原始框，零像素解析；
+      移动端内存与算力更紧，速度与占用优先（精度取舍见 centering.py 文档）。
+
+    与 default_ui_scale / default_memory_policy 同一条约定：缺键时读这里的
+    平台默认，设置页「恢复默认」也回到这里的值，保证"显示的档位 = 生效的档位"。
+    """
+    return POSITION_FAST if is_android_strict() else POSITION_VISUAL
+
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +842,10 @@ class Settings:
     issue_scope: str = DEFAULT_ISSUE_SCOPE     # "page"（当前页全部）/ "layer"（仅当前图层）
     # 当前图层视觉边界虚线框（蓝色）是否显示（默认显示）
     show_layer_outline: bool = DEFAULT_SHOW_LAYER_OUTLINE
+    # 图层定位依据：POSITION_VISUAL（视觉边界，精准）/ POSITION_FAST（原始框，零解析）。
+    # 这里写的是**与平台无关**的默认值；实际缺键默认由 default_position_mode()
+    # 按平台给（Android 快速、桌面视觉），见 _default_settings / _from_dict。
+    position_mode: str = DEFAULT_POSITION_MODE
     # 连续标注（默认关：标完一个问题自动退出拖框模式）
     continuous_annotation: bool = DEFAULT_CONTINUOUS_ANNOTATION
     recursive_scan: bool = False
@@ -1005,9 +1036,11 @@ class SettingsManager:
 
         界面缩放取**平台默认**（Android 0.75 / 桌面 1.0），与 resolve_ui_scale()
         保持一致——这样设置页显示的档位就是本次启动实际生效的档位。
+        图层定位依据同理：桌面视觉边界、Android 快速原始框。
         """
         s = Settings()
         s.ui_scale = default_ui_scale()
+        s.position_mode = default_position_mode()
         return s
 
     def _from_dict(self, raw: dict[str, Any]) -> Settings:
@@ -1044,6 +1077,12 @@ class SettingsManager:
 
         s.show_layer_outline = bool(
             raw.get("show_layer_outline", DEFAULT_SHOW_LAYER_OUTLINE)
+        )
+        # 缺键 / 非法值 → **平台默认**（桌面视觉、Android 快速）；显式写过
+        # "visual"/"fast" 的一律照用户的选择，Android 上也不强制覆盖。
+        position_mode = raw.get("position_mode")
+        s.position_mode = (
+            position_mode if position_mode in POSITION_MODES else default_position_mode()
         )
         s.continuous_annotation = bool(
             raw.get("continuous_annotation", DEFAULT_CONTINUOUS_ANNOTATION)
@@ -1145,6 +1184,7 @@ class SettingsManager:
                     "wheel_mode": self.settings.wheel_mode,
                     "issue_scope": self.settings.issue_scope,
                     "show_layer_outline": self.settings.show_layer_outline,
+                    "position_mode": self.settings.position_mode,
                     "continuous_annotation": self.settings.continuous_annotation,
                     "recursive_scan": self.settings.recursive_scan,
                     "generate_pdf_on_complete": self.settings.generate_pdf_on_complete,
