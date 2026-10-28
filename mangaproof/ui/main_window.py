@@ -1461,12 +1461,13 @@ class MainWindow(QMainWindow):
         )
 
         if not layer_ids:
+            # 0 图层文件（需求 §88）：没有图层 → 没有定位目标，用**画布**兜底，
+            # 一律摆成整页视角。**不看「自动定位与缩放」开关**：这类页唯一的视角
+            # 就是整页，开关在这里没有可切换的对象（见 docs/自动定位开关_技术设计.md）。
             self._current_index = -1
             self.viewer.set_issues(self._viewer_issues())
             self._refresh_viewer_outline()
-            # 零图层文件也要有可看的视图：自动定位关闭时同样回到整页视角
-            if not self.settings.auto_locate:
-                self._fit_page_view()
+            self._fit_page_view()
             return
 
         index = self._choose_layer_index(rel, restore)
@@ -1985,9 +1986,15 @@ class MainWindow(QMainWindow):
         不受「切换图层时自动定位与缩放」影响：开关关掉后，这是把画布拉回当前
         图层的唯一入口。比例恒用**全局**显示比例（关闭期间 bg 独立比例不生效，
         见 _effective_display_ratio）。
+
+        文档在、但**没有当前图层**时（0 图层文件，需求 §88）退化成整页视角——
+        这类页没有图层可定位，按钮不该点了没反应。
         """
         doc = self.current_doc
-        if doc is None or not (0 <= self._current_index < len(doc.layers)):
+        if doc is None:
+            return
+        if not (0 <= self._current_index < len(doc.layers)):
+            self._fit_page_view()
             return
         info = doc.layers[self._current_index]
         self.viewer.recenter_on_layer(
@@ -1997,7 +2004,12 @@ class MainWindow(QMainWindow):
         )
 
     def _fit_page_view(self) -> None:
-        """整页基准视角：整页居中 + 显示比例 100%（自动定位关闭时用）。
+        """整页基准视角：整页居中 + 显示比例 100%。
+
+        两个调用场景：
+        - 「自动定位与缩放」关闭时的翻页 / 打开文件（见 _open_file_internal）；
+        - **0 图层文件**（需求 §88）：没有图层可定位，只能用画布兜底——
+          与开关无关，这类页永远按整页显示。
 
         模板取**画布** ``(0, 0, W, H)``，不查 bg：`bg_layer_id()` 的回退分支要解
         图层像素（UI 线程 0.3～1s），而正常 PSD 里 bg 边界与画布逐像素相同。
