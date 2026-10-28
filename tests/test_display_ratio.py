@@ -64,7 +64,7 @@ app = QApplication.instance() or QApplication([])
 
 def test_display_ratios_cover_ten_and_hundred_percent():
     assert DISPLAY_RATIOS[0] == 0.1, "2026-09-25：新增 10% 档"
-    assert DISPLAY_RATIOS[-1] == 1.0, "2026-09-25：新增 100% 档（最长边铺满视口）"
+    assert DISPLAY_RATIOS[-1] == 1.0, "2026-09-25：新增 100% 档（2026-10 起 100% = contain 完整装下）"
     assert DISPLAY_RATIOS == sorted(DISPLAY_RATIOS), "档位必须升序"
     assert len(set(DISPLAY_RATIOS)) == len(DISPLAY_RATIOS), "档位不许重复"
     assert DEFAULT_DISPLAY_RATIO in DISPLAY_RATIOS, "默认值必须在档位表里"

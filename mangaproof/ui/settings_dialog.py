@@ -79,6 +79,7 @@ from mangaproof.config.settings import (
     DEFAULT_BG_COPY_DISPLAY_RATIO,
     DEFAULT_BG_DISPLAY_RATIO,
     DEFAULT_BG_RATIO_ENABLED,
+    DEFAULT_COMPARE_FORM,
     DEFAULT_COMPARE_MODE,
     DEFAULT_COMPARE_SPEED_HZ,
     DEFAULT_DISPLAY_RATIO,
@@ -118,7 +119,7 @@ from mangaproof.ui.widgets import NoWheelComboBox, ToggleSwitch
 #: 顺序即侧边栏顺序，键同时是 page_widgets / page_rows / page_scrolls 的键。
 PAGES: Dict[str, tuple[str, str]] = {
     "display": ("缩放与标注显示", "画布上的自动缩放与叠加显示"),
-    "compare": ("对比呈现", "Original 与背景的闪切方式与速度"),
+    "compare": ("对比呈现", "对比形式（闪切 / 左右并排）与闪切方式、速度"),
     "task": ("扫描与运行策略", "打开任务时的扫描方式、控制台窗口与内存回收"),
     "report": ("返修单参数", "完成监制后自动生成的返修单：名称、页面图像与总览"),
     "shortcut": ("快捷键与滚轮", "核心 / 问题类型快捷键，以及不按修饰键时的滚轮行为"),
@@ -712,8 +713,9 @@ class SettingsDialog(QDialog):
         idx = self.ratio_combo.findData(current_ratio)
         self.ratio_combo.setCurrentIndex(max(0, idx))
         self.ratio_combo.setToolTip(
-            "自动缩放的目标比例：定位当前图层 / 切换图层 / 翻页时，把该图层最长边\n"
-            "缩放到视口对应尺寸的这个比例（100% = 正好铺满视口）。\n"
+            "自动缩放的目标比例：定位当前图层 / 切换图层 / 翻页时，把该图层\n"
+            "完整装进视口后，占视口对应尺寸的这个比例（100% = 正好完整装下，\n"
+            "宽高都不会被裁）。\n"
             "它**不是像素缩放百分比**——状态栏那个「缩放：xx%」才是当前的实际像素缩放；\n"
             "手动滚轮缩放不会被它覆盖，只影响下一次自动定位。"
         )
@@ -769,7 +771,7 @@ class SettingsDialog(QDialog):
             combo.setCurrentIndex(max(0, combo.findData(current)))
         self.bg_ratio_combo.setToolTip(
             "bg 图层（含「没有 bg 名时退回最底部有内容图层」的兜底）的自动显示比例。\n"
-            "默认 100%：最长边正好铺满视口。"
+            "默认 100%：完整装进视口（宽高都不裁）。"
         )
         self.bg_copy_ratio_combo.setToolTip(
             "「bg 拷贝 / bg copy」图层的自动显示比例，默认 100%。\n"
@@ -860,6 +862,21 @@ class SettingsDialog(QDialog):
             )
 
     def _build_compare_page(self, rows: QVBoxLayout) -> None:
+        # 对比形式（2026-10）：闪切 / 左右并排。并排是**显示模式**，不是开关；
+        # 选中后 Space 静默无效，模式随设置持久化（A3/A4/A5/F2）。
+        self.compare_form_combo = NoWheelComboBox()
+        self.compare_form_combo.addItem("闪切（Original ↔ 背景，定时/手动）", "flash")
+        self.compare_form_combo.addItem("左右并排（左原图 / 右成品图）", "split")
+        form_idx = self.compare_form_combo.findData(self._settings.compare_form)
+        self.compare_form_combo.setCurrentIndex(max(0, form_idx))
+        self.compare_form_combo.setToolTip(
+            "闪切：在成品图与原图之间定时/手动来回切换。\n"
+            "左右并排：画布固定分成两栏，左栏原图、右栏成品图，共享位置与缩放；\n"
+            "它是独立的显示模式——分屏下 Space 不再触发闪切，改回闪切请回到这里。\n"
+            "模式会写入配置文件，重启后保持。"
+        )
+        self._add_row(rows, "对比形式：", self.compare_form_combo, expand=True)
+
         self.compare_mode_combo = NoWheelComboBox()
         self.compare_mode_combo.addItem("自动切换（定时来回闪切）", "auto")
         self.compare_mode_combo.addItem("手动切换（按一下切一次）", "manual")
@@ -880,12 +897,17 @@ class SettingsDialog(QDialog):
             )
         speed_idx = self.compare_speed_combo.findData(current_hz)
         self.compare_speed_combo.setCurrentIndex(max(0, speed_idx))
-        self.compare_speed_combo.setToolTip("手动切换模式下无需设定速度")
-        self._add_row(rows, "切换速度：", self.compare_speed_combo, expand=True)
-        self.compare_mode_combo.currentIndexChanged.connect(
-            self._update_compare_speed_enabled
+        self.compare_speed_combo.setToolTip(
+            "手动切换 / 左右并排模式下无需设定速度"
         )
-        self._update_compare_speed_enabled()
+        self._add_row(rows, "切换速度：", self.compare_speed_combo, expand=True)
+        self.compare_form_combo.currentIndexChanged.connect(
+            self._update_compare_enabled
+        )
+        self.compare_mode_combo.currentIndexChanged.connect(
+            self._update_compare_enabled
+        )
+        self._update_compare_enabled()
 
     def _build_task_page(self, rows: QVBoxLayout) -> None:
         self.recursive_check = ToggleSwitch()
@@ -1032,9 +1054,12 @@ class SettingsDialog(QDialog):
 
     # -- 自动对比联动 ------------------------------------------------------
 
-    def _update_compare_speed_enabled(self) -> None:
+    def _update_compare_enabled(self) -> None:
+        """并排时「对比模式 / 切换速度」整行置灰（值保留）；闪切手动挡只灰速度。"""
+        split = self.compare_form_combo.currentData() == "split"
         manual = self.compare_mode_combo.currentData() == "manual"
-        self.compare_speed_combo.setEnabled(not manual)
+        self.compare_mode_combo.setEnabled(not split)
+        self.compare_speed_combo.setEnabled(not split and not manual)
 
     def _update_bg_ratio_enabled(self) -> None:
         """bg 独立比例仅在**两个**开关都打开时可用（关闭时置灰，值保留）。
@@ -1084,10 +1109,13 @@ class SettingsDialog(QDialog):
         self.bg_ratio_combo.setCurrentIndex(max(0, idx))
         idx = self.bg_copy_ratio_combo.findData(DEFAULT_BG_COPY_DISPLAY_RATIO)
         self.bg_copy_ratio_combo.setCurrentIndex(max(0, idx))
+        idx = self.compare_form_combo.findData(DEFAULT_COMPARE_FORM)
+        self.compare_form_combo.setCurrentIndex(max(0, idx))
         idx = self.compare_mode_combo.findData(DEFAULT_COMPARE_MODE)
         self.compare_mode_combo.setCurrentIndex(max(0, idx))
         idx = self.compare_speed_combo.findData(DEFAULT_COMPARE_SPEED_HZ)
         self.compare_speed_combo.setCurrentIndex(max(0, idx))
+        self._update_compare_enabled()
         idx = self.wheel_mode_combo.findData(DEFAULT_WHEEL_MODE)
         self.wheel_mode_combo.setCurrentIndex(max(0, idx))
         idx = self.issue_scope_combo.findData(DEFAULT_ISSUE_SCOPE)
@@ -1140,6 +1168,7 @@ class SettingsDialog(QDialog):
         settings.bg_ratio_enabled = self.bg_ratio_check.isChecked()
         settings.bg_display_ratio = float(self.bg_ratio_combo.currentData())
         settings.bg_copy_display_ratio = float(self.bg_copy_ratio_combo.currentData())
+        settings.compare_form = str(self.compare_form_combo.currentData())
         settings.compare_mode = str(self.compare_mode_combo.currentData())
         settings.compare_speed_hz = int(self.compare_speed_combo.currentData())
         settings.wheel_mode = str(self.wheel_mode_combo.currentData())

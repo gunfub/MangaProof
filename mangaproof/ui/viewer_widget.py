@@ -16,7 +16,7 @@ import logging
 from typing import List, Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QEvent
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QEvent, QTimer
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -30,11 +30,14 @@ from mangaproof.camera.centering import POSITION_VISUAL, position_bounds
 from mangaproof.camera.zoom import fit_zoom
 from mangaproof.psd.document import PSDDocument
 from mangaproof.review.issue import Issue
+from mangaproof.ui.split_view import Pane, SplitLayout
 from mangaproof.ui.theme import (
     COLOR_ACCENT,
+    COLOR_BORDER,
     COLOR_CHECKER_A,
     COLOR_CHECKER_B,
     COLOR_FAIL,
+    COLOR_TEXT,
     COLOR_TEXT_DIM,
 )
 
@@ -112,6 +115,17 @@ class ViewerWidget(QWidget):
         self._camera = Camera()
         self._qimages: dict = {}          # (doc_id, source) -> QImage
 
+        # 左右并排（2026-10，第二种对比形态）：固定 50/50 + 4px 分隔。
+        # 它是**显示模式**而不是对比开关：模式由设置 compare_form 决定，
+        # 这里只保存当前是否分栏；没有"进入/退出"的瞬态。
+        self._split_mode = False
+        self._split_layout = SplitLayout()
+        # 分屏角标：切到分屏 / 首个任务时显示 3 秒；无任务时常显（Q3/Q5）
+        self._labels_visible = False
+        self._labels_timer = QTimer(self)
+        self._labels_timer.setSingleShot(True)
+        self._labels_timer.timeout.connect(self._on_labels_timeout)
+
         self._issues: List[Issue] = []
         self._layer_outline: Optional[Tuple[float, float, float, float]] = None
         # 蓝框线宽（屏幕像素）：由主窗口按设置下发，见 set_outline_pen_width
@@ -121,6 +135,8 @@ class ViewerWidget(QWidget):
         self._drag: Optional[dict] = None
         self._wheel_mode = "pan"   # 裸滚轮行为："pan" 上下移动 / "zoom" 缩放
         self._empty_hint = "未打开任务"   # 未打开/已关闭任务时的画布提示
+        # 分屏时每栏更窄：主窗口给一份"每个快捷键一行"的版式，避免在词中间折行
+        self._split_empty_hint = ""
 
     def set_wheel_mode(self, mode: str) -> None:
         """裸滚轮（不按修饰键）行为：'pan' 上下移动 / 'zoom' 缩放。
@@ -129,9 +145,14 @@ class ViewerWidget(QWidget):
         """
         self._wheel_mode = mode if mode in ("pan", "zoom") else "pan"
 
-    def set_empty_hint(self, text: str) -> None:
-        """无文档时画布中央的提示文案（由主窗口按当前快捷键绑定生成）。"""
+    def set_empty_hint(self, text: str, split_text: Optional[str] = None) -> None:
+        """无文档时画布中央的提示文案（由主窗口按当前快捷键绑定生成）。
+
+        ``split_text``：分屏时每栏各画一份。半栏更窄，主窗口会把两个快捷键
+        拆成两行，避免 Qt 在"打开漫画文件夹"这种长词中间折行。
+        """
         self._empty_hint = text
+        self._split_empty_hint = text if split_text is None else split_text
         if self._doc is None:
             self.update()
 
@@ -139,6 +160,58 @@ class ViewerWidget(QWidget):
     def empty_hint(self) -> str:
         """当前空画布提示（仅供测试/调试）。"""
         return self._empty_hint
+
+    @property
+    def split_empty_hint(self) -> str:
+        """分屏空画布提示（仅供测试/调试）。"""
+        return self._split_empty_hint
+
+    # -- 左右并排（第二种对比形态） ---------------------------------------
+
+    def set_split_mode(self, enabled: bool) -> None:
+        """切换左右并排显示模式。
+
+        - 开启时若已有文档：角标显示 3 秒（Q3：设置页切到并排并保存后）；
+          若还没有文档：角标常显（Q5），等首个文档打开后再转为 3 秒计时；
+        - 关闭时：停计时、强制回 merged（分屏期间源切换不影响绘制，
+          退出分屏必须回到单栏的成品图）。
+        """
+        enabled = bool(enabled)
+        if enabled == self._split_mode:
+            return
+        self._split_mode = enabled
+        if enabled:
+            if self._doc is not None:
+                self.show_labels(3000)
+            else:
+                self._labels_timer.stop()
+                self._labels_visible = False
+        else:
+            self._labels_timer.stop()
+            self._labels_visible = False
+            self._source = SOURCE_MERGED
+        self.update()
+
+    @property
+    def split_mode(self) -> bool:
+        return self._split_mode
+
+    def show_labels(self, ms: int = 3000) -> None:
+        """让「原图 / 成品图」角标再显示 ``ms`` 毫秒（仅分屏生效）。"""
+        self._labels_visible = True
+        self._labels_timer.start(max(1, int(ms)))
+        self.update()
+
+    def _on_labels_timeout(self) -> None:
+        self._labels_visible = False
+        self.update()
+
+    @property
+    def labels_visible(self) -> bool:
+        """角标当前是否可见：无任务时常显，有任务时看 3 秒计时。"""
+        if not self._split_mode:
+            return False
+        return self._doc is None or self._labels_visible
 
     # ------------------------------------------------------------------ API
 
@@ -151,16 +224,26 @@ class ViewerWidget(QWidget):
         return self._doc
 
     def set_document(self, doc: Optional[PSDDocument]) -> None:
+        had_doc = self._doc is not None
         if doc is not self._doc:
             self._qimages.clear()
         self._doc = doc
+        if doc is None:
+            # 回到无任务：角标转为常显（Q5），计时停掉
+            self._labels_timer.stop()
+            self._labels_visible = False
+        elif not had_doc and self._split_mode:
+            # 无任务 → 首个任务：角标显示 3 秒（Q3）；同任务内换文件不重复显示
+            self.show_labels(3000)
         self.update()
 
     def set_source(self, source: str) -> None:
         if source not in (SOURCE_MERGED, SOURCE_BG):
             source = SOURCE_MERGED
         self._source = source
-        self.update()
+        # 分屏时两栏各自固定源，_source 只留给单栏/闪切；无需重绘
+        if not self._split_mode:
+            self.update()
 
     @property
     def source(self) -> str:
@@ -248,6 +331,10 @@ class ViewerWidget(QWidget):
         （主窗口在「自动定位」关闭时翻页 / 打开文件）都从这里进——两份缩放公式
         各自漂移过一次就很难再对齐。
 
+        视口尺寸随显示模式变化：单栏 = 整个 Viewer，左右并排 = **一栏**。
+        缩放统一用 contain（见 :func:`mangaproof.camera.zoom.fit_zoom`），
+        分屏窄栏下也能完整装下目标。
+
         退化矩形、或 fit_zoom 算不出缩放时**保持当前 Camera**（需求 §18.1）。
         """
         if rect is None:
@@ -256,7 +343,9 @@ class ViewerWidget(QWidget):
         if right <= left or bottom <= top:
             log.info("目标矩形退化 %s，保持当前 Camera", rect)
             return
-        new_zoom = fit_zoom((left, top, right, bottom), (self.width(), self.height()), ratio)
+        new_zoom = fit_zoom(
+            (left, top, right, bottom), self._fit_viewport_size(), ratio
+        )
         if new_zoom is None:
             log.info("目标矩形 %s 无法自动缩放，保持当前 Camera", rect)
             return
@@ -291,8 +380,43 @@ class ViewerWidget(QWidget):
 
     # ------------------------------------------------------------------ 绘制
 
-    def _paint_checkerboard(self, painter: QPainter) -> None:
-        w, h = self.width(), self.height()
+    def _fit_viewport_size(self) -> Tuple[int, int]:
+        """自动定位 / 整页视角的视口：单栏 = 整窗，左右并排 = 一栏。"""
+        if self._split_mode:
+            return self._split_layout.fit_size(self.width(), self.height())
+        return (self.width(), self.height())
+
+    def _left_source(self) -> str:
+        """并排左栏的源：有 bg 用 bg，否则回退 merged。
+
+        关键：这里**不主动触发** ``bg_image()`` 的像素提取。阶段 B 预加载还没
+        跑完时在 UI 线程解背景图会卡 0.3～1s；只认"已提取过 / 已注入过"的 bg，
+        其余先显示 merged，等 ``_on_preload_done`` 注入后重绘。
+        """
+        doc = self._doc
+        if doc is None:
+            return SOURCE_MERGED
+        if doc.has_bg():
+            return SOURCE_BG if doc.bg_image() is not None else SOURCE_MERGED
+        if (id(doc), SOURCE_BG) in self._qimages:
+            return SOURCE_BG
+        return SOURCE_MERGED
+
+    def _panes(self) -> List[Pane]:
+        """当前要绘制的栏。单栏返回整窗 Pane，绘制/命中逻辑无需分支。"""
+        if not self._split_mode or self._doc is None:
+            return [
+                Pane(
+                    QRectF(0.0, 0.0, float(self.width()), float(self.height())),
+                    self._source,
+                    "",
+                )
+            ]
+        return self._split_layout.panes(
+            self.width(), self.height(), self._left_source(), SOURCE_MERGED
+        )
+
+    def _paint_checkerboard(self, painter: QPainter, w: int, h: int) -> None:
         for y in range(0, h, CHECKER_SIZE):
             for x in range(0, w, CHECKER_SIZE):
                 even = ((x // CHECKER_SIZE) + (y // CHECKER_SIZE)) % 2 == 0
@@ -301,19 +425,24 @@ class ViewerWidget(QWidget):
                     QColor(COLOR_CHECKER_A if even else COLOR_CHECKER_B),
                 )
 
-    def _draw_empty_hint(self, painter: QPainter) -> None:
-        """未打开 / 已关闭任务：棋盘格上给出下一步指引，不留一块无信息的空画布。
+    def _draw_empty_hint(
+        self, painter: QPainter, text: str, w: int, h: int
+    ) -> None:
+        """未打开 / 已关闭任务：棋盘格上给出下一步指引。
 
-        文案由主窗口按「当前快捷键绑定」生成（set_empty_hint），改绑后同步。
+        文案由主窗口按「当前快捷键绑定」生成（set_empty_hint）。分屏时用
+        "每个快捷键一行"的版式并允许按栏宽换行，避免半栏里在长词中间折断。
         """
-        if not self._empty_hint:
+        if not text:
             return
         painter.setPen(QColor(COLOR_TEXT_DIM))
         font = painter.font()
         font.setPointSizeF(max(font.pointSizeF(), 11.0))
         painter.setFont(font)
         painter.drawText(
-            self.rect(), Qt.AlignmentFlag.AlignCenter, self._empty_hint
+            QRectF(16.0, 16.0, max(1.0, w - 32.0), max(1.0, h - 32.0)),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+            text,
         )
 
     def _qimage(self, source: str) -> Optional[QImage]:
@@ -343,10 +472,13 @@ class ViewerWidget(QWidget):
     def inject_qimage(self, doc, source: str, qimage: QImage) -> None:
         """注入后台线程预热好的显示图像（免去首帧转换开销）。"""
         self._qimages[(id(doc), source)] = qimage
+        # 分屏左栏可能正在等阶段 B 的 bg：注入后立刻重绘，从 merged 切到原图
+        if doc is self._doc and self._split_mode and source == SOURCE_BG:
+            self.update()
 
-    def _source_offset(self) -> Tuple[float, float]:
+    def _source_offset(self, source: str) -> Tuple[float, float]:
         """bg 图层裁剪像素相对世界坐标的偏移（merged 为 0,0）。"""
-        if self._source == SOURCE_BG and self._doc is not None:
+        if source == SOURCE_BG and self._doc is not None:
             bg = self._doc.bg_image()
             if bg is not None:
                 return float(bg[0]), float(bg[1])
@@ -359,35 +491,54 @@ class ViewerWidget(QWidget):
         # - zoom >= 100%：最近邻采样，放大显示清晰的像素块，不糊。
         smooth = smooth_scaling_for(self._camera.zoom)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, smooth)
-        self._paint_checkerboard(painter)
 
         if self._doc is None:
-            self._draw_empty_hint(painter)
+            self._paint_empty(painter)
             painter.end()
             return
 
-        vw, vh = self.width(), self.height()
+        # 单栏跑 1 次、并排跑 2 次：每栏自带棋盘格 + 图像 + Overlay，
+        # 共享同一份 Camera（左右位置、缩放永远一致）。
+        for pane in self._panes():
+            painter.save()
+            painter.setClipRect(pane.rect)      # 越界的图像/橡皮筋不串到另一栏
+            painter.translate(pane.rect.topLeft())
+            vw, vh = pane.size_px()
+            self._paint_checkerboard(painter, vw, vh)
+            self._paint_image(painter, pane.source, vw, vh)
+            self._paint_overlays(painter, vw, vh)
+            painter.restore()
 
-        # 显示图像（merged ↔ bg，需求 §23：对比期间仅切换显示源）
-        qimg = self._qimage(self._source)
-        if qimg is not None:
-            ox, oy = self._source_offset()
-            w, h = qimg.width(), qimg.height()
-            sx0, sy0 = self._camera.world_to_screen(ox, oy, vw, vh)
-            sx1, sy1 = self._camera.world_to_screen(ox + w, oy + h, vw, vh)
-            if not smooth:
-                # 最近邻 + 设备像素取整：像素块边缘锐利、尺寸均匀
-                dpr = self.devicePixelRatioF()
-                sx0 = round(sx0 * dpr) / dpr
-                sy0 = round(sy0 * dpr) / dpr
-                sx1 = round(sx1 * dpr) / dpr
-                sy1 = round(sy1 * dpr) / dpr
-            painter.drawImage(
-                QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0),
-                qimg,
-                QRectF(0, 0, w, h),
-            )
+        self._paint_divider(painter)
+        self._paint_labels(painter)
+        painter.end()
 
+    # -- 分栏绘制 ----------------------------------------------------------
+
+    def _paint_image(self, painter: QPainter, source: str, vw: int, vh: int) -> None:
+        """画一栏的显示源（merged / bg），带世界坐标偏移与最近邻取整。"""
+        qimg = self._qimage(source)
+        if qimg is None:
+            return
+        ox, oy = self._source_offset(source)
+        w, h = qimg.width(), qimg.height()
+        sx0, sy0 = self._camera.world_to_screen(ox, oy, vw, vh)
+        sx1, sy1 = self._camera.world_to_screen(ox + w, oy + h, vw, vh)
+        if not smooth_scaling_for(self._camera.zoom):
+            # 最近邻 + 设备像素取整：像素块边缘锐利、尺寸均匀
+            dpr = self.devicePixelRatioF()
+            sx0 = round(sx0 * dpr) / dpr
+            sy0 = round(sy0 * dpr) / dpr
+            sx1 = round(sx1 * dpr) / dpr
+            sy1 = round(sy1 * dpr) / dpr
+        painter.drawImage(
+            QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0),
+            qimg,
+            QRectF(0, 0, w, h),
+        )
+
+    def _paint_overlays(self, painter: QPainter, vw: int, vh: int) -> None:
+        """一栏的 Overlay：蓝框、问题红框、拖框橡皮筋（两栏都画）。"""
         # 当前图层视觉边界虚线框（便于识别当前监制对象，可在设置中关闭；
         # 线宽 1～6px 可调，见 config/settings.py 的 OUTLINE_WIDTH_CHOICES）
         rect = outline_screen_rect(self._camera, self._layer_outline, vw, vh)
@@ -402,11 +553,67 @@ class ViewerWidget(QWidget):
         for issue in self._issues:
             self._draw_issue_rect(painter, issue, vw, vh)
 
-        # 拖框橡皮筋
+        # 拖框橡皮筋（两栏同一世界坐标，各画一份；越界由栏裁剪）
         if self._drag and self._drag.get("mode") == "rect":
             self._draw_rubber_band(painter, vw, vh)
 
-        painter.end()
+    def _paint_divider(self, painter: QPainter) -> None:
+        """中间 4px 分隔条（空画布也画）。"""
+        if not self._split_mode:
+            return
+        painter.fillRect(
+            self._split_layout.divider(self.width(), self.height()),
+            QColor(COLOR_BORDER),
+        )
+
+    def _paint_labels(self, painter: QPainter) -> None:
+        """左上角「原图 / 成品图」角标。
+
+        无任务时常显；有任务时只在切到分屏 / 首个任务打开的 3 秒内显示。
+        """
+        if not self.labels_visible:
+            return
+        panes = self._split_layout.panes(
+            self.width(), self.height(), SOURCE_MERGED, SOURCE_MERGED
+        )
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for pane in panes:
+            font = painter.font()
+            font.setPointSizeF(10.0)
+            font.setBold(True)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            chip = QRectF(
+                pane.rect.x() + 10.0,
+                pane.rect.y() + 10.0,
+                fm.horizontalAdvance(pane.label) + 18.0,
+                24.0,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(43, 45, 48, 215))
+            painter.drawRoundedRect(chip, 5.0, 5.0)
+            painter.setPen(QColor(COLOR_TEXT))
+            painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, pane.label)
+
+    def _paint_empty(self, painter: QPainter) -> None:
+        """未打开 / 已关闭任务：单栏一块画布；分屏两块空画布 + 分隔 + 常显角标。"""
+        w, h = self.width(), self.height()
+        if not self._split_mode:
+            self._paint_checkerboard(painter, w, h)
+            self._draw_empty_hint(painter, self._empty_hint, w, h)
+            return
+
+        hint = self._split_empty_hint or self._empty_hint
+        for pane in self._split_layout.panes(w, h, SOURCE_MERGED, SOURCE_MERGED):
+            painter.save()
+            painter.setClipRect(pane.rect)
+            painter.translate(pane.rect.topLeft())
+            pw, ph = pane.size_px()
+            self._paint_checkerboard(painter, pw, ph)
+            self._draw_empty_hint(painter, hint, pw, ph)
+            painter.restore()
+        self._paint_divider(painter)
+        self._paint_labels(painter)
 
     def _draw_issue_rect(self, painter: QPainter, issue: Issue, vw: int, vh: int) -> None:
         x, y, w, h = issue.rect
@@ -450,8 +657,17 @@ class ViewerWidget(QWidget):
 
     # ------------------------------------------------------------------ 鼠标
 
-    def _world_at(self, pos: QPointF) -> Tuple[float, float]:
-        return self._camera.screen_to_world(pos.x(), pos.y(), self.width(), self.height())
+    def _pane_at(self, pos: QPointF) -> Optional[Pane]:
+        """点落在哪一栏；单栏恒为整窗，分屏落进 4px 分隔返回 None。"""
+        if self._doc is None:
+            return None
+        return self._split_layout.pane_at(pos, self._panes())
+
+    def _pane_world(self, pane: Pane, sx: float, sy: float) -> Tuple[float, float]:
+        """屏幕坐标（widget 系）→ 世界坐标，按该栏的局部原点与尺寸换算。"""
+        local = pane.local_pos(QPointF(sx, sy))
+        vw, vh = pane.size_px()
+        return self._camera.screen_to_world(local.x(), local.y(), vw, vh)
 
     def event(self, event: QEvent) -> bool:
         # 捕捉 macOS 触控板原生手势（如双指捏合缩放）
@@ -463,11 +679,15 @@ class ViewerWidget(QWidget):
                 # 我们把它转换为 factor（例如 1.01）传给相机的 zoom_around
                 factor = 1.0 + event.value()
 
-                # 修改此处的坐标获取：先取屏幕全局坐标，再映射为画布内部局部坐标
+                # 先取屏幕全局坐标，再映射为画布内部局部坐标
                 global_pos = event.globalPosition()
-                pos = self.mapFromGlobal(global_pos)
-
-                self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
+                pos = QPointF(self.mapFromGlobal(global_pos.toPoint()))
+                pane = self._pane_at(pos)
+                if pane is None:
+                    return True
+                local = pane.local_pos(pos)
+                vw, vh = pane.size_px()
+                self._camera.zoom_around(local.x(), local.y(), vw, vh, factor)
                 self.camera_changed.emit()
                 self.update()
                 return True
@@ -477,9 +697,16 @@ class ViewerWidget(QWidget):
         if self._doc is None:
             return
         pos = event.position()
+        pane = self._pane_at(pos)
+        if pane is None:          # 4px 分隔条上不开始拖拽
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self.any_issue_mode():
-            wx, wy = self._world_at(pos)
-            self._drag = {"mode": "rect", "x0": wx, "y0": wy, "x1": wx, "y1": wy}
+            wx, wy = self._pane_world(pane, pos.x(), pos.y())
+            self._drag = {
+                "mode": "rect", "pane": pane,
+                "x0": wx, "y0": wy, "x1": wx, "y1": wy,
+            }
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._drag = {
@@ -502,7 +729,10 @@ class ViewerWidget(QWidget):
             self.camera_changed.emit()
             self.update()
         elif self._drag["mode"] == "rect":
-            wx, wy = self._world_at(pos)
+            pane: Pane = self._drag["pane"]
+            # Q9：只把越过中线的 x 截在起手栏内；y 允许越界，由栏裁剪
+            sx = min(max(pos.x(), pane.rect.left()), pane.rect.right())
+            wx, wy = self._pane_world(pane, sx, pos.y())
             self._drag["x1"], self._drag["y1"] = wx, wy
             self.update()
         event.accept()
@@ -537,14 +767,17 @@ class ViewerWidget(QWidget):
 
         pixel_delta = event.pixelDelta()
         angle_delta = event.angleDelta()
+        # 缩放锚点必须落在某一栏内；平移与栏无关，分隔条上也能继续拖
+        pane = self._pane_at(event.position())
 
         # 模式 1：按住 Ctrl(Win) / Cmd(Mac) + 滚轮 -> 缩放逻辑
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             delta = angle_delta.y()
-            if delta != 0:
+            if delta != 0 and pane is not None:
                 factor = 1.25 ** (delta / 120.0)
-                pos = event.position()
-                self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
+                local = pane.local_pos(event.position())
+                vw, vh = pane.size_px()
+                self._camera.zoom_around(local.x(), local.y(), vw, vh, factor)
                 self.camera_changed.emit()
                 self.update()
             event.accept()
@@ -585,10 +818,11 @@ class ViewerWidget(QWidget):
 
         if self._wheel_mode == "zoom":
             delta = angle_delta.y()
-            if delta != 0:
+            if delta != 0 and pane is not None:
                 factor = 1.25 ** (delta / 120.0)
-                pos = event.position()
-                self._camera.zoom_around(pos.x(), pos.y(), self.width(), self.height(), factor)
+                local = pane.local_pos(event.position())
+                vw, vh = pane.size_px()
+                self._camera.zoom_around(local.x(), local.y(), vw, vh, factor)
                 self.camera_changed.emit()
                 self.update()
             event.accept()

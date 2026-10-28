@@ -1208,6 +1208,74 @@ def test_compare_manual_mode_workflow() -> None:
     print("PASS test_compare_manual_mode_workflow")
 
 
+def test_split_mode_workflow() -> None:
+    """左右并排：启动即分屏、Space 静默、左 bg / 右 merged、切回闪切恢复。
+
+    2026-10 第二种对比形态。用真实夹具验证阶段 B 的 bg 注入：
+    打开文件时左栏先回退 merged，bg 就绪后应自动切到原图。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        folder = _copy_fixtures(root / "chapter01")
+
+        sm = SettingsManager(root / "settings.json")
+        sm.settings.compare_form = "split"
+        window = MainWindow(sm)
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+
+        with patch.object(
+            QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok
+        ):
+            window.open_folder(folder)
+        _wait_for_task(window)
+        app.processEvents()
+
+        assert window.settings.compare_form == "split"
+        assert window.viewer.split_mode is True
+        assert len(window.viewer._panes()) == 2
+        assert window.viewer._panes()[1].source == "merged"
+        assert not window.action_compare.isEnabled(), "并排下工具栏仅置灰"
+        assert "对比" not in window.hint_label.text()
+
+        # Space 静默无效（A3/F6）
+        window.toggle_compare()
+        assert not window._compare.is_running
+        assert window.viewer.split_mode is True
+
+        # 阶段 B 的 bg 到达 → 左栏从 merged 切到 bg（不阻塞 UI 线程）
+        doc = window.current_doc
+        deadline = time.time() + 10.0
+        while time.time() < deadline and not (
+            doc.has_bg() and doc.bg_image() is not None
+        ):
+            app.processEvents()
+            time.sleep(0.02)
+        assert doc.bg_image() is not None, "夹具 001.psd 应有可用 bg"
+        app.processEvents()
+        panes = window.viewer._panes()
+        assert panes[0].source == "bg"
+        assert panes[1].source == "merged"
+
+        # 切回闪切：单栏恢复、按钮恢复、底部提示恢复；再切回并排
+        window.settings.compare_form = "flash"
+        window._apply_compare_settings()
+        assert window.viewer.split_mode is False
+        assert window.action_compare.isEnabled()
+        assert "对比" in window.hint_label.text()
+
+        window.settings.compare_form = "split"
+        window._apply_compare_settings()
+        assert window.viewer.split_mode is True
+        assert not window.action_compare.isEnabled()
+
+        _close_window(window)
+        app.processEvents()
+
+    print("PASS test_split_mode_workflow")
+
+
 def test_settings_keybindings_subdialog() -> None:
     """快捷键子对话框：独立编辑/恢复默认；主对话框 OK 才写回。"""
     from PySide6.QtGui import QKeySequence

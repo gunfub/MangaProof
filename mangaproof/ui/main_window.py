@@ -258,6 +258,8 @@ class MainWindow(QMainWindow):
         self.viewer.set_wheel_mode(self.settings.wheel_mode)
         # 蓝框线宽来自设置（应用级默认 3px，Viewer 自身默认 1px）
         self.viewer.set_outline_pen_width(self.settings.layer_outline_width)
+        # 对比形式是持久化的显示模式（不是开关）：启动时就按配置进分屏/单栏
+        self.viewer.set_split_mode(self.settings.compare_form == "split")
         self.viewer.rect_drawn.connect(self._on_rect_drawn)
         self.viewer.issue_drawn.connect(self._on_issue_drawn)
         self.viewer.camera_changed.connect(self._on_camera_changed)
@@ -757,23 +759,36 @@ class MainWindow(QMainWindow):
     def _update_shortcut_hints(self) -> None:
         kb = self.settings.keybindings
         d = self._display_key
-        self.hint_label.setText(
-            f"{d(kb.get('prev_psd', 'Up'))}/{d(kb.get('next_psd', 'Down'))} PSD　"
-            f"{d(kb.get('prev_layer', 'Left'))}/{d(kb.get('next_layer', 'Right'))} 图层　"
-            f"{d(kb.get('pass_layer', 'Return'))} 通过　"
-            f"{d(kb.get('fail_layer', '/'))} 未通过　"
-            f"{d(kb.get('toggle_compare', 'Space'))} 对比　"
-            f"{d(kb.get('cancel_operation', 'Esc'))} 取消　"
-            f"{d(kb.get('save_task', 'Ctrl+S'))} 保存　"
-            f"{d(kb.get('close_task', 'Ctrl+W'))} 关闭　"
-            f"Ctrl+滚轮 缩放　Alt+滚轮 左右移动"
-        )
-        # 空画布（未打开 / 已关闭任务）提示：随当前绑定更新，不写死默认键
+        parts = [
+            f"{d(kb.get('prev_psd', 'Up'))}/{d(kb.get('next_psd', 'Down'))} PSD",
+            f"{d(kb.get('prev_layer', 'Left'))}/{d(kb.get('next_layer', 'Right'))} 图层",
+            f"{d(kb.get('pass_layer', 'Return'))} 通过",
+            f"{d(kb.get('fail_layer', '/'))} 未通过",
+        ]
+        # 左右并排是独立显示模式：Space 静默无效（A3/F6），不再提示"对比"
+        if self.settings.compare_form != "split":
+            parts.append(f"{d(kb.get('toggle_compare', 'Space'))} 对比")
+        parts += [
+            f"{d(kb.get('cancel_operation', 'Esc'))} 取消",
+            f"{d(kb.get('save_task', 'Ctrl+S'))} 保存",
+            f"{d(kb.get('close_task', 'Ctrl+W'))} 关闭",
+            "Ctrl+滚轮 缩放",
+            "Alt+滚轮 左右移动",
+        ]
+        self.hint_label.setText("　".join(parts))
+
+        # 空画布（未打开 / 已关闭任务）提示：随当前绑定更新，不写死默认键。
+        # 分屏版把两个快捷键拆成两行——半栏较窄，整行会在"打开漫画文件夹"中间折行。
+        open_key = d(kb.get("open_psd", "Ctrl+O"))
+        folder_key = d(kb.get("open_folder", "Ctrl+Shift+O"))
         self.viewer.set_empty_hint(
             "未打开任务\n\n"
-            f"{d(kb.get('open_psd', 'Ctrl+O'))}　打开单个 PSD　　"
-            f"{d(kb.get('open_folder', 'Ctrl+Shift+O'))}　打开漫画文件夹\n"
-            "「文件 → 最近打开」可回到打开过的任务"
+            f"{open_key}　打开单个 PSD　　{folder_key}　打开漫画文件夹\n"
+            "「文件 → 最近打开」可回到打开过的任务",
+            "未打开任务\n\n"
+            f"{open_key}　打开单个 PSD\n"
+            f"{folder_key}　打开漫画文件夹\n"
+            "「文件 → 最近打开」可回到打开过的任务",
         )
         # 工具栏/菜单按钮同步显示当前绑定（需求 §30）
         self.action_open_psd.setText(f"打开 PSD ({d(kb.get('open_psd', 'Ctrl+O'))})")
@@ -1507,6 +1522,16 @@ class MainWindow(QMainWindow):
             self._update_preload_label()
             if rel == self._current_file:
                 self._pin_current_bg()   # bg id 此刻已解析，补钉当前页
+                # 左右并排左栏在等 bg：到达后注入并重绘（从 merged 切到原图）。
+                # 不在 paint 里触发提取，避免打开大图时 UI 线程卡 0.3～1s。
+                doc = self.current_doc
+                bg_image = images.get("bg") if images else None
+                if (
+                    self.viewer.split_mode
+                    and doc is not None
+                    and bg_image is not None
+                ):
+                    self.viewer.inject_qimage(doc, SOURCE_BG, bg_image)
             return
         # open 结果：统一按单一 pending 标记分派（文件 / 图层），过期结果丢弃
         pending = self._pending_open
@@ -2013,7 +2038,8 @@ class MainWindow(QMainWindow):
 
         模板取**画布** ``(0, 0, W, H)``，不查 bg：`bg_layer_id()` 的回退分支要解
         图层像素（UI 线程 0.3～1s），而正常 PSD 里 bg 边界与画布逐像素相同。
-        「显示比例 100%」是满档语义（最长边正好铺满视口），与设置项那个比例无关。
+        「显示比例 100%」是 contain 语义（宽、高都能完整装下，都不裁），
+        左右并排时视口是一栏，因此整页会装进半栏；与设置项那个比例无关。
         """
         doc = self.current_doc
         if doc is None:
@@ -2172,6 +2198,10 @@ class MainWindow(QMainWindow):
     # ================================================================= 自动对比（需求 §21～§26）
 
     def toggle_compare(self) -> None:
+        # 左右并排是**显示模式**而不是对比开关：Space 静默无效（A3/F6）。
+        # 切回闪切请到设置页改「对比形式」，模式会写入配置。
+        if self.settings.compare_form == "split":
+            return
         if self.current_doc is None:
             return
         # 预取 bg 图像，避免闪切中途卡顿（需求 §59：不重新读取）
@@ -2197,20 +2227,29 @@ class MainWindow(QMainWindow):
             self.action_compare.setText(f"自动对比 ({key})")
 
     def _apply_compare_settings(self) -> None:
-        """把设置中的对比模式/速度应用到控制器与工具栏按钮。"""
+        """把设置中的对比形式/模式/速度应用到 Viewer、控制器与工具栏。
+
+        - 无论切到手动挡、切到并排还是离开并排，先停定时器并回 merged；
+        - 并排是显示模式：直接改 Viewer，不存在"开/关"瞬态；
+        - 工具栏按钮在并排下仅置灰、文案不改（Q1）；底部提示去掉 Space 对比（Q7）。
+        """
         self._compare.set_interval_ms(
             hz_to_interval_ms(self.settings.compare_speed_hz)
         )
         self._applying_compare_ui = True
         try:
-            if self.settings.compare_mode == "manual":
-                self._compare.interrupt()   # 切到手动挡：停止自动切换并回原图
+            self._compare.interrupt()   # 停止自动切换并回原图
             self.action_compare.setChecked(False)
         finally:
             self._applying_compare_ui = False
-        self._update_compare_action_text()
+        self.viewer.set_split_mode(self.settings.compare_form == "split")
+        self._update_shortcut_hints()   # 内含 _update_compare_action_text
+        self._refresh_enabled_state()   # 并排下 action_compare 置灰
 
     def _on_compare_display_changed(self, state: str) -> None:
+        # 分屏下两栏各自固定源；控制器的 ORIGINAL/BG_ONLY 不参与绘制
+        if self.settings.compare_form == "split":
+            return
         self.viewer.set_source(SOURCE_BG if state == BG_ONLY else SOURCE_MERGED)
 
     def _on_compare_running_changed(self, running: bool) -> None:
@@ -2221,6 +2260,14 @@ class MainWindow(QMainWindow):
 
     def _on_compare_action_toggled(self, checked: bool) -> None:
         if self._applying_compare_ui:
+            return
+        if self.settings.compare_form == "split":
+            # 按钮已置灰，正常点不到；防程序化勾选留下错误状态
+            self._applying_compare_ui = True
+            try:
+                self.action_compare.setChecked(False)
+            finally:
+                self._applying_compare_ui = False
             return
         if self.settings.compare_mode == "manual":
             # 手动挡：按钮不保持勾选状态，每次点击切换一次
@@ -2880,6 +2927,7 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self, intro: str = "") -> None:
         dialog = SettingsDialog(self.settings, self, intro=intro)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
+            old_form = self.settings.compare_form
             old_position_mode = self.settings.position_mode
             old_auto_locate = self.settings.auto_locate
             dialog.apply_to(self.settings)
@@ -2895,6 +2943,14 @@ class MainWindow(QMainWindow):
             self.ratio_combo.setCurrentIndex(max(0, idx))
             # 「定位当前图层」按钮 tooltip 常显当前定位依据 + 自动定位状态
             self._refresh_position_mode_ui()
+            # 对比形式变化 = 视口从整窗变半栏（或反向）：必须按新视口重算一次相机。
+            # 复用布局完成后的 _reposition_after_layout()：auto_locate 开 → 当前图层
+            # 适配新视口；关 → 整页适配新视口（Q8）。
+            form_changed = old_form != self.settings.compare_form
+            if form_changed:
+                self._reposition_after_layout()
+                if self.settings.compare_form == "split":
+                    self.statusBar().showMessage("左原图 / 右成品图", 3000)
             # 定位依据可能变了：蓝框语义、预热策略、当前视图都要跟着变
             mode_changed = old_position_mode != self.settings.position_mode
             if mode_changed:
@@ -2903,7 +2959,8 @@ class MainWindow(QMainWindow):
                 self._refresh_viewer_outline()  # 蓝色虚线边界框开关热应用
                 # 自动定位关闭时改设置**不挪画布**（改个快捷键画布就跳回图层太刺眼）；
                 # 反之把它从关改成开时立刻定位一次，让开关"看得见效果"。
-                if self.settings.auto_locate:
+                # 对比形式刚变过时已经重算过相机，这里不重复跳。
+                if self.settings.auto_locate and not form_changed:
                     self.recenter_current_layer()
             if old_auto_locate != self.settings.auto_locate:
                 log.info("自动定位与缩放：%s", "开" if self.settings.auto_locate else "关")
@@ -3059,7 +3116,10 @@ class MainWindow(QMainWindow):
         self.action_renumber.setEnabled(has_task)
         self.action_report.setEnabled(has_task)
         self.action_redraw.setEnabled(has_task)
-        self.action_compare.setEnabled(has_task)
+        # 并排是独立显示模式：闪切按钮仅置灰，文案不改（Q1）
+        self.action_compare.setEnabled(
+            has_task and self.settings.compare_form != "split"
+        )
         self.action_recenter.setEnabled(has_task)
         self.ratio_combo.setEnabled(has_task)
         if not has_task:

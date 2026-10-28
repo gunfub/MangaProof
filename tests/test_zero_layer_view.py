@@ -10,7 +10,7 @@
 
 2026-10 需求方口径：
 
-- 0 图层文件一律按**画布**居中、显示比例 100%（= 整页铺满视口）；
+- 0 图层文件一律按**画布**居中、显示比例 100%（= 整页完整装进视口，不裁边）；
 - **不受「切换图层时自动定位与缩放」开关影响**：这类页没有可切换的对象，
   开关开或关都是整页视角；
 - 工具栏「定位当前图层」对这类页也要有反应（退化成整页视角），不能点了没反应。
@@ -122,7 +122,7 @@ def test_open_zero_layer_file_fits_whole_page(window, auto_locate):
     cx, cy, zoom = _camera(window)
     ex, ey, ezoom = _page_camera(window)
     assert (cx, cy) == (ex, ey), "应把画布中心对准视口中心"
-    assert zoom == pytest.approx(ezoom), "应缩放到整页铺满视口"
+    assert zoom == pytest.approx(ezoom), "应缩放到整页完整装进视口"
     assert window.viewer.layer_outline is None, "无图层 → 不画蓝色虚线框"
 
 

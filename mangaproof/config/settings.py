@@ -213,6 +213,14 @@ COMPARE_SPEED_TIERS: list[tuple[int, str]] = [
 DEFAULT_COMPARE_SPEED_HZ = 4
 DEFAULT_COMPARE_MODE = "auto"   # "auto" 自动切换 / "manual" 手动切换
 
+# 对比形式（2026-10，第二种对比形态）：
+# - "flash"（默认）：现有的 Original ↔ 背景闪切（自动/手动，按上面的速度）；
+# - "split"：左右并排——左栏原图（bg）、右栏成品图（merged），固定 50/50，
+#   共享相机；它是**显示模式**不是开关：Space 在分屏下静默无效，
+#   模式由设置页切换并持久化（A3/A4/A5/F2）。
+DEFAULT_COMPARE_FORM = "flash"
+COMPARE_FORMS: tuple[str, ...] = ("flash", "split")
+
 # 裸滚轮（不按修饰键）行为：默认上下平移；可切换为缩放（需求 §27）。
 # 触控板双指滚不受此设置影响，恒为双轴平移。
 DEFAULT_WHEEL_MODE = "pan"      # "pan" 上下移动 / "zoom" 缩放
@@ -857,7 +865,8 @@ class Settings:
     bg_ratio_enabled: bool = DEFAULT_BG_RATIO_ENABLED
     bg_display_ratio: float = DEFAULT_BG_DISPLAY_RATIO
     bg_copy_display_ratio: float = DEFAULT_BG_COPY_DISPLAY_RATIO
-    compare_mode: str = DEFAULT_COMPARE_MODE   # "auto" / "manual"
+    compare_form: str = DEFAULT_COMPARE_FORM   # "flash" / "split"
+    compare_mode: str = DEFAULT_COMPARE_MODE   # "auto" / "manual"（仅闪切）
     compare_speed_hz: int = DEFAULT_COMPARE_SPEED_HZ
     wheel_mode: str = DEFAULT_WHEEL_MODE       # "pan" / "zoom"
     issue_scope: str = DEFAULT_ISSUE_SCOPE     # "page"（当前页全部）/ "layer"（仅当前图层）
@@ -1084,6 +1093,9 @@ class SettingsManager:
             DEFAULT_BG_COPY_DISPLAY_RATIO,
         )
 
+        form = raw.get("compare_form", DEFAULT_COMPARE_FORM)
+        s.compare_form = form if form in COMPARE_FORMS else DEFAULT_COMPARE_FORM
+
         mode = raw.get("compare_mode", DEFAULT_COMPARE_MODE)
         s.compare_mode = mode if mode in ("auto", "manual") else DEFAULT_COMPARE_MODE
 
@@ -1220,6 +1232,7 @@ class SettingsManager:
                     "bg_ratio_enabled": self.settings.bg_ratio_enabled,
                     "bg_display_ratio": self.settings.bg_display_ratio,
                     "bg_copy_display_ratio": self.settings.bg_copy_display_ratio,
+                    "compare_form": self.settings.compare_form,
                     "compare_mode": self.settings.compare_mode,
                     "compare_speed_hz": self.settings.compare_speed_hz,
                     "wheel_mode": self.settings.wheel_mode,

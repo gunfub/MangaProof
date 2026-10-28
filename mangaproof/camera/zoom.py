@@ -3,8 +3,15 @@
 
 """自动缩放（需求 §20、§20.1）。
 
-比例定义：图层视觉内容的最长边，占 Viewport 对应尺寸的目标比例。
-例如最长边 1200、比例 80% → 最长边 ≈ 视口对应尺寸 × 80%。
+比例定义（**2026-10 改为 contain**）：
+
+- 目标矩形先按"完整装进视口"算一次 100%：宽、高两个方向各试一次，
+  取更小的那个（不会出现"长边铺满、另一边被裁"）；
+- 设置的显示比例（默认 60%）再乘在这个 100% 上。
+
+例：1600×2400 的页面放进 448×800 的半栏 → ``min(448/1600, 800/2400) = 0.28``；
+放进 900×800 的整窗 → ``min(900/1600, 800/2400) = 0.333``。旧算法只看长边
+（高度），在窄栏里会按 0.333 放大、左右各裁掉约 16%，所以本次统一改成 contain。
 
 2026-09-25 追加：``bg`` 与 ``bg 拷贝`` 可以各用一份独立比例（:func:`resolve_display_ratio`），
 其余图层继续用全局比例；功能默认关闭。
@@ -21,12 +28,13 @@ def fit_zoom(
     viewport_size: Tuple[float, float],
     ratio: float,
 ) -> Optional[float]:
-    """根据视觉边界与目标比例计算 zoom。
+    """根据视觉边界与目标比例计算 zoom（contain）。
 
     visual_bounds: (left, top, right, bottom) 世界坐标；
     viewport_size: (width, height)；
-    ratio: 最长边占视口对应尺寸的目标比例（如 0.6）。
+    ratio: 完整装进视口后，目标占视口对应尺寸的目标比例（如 0.6）。
 
+    100% = 宽、高都能装下（取 ``min(vw/w, vh/h)`` 那一侧），不是"长边铺满"。
     返回 None 表示无法计算（保持当前 Camera）。
     """
     if visual_bounds is None:
@@ -41,11 +49,8 @@ def fit_zoom(
     if vw <= 0 or vh <= 0:
         return None
 
-    # 最长边对应视口方向
-    if w >= h:
-        zoom = (vw * ratio) / w
-    else:
-        zoom = (vh * ratio) / h
+    # contain：宽、高各试一次，取更小的一侧（另一边自然落在视口内）
+    zoom = ratio * min(vw / w, vh / h)
     if not math.isfinite(zoom) or zoom <= 0:
         return None
     return zoom
