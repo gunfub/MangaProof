@@ -25,7 +25,8 @@
 - 控件被禁用时（如手动对比下的「切换速度」、PNG 下的「JPEG 质量」），**该行文本
   跟随置灰**——由 SettingsRow 的事件过滤统一处理，新增设置项不用再单独写；
 - 同一分类内的设置项行距 16px（原来 QFormLayout 默认约 6px，挤在一起不好认）；
-- 窗口默认 860×560（原来 560×560 太方；与「第三方许可」窗口同尺寸），侧边栏 180；
+- 窗口默认 860×576（原来 560×560 太方；宽度与「第三方许可」窗口同为 860，
+  高度 576 是为了让显示页多出的那一行不掉进滚动条），侧边栏 180；
 - 侧边栏文字与内容页标题**同一格式**（15px 粗体），并且页头与侧边栏第一项的文字
   顶端对齐（两边用同一个行高 `_nav_row_height`，各自垂直居中）；
 - 下拉框一律 NoWheelComboBox：**只能点开选**，滚轮不改值（见 ui/widgets.py），
@@ -74,6 +75,7 @@ from mangaproof.config.settings import (
     android_ui_scaling,
     COMPARE_SPEED_TIERS,
     CORE_SHORTCUT_LABELS,
+    DEFAULT_AUTO_LOCATE,
     DEFAULT_BG_COPY_DISPLAY_RATIO,
     DEFAULT_BG_DISPLAY_RATIO,
     DEFAULT_BG_RATIO_ENABLED,
@@ -139,9 +141,12 @@ NAV_ITEM_VPAD = 8
 #: 页头标题与侧边栏项共用的字号 / 字重（反馈要求"侧边栏文本同标题格式"）
 HEADER_FONT_QSS = "font-size: 15px; font-weight: bold;"
 
-#: 窗口默认尺寸（原 560×560 太方；与 ui/license_dialog.py 的 860×560 一致）
+#: 窗口默认尺寸（原 560×560 太方；宽度与 ui/license_dialog.py 的 860 一致）
+#: 高度 576 而非 560：显示页加了「切换图层时自动定位与缩放」一行后，主题字体下
+#: 9 行的内容高 382px，560 高的视口只有 378px —— 差 4px 就会出现滚动条。加 16px
+#: （= 一个 ROW_SPACING）换回"默认尺寸下不出滚动条"，见 tests/test_settings_dialog.py。
 #: 与最小尺寸（小屏仍可缩，每个分类页各自滚动）
-DEFAULT_DIALOG_SIZE = (860, 560)
+DEFAULT_DIALOG_SIZE = (860, 576)
 MINIMUM_DIALOG_SIZE = (720, 440)
 
 #: 同一分类内相邻设置项的纵向间距（原来 QFormLayout 默认约 6px）
@@ -680,6 +685,23 @@ class SettingsDialog(QDialog):
     # -- 各分类页内容 ------------------------------------------------------
 
     def _build_display_page(self, rows: QVBoxLayout) -> None:
+        # 自动定位与缩放（2026-10 需求方）：本页**总开关**。
+        #
+        # 必须先于 bg 块创建：`_update_bg_ratio_enabled()` 在下面的 bg 块末尾就会被
+        # 调用一次，它要读这个控件（见 _update_bg_ratio_enabled 的双条件）。
+        # 关闭后：切图层画布不动（只刷新蓝框）、翻页/打开文件回到整页视角、
+        # bg 独立比例整块失效（置灰但值保留）。
+        self.auto_locate_check = ToggleSwitch()
+        self.auto_locate_check.setChecked(self._settings.auto_locate)
+        self.auto_locate_check.setToolTip(
+            "开（默认）：切换图层 / 翻页后，把当前图层居中并按「显示比例」自动缩放。\n"
+            "关：切换图层时画布保持不动，只用蓝色虚线框标出当前图层；\n"
+            "    翻页 / 打开文件时回到「整页视角」（整页居中、显示比例 100%）；\n"
+            "    随时可按「定位当前图层」跳回当前图层。\n"
+            "关闭期间，下面的显示比例与 bg 独立比例都不参与自动定位（数值保留）。"
+        )
+        self._add_row(rows, "切换图层时自动定位与缩放", self.auto_locate_check)
+
         self.ratio_combo = NoWheelComboBox()
         for r in DISPLAY_RATIOS:
             self.ratio_combo.addItem(f"{int(r * 100)}%", r)
@@ -728,7 +750,8 @@ class SettingsDialog(QDialog):
             "· bg：PS 里名为 bg 的图层；没有 bg 名时按既有规则退回「最底部有内容的图层」；\n"
             "· bg 拷贝：名为「bg 拷贝」（中文版）或「bg copy」（英文版）的图层，\n"
             "  没有这一层就不套用独立比例、也不做兜底。\n"
-            "关闭（默认）时所有图层统一用全局比例，行为与旧版一致。"
+            "关闭（默认）时所有图层统一用全局比例，行为与旧版一致。\n"
+            "上面「切换图层时自动定位与缩放」关闭时，本项与其下两个比例一并置灰且不生效。"
         )
         self._add_row(rows, "bg / bg 拷贝 使用独立的自动显示比例", self.bg_ratio_check)
 
@@ -752,6 +775,10 @@ class SettingsDialog(QDialog):
             "文件里没有这一层时这个值不生效（没有就不做兜底）。"
         )
         self.bg_ratio_check.toggled.connect(self._update_bg_ratio_enabled)
+        # 自动定位关闭时，bg 整块（开关 + 两个比例）一并置灰，且**不能**被勾选"复活"：
+        # 判定写在 _update_bg_ratio_enabled 里、读两个控件的当前状态（而不是跟随某次
+        # toggled 事件），所以程序化 setChecked（复位、测试）也只会算出"仍然灰"。
+        self.auto_locate_check.toggled.connect(self._update_bg_ratio_enabled)
         self._update_bg_ratio_enabled()
         self._add_row(rows, "bg 自动显示比例：", self.bg_ratio_combo, expand=True)
         self._add_row(
@@ -1009,8 +1036,23 @@ class SettingsDialog(QDialog):
         self.compare_speed_combo.setEnabled(not manual)
 
     def _update_bg_ratio_enabled(self) -> None:
-        """bg 独立比例仅在开关打开时可用（关闭时置灰，值保留）。"""
-        enabled = self.bg_ratio_check.isChecked()
+        """bg 独立比例仅在**两个**开关都打开时可用（关闭时置灰，值保留）。
+
+        两个开关：
+        - 「切换图层时自动定位与缩放」（本页总开关，auto_locate）：关掉后自动定位根本
+          不发生，独立比例无处生效，所以整块（含这个开关本身）一起置灰；
+        - 「bg / bg 拷贝 使用独立的自动显示比例」（bg_ratio_check）：自己关时只灰两个下拉。
+
+        实现要点（改这里之前先读）：
+        1. **唯一写入点**：这两个下拉的 setEnabled 只允许出现在本函数里。若给
+           bg_ratio_check.toggled 另挂一段 `lambda c: combo.setEnabled(c)`，自动定位
+           关闭时一次勾选就会把本该灰着的下拉"复活"；
+        2. **读状态、不跟事件**：槽函数无参、每次按两个控件的 isChecked() 重算。程序化
+           setChecked（_reset_defaults、测试）同样会发 toggled，只有重算才不会算错。
+        """
+        auto = self.auto_locate_check.isChecked()
+        self.bg_ratio_check.setEnabled(auto)
+        enabled = auto and self.bg_ratio_check.isChecked()
         self.bg_ratio_combo.setEnabled(enabled)
         self.bg_copy_ratio_combo.setEnabled(enabled)
 
@@ -1033,6 +1075,9 @@ class SettingsDialog(QDialog):
         """
         idx = self.ratio_combo.findData(DEFAULT_DISPLAY_RATIO)
         self.ratio_combo.setCurrentIndex(max(0, idx))
+        # 总开关先复位：它的 toggled 会重算 bg 置灰；末尾再显式刷一次兜底
+        # （值恰好没变时 setChecked 不发信号，状态得靠这次调用保证）。
+        self.auto_locate_check.setChecked(DEFAULT_AUTO_LOCATE)
         self.bg_ratio_check.setChecked(DEFAULT_BG_RATIO_ENABLED)
         idx = self.bg_ratio_combo.findData(DEFAULT_BG_DISPLAY_RATIO)
         self.bg_ratio_combo.setCurrentIndex(max(0, idx))
@@ -1069,6 +1114,9 @@ class SettingsDialog(QDialog):
         self.report_quality_combo.setCurrentIndex(max(0, idx))
         self.report_hide_clean_check.setChecked(True)
         self._update_report_quality_enabled()
+        # bg 块按复位后的两个开关重新算置灰（复位到"自动定位开 + bg 关"→ 两个下拉灰、
+        # bg 开关本身可用）。显式调一次，不依赖 setChecked 是否恰好发了 toggled。
+        self._update_bg_ratio_enabled()
         # 界面缩放（仅 Android 存在该控件）：回到平台默认（Android 75% / 桌面 100%）
         if self.ui_scale_combo is not None:
             idx = self.ui_scale_combo.findData(default_ui_scale())
@@ -1085,6 +1133,9 @@ class SettingsDialog(QDialog):
         会在这里一次性全部写回。**不能**改成"只保存当前可见页"。
         """
         settings.layer_display_ratio = float(self.ratio_combo.currentData())
+        # 关闭状态的控件照样读值（Qt 的 isChecked 不受 setEnabled 影响）：
+        # 自动定位关闭时 bg 块虽置灰，用户已填的独立比例必须原样保留。
+        settings.auto_locate = self.auto_locate_check.isChecked()
         settings.bg_ratio_enabled = self.bg_ratio_check.isChecked()
         settings.bg_display_ratio = float(self.bg_ratio_combo.currentData())
         settings.bg_copy_display_ratio = float(self.bg_copy_ratio_combo.currentData())

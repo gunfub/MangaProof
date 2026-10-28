@@ -227,6 +227,13 @@ DEFAULT_ISSUE_SCOPE = "page"
 # 关闭后画布上不再绘制该框（定位、缩放行为完全不受影响）。
 DEFAULT_SHOW_LAYER_OUTLINE = True
 
+# 自动定位与缩放（需求 §17、§20）：切换图层 / 翻页后是否自动调整画布。
+# - 开（默认）：切图层 → 当前图层居中 + 显示比例；翻页 / 打开文件 → 同上（现行行为）；
+# - 关：切图层时画布**保持不动**，只用蓝色虚线框标出当前图层；翻页 / 打开文件时
+#   回到「整页视角」（整页居中 + 显示比例 100%，模板取画布，不算 bg）。
+#   显式「定位当前图层」不受影响；bg / bg 拷贝的独立比例同时失效（设置页整块置灰）。
+DEFAULT_AUTO_LOCATE = True
+
 # 蓝色虚线边界框的线宽（**屏幕像素**，cosmetic 画笔，不随画布缩放变化）：
 # - 最小 1px = 旧版原始粗细；
 # - 最大 6px = 问题红框的线宽（ui/viewer_widget.py 的 ISSUE_RECT_PEN_WIDTH，
@@ -856,6 +863,9 @@ class Settings:
     issue_scope: str = DEFAULT_ISSUE_SCOPE     # "page"（当前页全部）/ "layer"（仅当前图层）
     # 当前图层视觉边界虚线框（蓝色）是否显示（默认显示）
     show_layer_outline: bool = DEFAULT_SHOW_LAYER_OUTLINE
+    # 切换图层时自动定位与缩放（默认开）。关闭后切图层只更新蓝框、翻页回到整页视角；
+    # bg / bg 拷贝的独立比例同时失效（设置页整块置灰），见 DEFAULT_AUTO_LOCATE。
+    auto_locate: bool = DEFAULT_AUTO_LOCATE
     # 蓝色虚线框线宽（屏幕像素，1～6px，默认 3px；最大与问题红框同宽）
     layer_outline_width: float = DEFAULT_OUTLINE_WIDTH
     # 图层定位依据：POSITION_VISUAL（视觉边界，精准）/ POSITION_FAST（原始框，零解析）。
@@ -1094,6 +1104,8 @@ class SettingsManager:
         s.show_layer_outline = bool(
             raw.get("show_layer_outline", DEFAULT_SHOW_LAYER_OUTLINE)
         )
+        # 自动定位与缩放：缺键即默认开（旧版 settings.json 无需迁移，行为零变化）
+        s.auto_locate = bool(raw.get("auto_locate", DEFAULT_AUTO_LOCATE))
         # 蓝框线宽：只认 1～6px 的整档；缺键 / 越界 / 非数字 / 非整档一律回落默认值。
         # 离散档位用白名单而不是"夹取"，避免把 2.5 之类的损坏配置静默变成别的数。
         # 布尔值单独挡掉：JSON 的 true 会被 float() 变成 1.0，但它显然不是线宽。
@@ -1213,6 +1225,7 @@ class SettingsManager:
                     "wheel_mode": self.settings.wheel_mode,
                     "issue_scope": self.settings.issue_scope,
                     "show_layer_outline": self.settings.show_layer_outline,
+                    "auto_locate": self.settings.auto_locate,
                     "layer_outline_width": self.settings.layer_outline_width,
                     "position_mode": self.settings.position_mode,
                     "continuous_annotation": self.settings.continuous_annotation,

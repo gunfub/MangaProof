@@ -382,10 +382,11 @@ class MainWindow(QMainWindow):
         self._refresh_position_mode_ui()
 
     def _refresh_position_mode_ui(self) -> None:
-        """把当前「图层定位依据」反映到定位按钮 tooltip 与阶段 B 文案。
+        """把当前「图层定位依据」与「自动定位」状态反映到定位按钮 tooltip。
 
         快速模式是"看得见的状态"：用户随时能在状态栏与按钮提示里确认当前
-        走的是原始框（精度有限）还是视觉边界，不必回设置页找。
+        走的是原始框（精度有限）还是视觉边界，不必回设置页找。自动定位同理——
+        开关藏在设置页里，关掉后画布不再跟着图层走，这个 tooltip 是唯一的常驻提示。
         """
         fast = self.settings.position_mode == POSITION_FAST
         tip = "把当前图层定位到视口中心，并按显示比例自动缩放"
@@ -394,6 +395,11 @@ class MainWindow(QMainWindow):
             if fast
             else "\n当前定位依据：视觉内容边界（精准，按图层实际内容居中）"
         )
+        if not self.settings.auto_locate:
+            tip += (
+                "\n自动定位：已关闭（切图层不移动画布，翻页回到整页视角）\n"
+                "　　　　　本按钮仍可随时把当前图层拉回视口中心"
+            )
         self.action_recenter.setToolTip(tip)
         self._update_preload_label()
 
@@ -1157,8 +1163,9 @@ class MainWindow(QMainWindow):
             self._request_open_file(rel, restore=True)
         self._refresh_all_panels()
         self._mark_dirty(save_immediately=False)
-        # 布局完成后重新定位一次（窗口尺寸此时才确定）
-        QTimer.singleShot(0, self.recenter_current_layer)
+        # 布局完成后重新定位一次（窗口尺寸此时才确定）；自动定位关闭时这一步
+        # 改算「整页视角」，见 _reposition_after_layout。
+        QTimer.singleShot(0, self._reposition_after_layout)
         self.viewer.setFocus()
         log.info("任务已加载：%s（%s）", task.task_name, task.task_type)
 
@@ -1457,10 +1464,18 @@ class MainWindow(QMainWindow):
             self._current_index = -1
             self.viewer.set_issues(self._viewer_issues())
             self._refresh_viewer_outline()
+            # 零图层文件也要有可看的视图：自动定位关闭时同样回到整页视角
+            if not self.settings.auto_locate:
+                self._fit_page_view()
             return
 
         index = self._choose_layer_index(rel, restore)
-        self._select_layer_internal(index)
+        # 打开 / 翻页的**第一帧**：开关开着 → 定位到当前图层；关着 → 不定位，
+        # 改由下面 _fit_page_view() 把画布摆到「整页视角」（只写一次相机，不抖）。
+        auto = self.settings.auto_locate
+        self._select_layer_internal(index, auto_position=auto)
+        if not auto:
+            self._fit_page_view()
         # 文件与图层都落定后再刷新方向键：_switch_file 是异步的，"刚设置
         # _current_file"那一刻任务/图层状态还没确定，早刷新会算出错误的上/下边界。
         self._refresh_nav_pad()
@@ -1841,8 +1856,19 @@ class MainWindow(QMainWindow):
             )
             self.warmup_label.setStyleSheet("color: #4caf50;")
 
-    def _select_layer_internal(self, index: int) -> None:
-        """切换图层统一行为（需求 §12）：停对比 → Original → 切换 → 定位 → 缩放。"""
+    def _select_layer_internal(self, index: int, *, auto_position: Optional[bool] = None) -> None:
+        """切换图层统一行为（需求 §12）：停对比 → Original → 切换 → 定位 → 缩放。
+
+        ``auto_position``：本次是否自动居中与缩放。
+        - ``None``（默认）：跟随设置「切换图层时自动定位与缩放」（``auto_locate``），
+          图层切换走这一支；
+        - ``True`` / ``False``：显式指定（打开文件 / 翻页的首帧由 ``_open_file_internal``
+          直接传开关值：开 → 定位到当前图层，关 → 不定位、改摆整页视角）。
+
+        关闭自动定位时**只跳过那一次相机调用**：蓝色虚线框照旧刷新（它要的图层
+        数据与自动定位同源，见 _refresh_viewer_outline），也**不能**提前 return，
+        否则蓝框会跟着一起消失。
+        """
         self._compare.interrupt()
         doc = self.current_doc
         if doc is None or not (0 <= index < len(doc.layers)):
@@ -1859,12 +1885,18 @@ class MainWindow(QMainWindow):
 
         self.viewer.set_issues(self._viewer_issues())
         self._refresh_viewer_outline()
-        # 自动定位 + 自动缩放（需求 §17、§20；bg / bg 拷贝 可用独立比例，§20.2）
-        self.viewer.recenter_on_layer(
-            info,
-            self._effective_display_ratio(info),
-            self.settings.position_mode,
-        )
+        if auto_position is None:
+            auto_position = self.settings.auto_locate
+        if auto_position:
+            # 自动定位 + 自动缩放（需求 §17、§20；bg / bg 拷贝 可用独立比例，§20.2）
+            self.viewer.recenter_on_layer(
+                info,
+                self._effective_display_ratio(info),
+                self.settings.position_mode,
+            )
+        else:
+            # 画布保持不动，只用蓝框提示当前图层（需求方 2026-10 开关）
+            log.debug("自动定位已关闭：切到图层 %s 只刷新蓝框", info.id)
         self._refresh_issue_panel()
         self.viewer.setFocus()
 
@@ -1925,10 +1957,18 @@ class MainWindow(QMainWindow):
         可单测）；这里只负责把当前文档的两个图层 id 查出来，并且**功能关闭时一次
         查询都不做**——`bg_layer_id()` 在"文件里没有 bg 名"时会走内容探测（触发
         图层像素提取），不该让默认关闭的用户承担这个代价。
+
+        「自动定位与缩放」关闭时同样一律用全局比例（设置页那三行整体置灰）：
+        此时唯一的调用方是显式「定位当前图层」，按需求方口径独立比例不生效，
+        顺带也躲掉上面那次可能的内容探测。
         """
         settings = self.settings
         doc = self.current_doc
-        enabled = bool(settings.bg_ratio_enabled) and doc is not None
+        enabled = (
+            bool(settings.bg_ratio_enabled)
+            and bool(settings.auto_locate)
+            and doc is not None
+        )
         return resolve_display_ratio(
             global_ratio=settings.layer_display_ratio,
             per_layer_enabled=enabled,
@@ -1940,7 +1980,12 @@ class MainWindow(QMainWindow):
         )
 
     def recenter_current_layer(self) -> None:
-        """显式重新定位（需求 §27）。"""
+        """显式重新定位（需求 §27）。
+
+        不受「切换图层时自动定位与缩放」影响：开关关掉后，这是把画布拉回当前
+        图层的唯一入口。比例恒用**全局**显示比例（关闭期间 bg 独立比例不生效，
+        见 _effective_display_ratio）。
+        """
         doc = self.current_doc
         if doc is None or not (0 <= self._current_index < len(doc.layers)):
             return
@@ -1950,6 +1995,36 @@ class MainWindow(QMainWindow):
             self._effective_display_ratio(info),
             self.settings.position_mode,
         )
+
+    def _fit_page_view(self) -> None:
+        """整页基准视角：整页居中 + 显示比例 100%（自动定位关闭时用）。
+
+        模板取**画布** ``(0, 0, W, H)``，不查 bg：`bg_layer_id()` 的回退分支要解
+        图层像素（UI 线程 0.3～1s），而正常 PSD 里 bg 边界与画布逐像素相同。
+        「显示比例 100%」是满档语义（最长边正好铺满视口），与设置项那个比例无关。
+        """
+        doc = self.current_doc
+        if doc is None:
+            return
+        try:
+            width, height = doc.size
+        except Exception:            # 文档已释放 / 尺寸不可用 → 保持当前 Camera
+            log.exception("整页视角：取画布尺寸失败")
+            return
+        if width <= 0 or height <= 0:
+            return
+        self.viewer.recenter_on_rect((0, 0, width, height), 1.0)
+
+    def _reposition_after_layout(self) -> None:
+        """窗口布局完成后的补定位（_attach_task 的 QTimer 槽）。
+
+        窗口尺寸此时才确定，所以整页视角也要在这里重算一次；开关开着时行为与
+        改造前一致（重新定位到当前图层）。
+        """
+        if self.settings.auto_locate:
+            self.recenter_current_layer()
+        else:
+            self._fit_page_view()
 
     # ================================================================= 监制操作（需求 §14～§16）
 
@@ -2794,6 +2869,7 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.settings, self, intro=intro)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
             old_position_mode = self.settings.position_mode
+            old_auto_locate = self.settings.auto_locate
             dialog.apply_to(self.settings)
             self._save_settings()
             self._rebuild_shortcuts()
@@ -2805,13 +2881,20 @@ class MainWindow(QMainWindow):
             self._refresh_viewer_issues()  # 红框显示范围（整页/仅当前图层）热应用
             idx = self.ratio_combo.findData(self.settings.layer_display_ratio)
             self.ratio_combo.setCurrentIndex(max(0, idx))
+            # 「定位当前图层」按钮 tooltip 常显当前定位依据 + 自动定位状态
+            self._refresh_position_mode_ui()
             # 定位依据可能变了：蓝框语义、预热策略、当前视图都要跟着变
             mode_changed = old_position_mode != self.settings.position_mode
             if mode_changed:
                 self._on_position_mode_changed(old_position_mode)
             else:
                 self._refresh_viewer_outline()  # 蓝色虚线边界框开关热应用
-                self.recenter_current_layer()
+                # 自动定位关闭时改设置**不挪画布**（改个快捷键画布就跳回图层太刺眼）；
+                # 反之把它从关改成开时立刻定位一次，让开关"看得见效果"。
+                if self.settings.auto_locate:
+                    self.recenter_current_layer()
+            if old_auto_locate != self.settings.auto_locate:
+                log.info("自动定位与缩放：%s", "开" if self.settings.auto_locate else "关")
             # 控制台开关即时生效（打包产物下隐藏/恢复控制台窗口）。
             # AllocConsole 可能阻塞数百毫秒，放后台线程避免 UI 卡顿。
             import threading
@@ -2849,7 +2932,9 @@ class MainWindow(QMainWindow):
             self._request_layer_switch(self._current_index)
         else:
             self._refresh_viewer_outline()
-            self.recenter_current_layer()
+            # 自动定位关闭时不挪画布，只换蓝框语义（与切图层同一口径）
+            if self.settings.auto_locate:
+                self.recenter_current_layer()
         if self.task is not None and self._current_file:
             self._schedule_preloads(self._current_file)
         log.info("定位依据切换：%s → %s", old_mode, self.settings.position_mode)
@@ -2880,7 +2965,9 @@ class MainWindow(QMainWindow):
             return
         self.settings.layer_display_ratio = ratio
         self._save_settings()
-        self.recenter_current_layer()
+        # 自动定位关闭时改比例只存值、不挪画布：它只影响「定位当前图层」那一下
+        if self.settings.auto_locate:
+            self.recenter_current_layer()
 
     # ================================================================= 面板刷新
 

@@ -241,6 +241,31 @@ class ViewerWidget(QWidget):
 
     # -- 相机定位（需求 §17、§18、§20） ---------------------------------
 
+    def recenter_on_rect(self, rect, ratio: float) -> None:
+        """把世界坐标矩形 (left, top, right, bottom) 居中到视口并按比例缩放。
+
+        **相机写入的唯一入口**：图层定位（:meth:`recenter_on_layer`）与「整页视角」
+        （主窗口在「自动定位」关闭时翻页 / 打开文件）都从这里进——两份缩放公式
+        各自漂移过一次就很难再对齐。
+
+        退化矩形、或 fit_zoom 算不出缩放时**保持当前 Camera**（需求 §18.1）。
+        """
+        if rect is None:
+            return
+        left, top, right, bottom = (float(v) for v in rect)
+        if right <= left or bottom <= top:
+            log.info("目标矩形退化 %s，保持当前 Camera", rect)
+            return
+        new_zoom = fit_zoom((left, top, right, bottom), (self.width(), self.height()), ratio)
+        if new_zoom is None:
+            log.info("目标矩形 %s 无法自动缩放，保持当前 Camera", rect)
+            return
+        self._camera.center_on((left + right) / 2.0, (top + bottom) / 2.0)
+        self._camera.zoom = new_zoom
+        self._camera.clamp_zoom()
+        self.camera_changed.emit()
+        self.update()
+
     def recenter_on_layer(self, info, ratio: float, position_mode: str = POSITION_VISUAL) -> None:
         """图层定位 → 视口中心 + 按比例自动缩放。
 
@@ -262,18 +287,7 @@ class ViewerWidget(QWidget):
                 position_mode,
             )
             return
-        left, top, right, bottom = target
-        center = ((left + right) / 2.0, (top + bottom) / 2.0)
-        vw, vh = self.width(), self.height()
-        new_zoom = fit_zoom(target, (vw, vh), ratio)
-        if new_zoom is None:
-            log.info("图层 %s 无法自动缩放，保持当前 Camera", info.id)
-            return
-        self._camera.center_on(*center)
-        self._camera.zoom = new_zoom
-        self._camera.clamp_zoom()
-        self.camera_changed.emit()
-        self.update()
+        self.recenter_on_rect(target, ratio)
 
     # ------------------------------------------------------------------ 绘制
 

@@ -309,10 +309,11 @@ def test_header_matches_first_nav_item(qapp):
 
 
 def test_boolean_settings_are_pill_switches(qapp):
-    """7 个布尔设置全部是胶囊开关；文本在行标签上，开关本身不显示文字。"""
+    """8 个布尔设置全部是胶囊开关；文本在行标签上，开关本身不显示文字。"""
     dlg = _dialog()
     try:
         attrs = (
+            "auto_locate_check",
             "bg_ratio_check",
             "layer_outline_check",
             "recursive_check",
@@ -528,7 +529,7 @@ def test_scrollbar_sits_on_baseline_and_controls_keep_gap(qapp):
         assert bar.mapTo(dlg, QPoint(0, 0)).x() - _right(dlg.ratio_combo, dlg) == SCROLL_GAP
 
         # 3) 恢复高度：滚动条隐藏，控件回到基线
-        dlg.resize(860, 560)
+        dlg.resize(*DEFAULT_DIALOG_SIZE)
         qapp.processEvents()
         qapp.processEvents()
         assert not bar.isVisible()
