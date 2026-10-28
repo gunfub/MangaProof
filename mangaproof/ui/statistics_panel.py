@@ -7,6 +7,7 @@
 - 当前 PSD：图层状态芯片（可点击跳转，需求 §43）+ 2×2 统计卡片；
 - 总体统计：3×2 统计卡片 + 总体进度条；
 - 统计值使用语义颜色（通过绿 / 未通过红 / 未监制灰 / 问题橙）。
+- 芯片换行：每行最多 CHIP_COLUMNS 个，见该常量的注释（别按"能塞多少塞多少"改）。
 """
 
 from __future__ import annotations
@@ -41,6 +42,20 @@ CHIP_STYLES = {
     PASSED: (COLOR_PASS, "✓"),
     FAILED: (COLOR_FAIL, "✗"),
 }
+
+#: 芯片墙每行最多几个。**不要按"左栏还能塞几个"往上调**：左栏宽度不归这里管。
+#:
+#: 左栏（QDockWidget）的宽度由同一个左栏里的 PSD 文件列表决定——QListWidget 默认
+#: sizeHint 256px + FilePanel 边距 12px = 268px；统计面板再扣掉自己的边距
+#: （面板 12 + 分组 8）后只有 248px 可用。
+#:
+#: 芯片 22px，``chip_layout.setSpacing(2)`` 是**最小**间距、不是恒定间距：数量少时
+#: QGridLayout 会把多余宽度摊到列间（看起来就是"间距自动变大 + 整行居中"），所以
+#: 一行能排几个只取决于**最小**宽度：10 个 = 10×22 + 9×2 = 238px，正好放得下；
+#: 11 个 = 262px、12 个 = 286px 就顶穿可用宽度了，而 QGridLayout 的最小宽度会反过来
+#: 把左 dock 撑到 282 / 306px（画布被挤掉 14 / 38px，用户看到的是"界面莫名被撑宽
+#: 两个格子"）。12 列时代的实测与定位手法见 docs/开发踩坑记录.md 第 8 条。
+CHIP_COLUMNS = 10
 
 
 def _stat_cell(value: str, label: str, color: str = COLOR_TEXT) -> QLabel:
@@ -155,7 +170,7 @@ class StatisticsPanel(QWidget):
                 chip.setFixedSize(22, 22)
                 chip.clicked.connect(lambda _=False, i=idx: self.layer_chip_clicked.emit(i))
                 self._chips.append(chip)
-                row, col = divmod(idx, 12)
+                row, col = divmod(idx, CHIP_COLUMNS)
                 self.chip_layout.addWidget(chip, row, col)
         self._layer_names = list(layer_names)
         self._update_chips(statuses, issue_counts)
