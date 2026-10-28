@@ -25,8 +25,8 @@
 - 控件被禁用时（如手动对比下的「切换速度」、PNG 下的「JPEG 质量」），**该行文本
   跟随置灰**——由 SettingsRow 的事件过滤统一处理，新增设置项不用再单独写；
 - 同一分类内的设置项行距 16px（原来 QFormLayout 默认约 6px，挤在一起不好认）；
-- 窗口默认 860×576（原来 560×560 太方；宽度与「第三方许可」窗口同为 860，
-  高度 576 是为了让显示页多出的那一行不掉进滚动条），侧边栏 180；
+- 窗口默认 903×588（原来 860×560 太方；两者同宽高比 43:28，这是为容纳显示页多出的
+  一行而等比放大的一档），侧边栏 180；
 - 侧边栏文字与内容页标题**同一格式**（15px 粗体），并且页头与侧边栏第一项的文字
   顶端对齐（两边用同一个行高 `_nav_row_height`，各自垂直居中）；
 - 下拉框一律 NoWheelComboBox：**只能点开选**，滚轮不改值（见 ui/widgets.py），
@@ -141,12 +141,13 @@ NAV_ITEM_VPAD = 8
 #: 页头标题与侧边栏项共用的字号 / 字重（反馈要求"侧边栏文本同标题格式"）
 HEADER_FONT_QSS = "font-size: 15px; font-weight: bold;"
 
-#: 窗口默认尺寸（原 560×560 太方；宽度与 ui/license_dialog.py 的 860 一致）
-#: 高度 576 而非 560：显示页加了「切换图层时自动定位与缩放」一行后，主题字体下
-#: 9 行的内容高 382px，560 高的视口只有 378px —— 差 4px 就会出现滚动条。加 16px
-#: （= 一个 ROW_SPACING）换回"默认尺寸下不出滚动条"，见 tests/test_settings_dialog.py。
+#: 窗口默认尺寸。**宽高比 43:28（= 860:560）是硬约束**，改尺寸必须横竖等比，
+#: 唯一保持该比例的整数放大档是 903×588（+5%）。
+#: 为什么不在 860×560：显示页加了「切换图层时自动定位与缩放」一行后，主题字体下
+#: 9 行的内容高 382px，560 高的视口只有 378px —— 差 4px 就会出现滚动条，
+#: 所以等比放大一档（视口 406px，余量 24px），见 tests/test_settings_dialog.py。
 #: 与最小尺寸（小屏仍可缩，每个分类页各自滚动）
-DEFAULT_DIALOG_SIZE = (860, 576)
+DEFAULT_DIALOG_SIZE = (903, 588)
 MINIMUM_DIALOG_SIZE = (720, 440)
 
 #: 同一分类内相邻设置项的纵向间距（原来 QFormLayout 默认约 6px）
@@ -407,7 +408,7 @@ class SettingsDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("MangaProof 设置")
-        # 默认横向（原 560×560 太方）：侧边栏 180 + 内容区约 640
+        # 默认横向：侧边栏 180 + 内容区约 650（903 - 两倍 GUTTER - 侧边栏 - GUTTER）
         self.resize(*DEFAULT_DIALOG_SIZE)
         self.setMinimumSize(*MINIMUM_DIALOG_SIZE)
         self._settings = settings

@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import patch
 
@@ -193,6 +194,21 @@ def test_window_is_landscape_and_fits_768p(qapp):
     finally:
         dlg.close()
         dlg.deleteLater()
+
+
+def test_default_size_keeps_the_43_28_aspect_ratio(qapp):
+    """窗口默认尺寸的宽高比是**硬约束**（43:28 = 860:560）：改尺寸必须横竖等比。
+
+    2026-10 给显示页加「自动定位与缩放」一行时，560 高的视口比内容少 4px 会冒出
+    滚动条，于是等比放大一档到 903×588 —— 不是把高度单独拉长。
+    """
+    width, height = DEFAULT_DIALOG_SIZE
+    assert Fraction(width, height) == Fraction(43, 28), (
+        f"默认窗口 {width}×{height} 破坏了 43:28 的宽高比"
+    )
+    # 等比放大后仍明显横向、且比旧尺寸大（否则改尺寸没意义）
+    assert width > height * 1.3
+    assert width >= 860 and height >= 560
 
 
 def test_rows_are_more_spacious_than_before(qapp):
